@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
 const authMiddleware = require('../middleware/auth');
+const idempotency = require('../middleware/idempotency');
 const { send, history } = require('../controllers/paymentController');
 
 const validate = (req, res, next) => {
@@ -18,6 +19,7 @@ router.post('/send',
     body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES'])
   ],
   validate,
+  idempotency,
   send
 );
 
