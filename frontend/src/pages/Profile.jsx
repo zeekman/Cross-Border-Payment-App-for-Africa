@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { LogOut, User, Mail, Phone, Wallet, Copy, CheckCheck, Plus, Globe } from 'lucide-react';
+import { LogOut, User, Mail, Phone, Wallet, Copy, CheckCheck, Plus, Globe, Trash2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { truncateAddress } from '../utils/currency';
 import api from '../utils/api';
@@ -23,6 +23,18 @@ export default function Profile() {
   const [showAddContact, setShowAddContact] = useState(false);
   const [newContact, setNewContact] = useState({ name: '', wallet_address: '' });
 
+  React.useEffect(() => {
+    const fetchContacts = async () => {
+      try {
+        const res = await api.get('/wallet/contacts');
+        setContacts(res.data.contacts || []);
+      } catch {
+        toast.error('Failed to load contacts');
+      }
+    };
+    fetchContacts();
+  }, []);
+
   const copyAddress = () => {
     navigator.clipboard.writeText(user?.wallet_address || '');
     setCopied(true);
@@ -35,8 +47,8 @@ export default function Profile() {
   const addContact = async (e) => {
     e.preventDefault();
     try {
-      await api.post('/wallet/contacts', newContact);
-      setContacts([...contacts, { ...newContact, id: Date.now() }]);
+      const res = await api.post('/wallet/contacts', newContact);
+      setContacts([...contacts, res.data.contact]);
       setNewContact({ name: '', wallet_address: '' });
       setShowAddContact(false);
       toast.success(t('profile.contact_added'));
@@ -45,6 +57,15 @@ export default function Profile() {
     }
   };
 
+  const deleteContact = async (id) => {
+    if (!window.confirm('Are you sure you want to delete this contact?')) return;
+    try {
+      await api.delete(`/wallet/contacts/${id}`);
+      setContacts(contacts.filter(c => c.id !== id));
+      toast.success('Contact deleted');
+    } catch {
+      toast.error('Failed to delete contact');
+    }
   const changeLanguage = (code) => {
     i18n.changeLanguage(code);
     localStorage.setItem('afripay_lang', code);
@@ -147,16 +168,23 @@ export default function Profile() {
         {contacts.length === 0 ? (
           <p className="text-gray-500 text-sm text-center py-4">{t('profile.no_contacts')}</p>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-2" data-testid="contacts-list">
             {contacts.map(c => (
-              <div key={c.id} className="flex items-center gap-3">
+              <div key={c.id} className="flex items-center gap-3 group">
                 <div className="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center text-sm font-semibold text-white">
-                  {c.name[0].toUpperCase()}
+                  {c.name?.[0]?.toUpperCase()}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-white">{c.name}</p>
+                  <p className="text-sm text-white font-medium">{c.name}</p>
                   <p className="text-xs text-gray-500 font-mono truncate">{truncateAddress(c.wallet_address)}</p>
                 </div>
+                <button
+                  onClick={() => deleteContact(c.id)}
+                  className="p-1.5 text-gray-500 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                  aria-label="Delete contact"
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
             ))}
           </div>

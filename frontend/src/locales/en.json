@@ -8,6 +8,7 @@
     "save": "Save Contact",
     "add": "Add",
     "cancel": "Cancel",
+    "retry": "Try Again",
     "sign_out": "Sign Out",
     "no_transactions": "No transactions found",
     "see_all": "See all"
@@ -65,6 +66,13 @@
     "recipient_label": "Recipient Address",
     "recipient_placeholder": "G... Stellar address",
     "contacts": "Contacts",
+    "scan_qr": "Scan QR Code",
+    "qr_scanned": "Address scanned successfully!",
+    "qr_invalid": "Invalid Stellar address in QR code",
+    "qr_hint": "Point at a Stellar address QR code",
+    "camera_permission_denied": "Camera access denied. Please check your permissions.",
+    "camera_not_found": "No camera found on this device",
+    "camera_error": "Failed to access camera",
     "amount": "Amount",
     "memo": "Memo (optional)",
     "memo_placeholder": "Payment note...",
@@ -76,7 +84,7 @@
     "confirm_send": "Confirm & Send",
     "success": "Payment sent successfully!",
     "error": "Transaction failed"
-  },
+  }
   "receive": {
     "title": "Receive Money",
     "subtitle": "Share your wallet address or QR code to receive payments",

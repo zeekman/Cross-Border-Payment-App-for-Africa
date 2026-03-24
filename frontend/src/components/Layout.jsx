@@ -12,6 +12,8 @@ const navItems = [
   { to: '/profile', icon: User, label: 'Profile' },
 ];
 
+const isTestnet = process.env.REACT_APP_STELLAR_NETWORK !== 'mainnet';
+
 export default function Layout() {
   const { logout } = useAuth();
   const navigate = useNavigate();
@@ -20,6 +22,11 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen bg-gray-950 flex flex-col">
+      {isTestnet && (
+        <div className="bg-yellow-400 text-yellow-900 text-center text-xs font-semibold py-1">
+          ⚠️ TESTNET — Do not use real funds
+        </div>
+      )}
       {/* Top bar */}
       <header className="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2">

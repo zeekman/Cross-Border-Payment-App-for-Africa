@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Send, ChevronDown, Users } from 'lucide-react';
+import { ArrowLeft, Send, ChevronDown, Users, Camera } from 'lucide-react';
 import api from '../utils/api';
 import { CURRENCIES, convertFromXLM } from '../utils/currency';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import QRScanner from '../components/QRScanner';
 
 export default function SendMoney() {
   const navigate = useNavigate();
@@ -12,6 +13,7 @@ export default function SendMoney() {
   const [form, setForm] = useState({ recipient_address: '', amount: '', asset: 'XLM', memo: '' });
   const [contacts, setContacts] = useState([]);
   const [showContacts, setShowContacts] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
   const [loading, setLoading] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
 
@@ -57,12 +59,22 @@ export default function SendMoney() {
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="text-sm text-gray-400">{t('send.recipient_label')}</label>
-            {contacts.length > 0 && (
-              <button type="button" onClick={() => setShowContacts(!showContacts)}
-                className="text-primary-500 text-xs flex items-center gap-1">
-                <Users size={12} /> {t('send.contacts')}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowScanner(true)}
+                className="text-primary-500 hover:text-primary-400 p-1.5 rounded-lg hover:bg-primary-500/10 transition-colors"
+                title={t('send.scan_qr')}
+              >
+                <Camera size={16} />
               </button>
-            )}
+              {contacts.length > 0 && (
+                <button type="button" onClick={() => setShowContacts(!showContacts)}
+                  className="text-primary-500 text-xs flex items-center gap-1">
+                  <Users size={12} /> {t('send.contacts')}
+                </button>
+              )}
+            </div>
           </div>
           <input
             type="text"
@@ -167,6 +179,13 @@ export default function SendMoney() {
           </button>
         )}
       </form>
+
+      {/* QR Scanner Modal */}
+      <QRScanner
+        isOpen={showScanner}
+        onClose={() => setShowScanner(false)}
+        onScan={(address) => setForm({ ...form, recipient_address: address })}
+      />
     </div>
   );
 }

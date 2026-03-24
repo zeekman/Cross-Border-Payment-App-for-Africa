@@ -91,6 +91,15 @@ The system is transparent, auditable on Stellar Explorer, and modular enough to 
 │   │       └── currency.js             # XLM conversion rates + formatters
 │   ├── .env.example
 │   └── package.json
+├── contracts/
+│   ├── escrow/                         # Soroban smart contract (Rust/WASM)
+│   │   ├── src/
+│   │   │   └── lib.rs                  # Escrow contract implementation
+│   │   ├── Cargo.toml
+│   │   └── README.md                   # Contract ABI & documentation
+│   ├── README.md                       # Contracts directory guide
+│   ├── deploy.sh                       # Deployment script for all contracts
+│   └── .gitignore
 └── database/
     └── schema.sql                      # PostgreSQL tables + indexes
 ```
@@ -312,13 +321,17 @@ FRONTEND_URL=http://localhost:3000
 
 ## Roadmap
 
-- [ ] Soroban smart contract escrow (Rust/WASM on Stellar)
+- [x] Soroban smart contract escrow (Rust/WASM on Stellar) — [contracts/escrow/](https://github.com/kay-ai/Cross-Border-Payment-App-for-Africa/tree/main/contracts/escrow)
+  - Trustless three-party escrow model
+  - Automated fee calculation and collection
+  - Full event logging for transparency
+  - Comprehensive test coverage
 - [ ] Multi-currency USDC support with on-chain fee deduction
 - [ ] Agent registration and payout confirmation system
 - [ ] Batch remittance processing
 - [ ] Agent reputation system
 - [ ] Dispute resolution mechanism
-- [ ] Time-locked escrow options
+- [ ] Time-locked escrow options (auto-refund after 30 days)
 - [ ] Push notifications for transaction events
 - [ ] Integration with fiat on/off ramps (M-Pesa, Flutterwave, Paystack)
 - [ ] Mobile app (React Native)
