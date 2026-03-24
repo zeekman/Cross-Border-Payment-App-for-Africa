@@ -1,0 +1,107 @@
+{
+  "common": {
+    "back": "Koma",
+    "loading": "Ana lodawa...",
+    "copied": "An kwafa!",
+    "copy": "Kwafi Adireshi",
+    "share": "Raba",
+    "save": "Ajiye Tuntuɓi",
+    "add": "Ƙara",
+    "cancel": "Soke",
+    "sign_out": "Fita",
+    "no_transactions": "Ba a sami ma'amaloli ba",
+    "see_all": "Duba duka"
+  },
+  "welcome": {
+    "tagline": "Biyan kuɗi na ƙetare iyaka da sauri da aminci ta hanyar Stellar blockchain",
+    "feature_instant_title": "Canja Kuɗi Nan Take",
+    "feature_instant_desc": "Aika kuɗi a fadin Afirka cikin daƙiƙa",
+    "feature_secure_title": "Aminci da Tsaro",
+    "feature_secure_desc": "Tsaro ta hanyar blockchain",
+    "feature_multi_title": "Kuɗaɗe Da Yawa",
+    "feature_multi_desc": "NGN, GHS, KES, USD da sauransu",
+    "get_started": "Fara",
+    "have_account": "Ina da asusun riga"
+  },
+  "register": {
+    "title": "Buɗe asusun",
+    "subtitle": "Shiga tare da miliyoyin masu aika kuɗi a Afirka",
+    "full_name": "Cikakken Suna",
+    "email": "Imel",
+    "phone": "Waya (ba tilas ba)",
+    "password": "Kalmar sirri",
+    "password_placeholder": "Mafi ƙaranci haruffa 8",
+    "submit": "Buɗe Asusun",
+    "submitting": "Ana buɗe asusun...",
+    "have_account": "Kana da asusun riga?",
+    "sign_in": "Shiga",
+    "success": "An buɗe asusun! Jakar kuɗinka tana shirye.",
+    "error": "Rajista ta kasa"
+  },
+  "login": {
+    "title": "Barka da dawowar",
+    "subtitle": "Shiga asusunka na AfriPay",
+    "email": "Imel",
+    "password": "Kalmar sirri",
+    "password_placeholder": "Kalmar sirrinka",
+    "submit": "Shiga",
+    "submitting": "Ana shiga...",
+    "no_account": "Ba ka da asusun?",
+    "create_one": "Ƙirƙiri ɗaya",
+    "error": "Shiga ya kasa"
+  },
+  "dashboard": {
+    "greeting": "Barka,",
+    "total_balance": "Jimlar Kuɗi",
+    "send": "Aika",
+    "receive": "Karɓa",
+    "recent_activity": "Ayyukan Kwanan Nan",
+    "no_transactions": "Babu ma'amaloli tukuna. Aika biyan kuɗi na farko!",
+    "to": "Zuwa",
+    "from": "Daga"
+  },
+  "send": {
+    "title": "Aika Kuɗi",
+    "recipient_label": "Adireshi na Mai Karɓa",
+    "recipient_placeholder": "G... adireshi na Stellar",
+    "contacts": "Tuntuɓi",
+    "amount": "Adadin Kuɗi",
+    "memo": "Memo (ba tilas ba)",
+    "memo_placeholder": "Bayani na biyan kuɗi...",
+    "confirm_title": "Tabbatar da Ma'amala",
+    "confirm_to": "Zuwa:",
+    "confirm_amount": "Adadin Kuɗi:",
+    "confirm_memo": "Memo:",
+    "review": "Duba Biyan Kuɗi",
+    "confirm_send": "Tabbatar da Aika",
+    "success": "An aika biyan kuɗi!",
+    "error": "Ma'amala ta kasa"
+  },
+  "receive": {
+    "title": "Karɓi Kuɗi",
+    "subtitle": "Raba adireshi ko lambar QR don karɓar biyan kuɗi",
+    "address_label": "Adireshi Jakar Stellar Naka",
+    "warning": "Aika XLM ko kadarorin Stellar kawai zuwa wannan adireshi",
+    "address_copied": "An kwafi adireshi!"
+  },
+  "history": {
+    "title": "Tarihi",
+    "filter_all": "duka",
+    "filter_sent": "aika",
+    "filter_received": "karɓa",
+    "to": "Zuwa:",
+    "from": "Daga:"
+  },
+  "profile": {
+    "title": "Bayanan Kai",
+    "member": "Memba na AfriPay",
+    "frequent_contacts": "Tuntuɓin Da Ake Amfani Da Su",
+    "no_contacts": "Babu tuntuɓi tukuna",
+    "contact_name_placeholder": "Sunan tuntuɓi",
+    "contact_address_placeholder": "G... adireshi na jakar kuɗi",
+    "contact_added": "An ƙara tuntuɓi",
+    "contact_error": "Ƙara tuntuɓi ya kasa",
+    "address_copied": "An kwafi adireshi!",
+    "language": "Harshe"
+  }
+}

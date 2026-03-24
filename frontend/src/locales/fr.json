@@ -1,0 +1,107 @@
+{
+  "common": {
+    "back": "Retour",
+    "loading": "Chargement...",
+    "copied": "Copié !",
+    "copy": "Copier l'adresse",
+    "share": "Partager",
+    "save": "Enregistrer le contact",
+    "add": "Ajouter",
+    "cancel": "Annuler",
+    "sign_out": "Se déconnecter",
+    "no_transactions": "Aucune transaction trouvée",
+    "see_all": "Voir tout"
+  },
+  "welcome": {
+    "tagline": "Paiements transfrontaliers rapides et sécurisés propulsés par la blockchain Stellar",
+    "feature_instant_title": "Transferts instantanés",
+    "feature_instant_desc": "Envoyez de l'argent en Afrique en quelques secondes",
+    "feature_secure_title": "Sécurisé et fiable",
+    "feature_secure_desc": "Sécurité alimentée par la blockchain",
+    "feature_multi_title": "Multi-devises",
+    "feature_multi_desc": "NGN, GHS, KES, USD et plus",
+    "get_started": "Commencer",
+    "have_account": "J'ai déjà un compte"
+  },
+  "register": {
+    "title": "Créer un compte",
+    "subtitle": "Rejoignez des millions qui envoient de l'argent en Afrique",
+    "full_name": "Nom complet",
+    "email": "E-mail",
+    "phone": "Téléphone (facultatif)",
+    "password": "Mot de passe",
+    "password_placeholder": "Min. 8 caractères",
+    "submit": "Créer un compte",
+    "submitting": "Création du compte...",
+    "have_account": "Vous avez déjà un compte ?",
+    "sign_in": "Se connecter",
+    "success": "Compte créé ! Votre portefeuille est prêt.",
+    "error": "Échec de l'inscription"
+  },
+  "login": {
+    "title": "Bon retour",
+    "subtitle": "Connectez-vous à votre compte AfriPay",
+    "email": "E-mail",
+    "password": "Mot de passe",
+    "password_placeholder": "Votre mot de passe",
+    "submit": "Se connecter",
+    "submitting": "Connexion...",
+    "no_account": "Vous n'avez pas de compte ?",
+    "create_one": "En créer un",
+    "error": "Échec de la connexion"
+  },
+  "dashboard": {
+    "greeting": "Bonjour,",
+    "total_balance": "Solde total",
+    "send": "Envoyer",
+    "receive": "Recevoir",
+    "recent_activity": "Activité récente",
+    "no_transactions": "Aucune transaction. Envoyez votre premier paiement !",
+    "to": "À",
+    "from": "De"
+  },
+  "send": {
+    "title": "Envoyer de l'argent",
+    "recipient_label": "Adresse du destinataire",
+    "recipient_placeholder": "G... adresse Stellar",
+    "contacts": "Contacts",
+    "amount": "Montant",
+    "memo": "Mémo (facultatif)",
+    "memo_placeholder": "Note de paiement...",
+    "confirm_title": "Confirmer la transaction",
+    "confirm_to": "À :",
+    "confirm_amount": "Montant :",
+    "confirm_memo": "Mémo :",
+    "review": "Vérifier le paiement",
+    "confirm_send": "Confirmer et envoyer",
+    "success": "Paiement envoyé avec succès !",
+    "error": "Échec de la transaction"
+  },
+  "receive": {
+    "title": "Recevoir de l'argent",
+    "subtitle": "Partagez votre adresse de portefeuille ou QR code pour recevoir des paiements",
+    "address_label": "Votre adresse de portefeuille Stellar",
+    "warning": "Envoyez uniquement XLM ou des actifs Stellar à cette adresse",
+    "address_copied": "Adresse copiée !"
+  },
+  "history": {
+    "title": "Historique",
+    "filter_all": "tout",
+    "filter_sent": "envoyés",
+    "filter_received": "reçus",
+    "to": "À :",
+    "from": "De :"
+  },
+  "profile": {
+    "title": "Profil",
+    "member": "Membre AfriPay",
+    "frequent_contacts": "Contacts fréquents",
+    "no_contacts": "Aucun contact pour l'instant",
+    "contact_name_placeholder": "Nom du contact",
+    "contact_address_placeholder": "G... adresse du portefeuille",
+    "contact_added": "Contact ajouté",
+    "contact_error": "Échec de l'ajout du contact",
+    "address_copied": "Adresse copiée !",
+    "language": "Langue"
+  }
+}

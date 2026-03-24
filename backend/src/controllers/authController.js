@@ -43,6 +43,9 @@ async function register(req, res, next) {
     await db.query('COMMIT');
 
     await sendVerificationEmail(email, raw);
+    const token = jwt.sign({ userId, email, role: 'user' }, process.env.JWT_SECRET, {
+      expiresIn: process.env.JWT_EXPIRES_IN || '7d'
+    });
 
     res.status(201).json({ message: 'Account created. Please verify your email before logging in.' });
   } catch (err) {
@@ -57,6 +60,7 @@ async function login(req, res, next) {
 
     const result = await db.query(
       `SELECT u.id, u.full_name, u.email, u.password_hash, u.email_verified, w.public_key
+      `SELECT u.id, u.full_name, u.email, u.password_hash, u.role, w.public_key
        FROM users u LEFT JOIN wallets w ON w.user_id = u.id
        WHERE u.email = $1`,
       [email]
@@ -72,7 +76,7 @@ async function login(req, res, next) {
     }
 
     const token = jwt.sign(
-      { userId: user.id, email: user.email },
+      { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );

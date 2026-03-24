@@ -62,16 +62,58 @@ async function getBalance(publicKey) {
   }
 }
 
+// Resolve a Stellar Asset object, validating issuer config for non-XLM assets
+function resolveAsset(asset) {
+  if (asset === 'XLM') return StellarSdk.Asset.native();
+
+  const issuer = process.env[`${asset}_ISSUER`];
+  if (!issuer) {
+    const err = new Error(`${asset}_ISSUER is not configured. Cannot send ${asset} payments.`);
+    err.status = 500;
+    throw err;
+  }
+  return new StellarSdk.Asset(asset, issuer);
+}
+
+// Check that the recipient has a trustline for the given asset
+async function checkTrustline(recipientPublicKey, assetObj) {
+  let recipientAccount;
+  try {
+    recipientAccount = await server.loadAccount(recipientPublicKey);
+  } catch (e) {
+    if (e.response?.status === 404) {
+      const err = new Error('Recipient account does not exist on the Stellar network.');
+      err.status = 400;
+      throw err;
+    }
+    throw e;
+  }
+
+  const hasTrustline = recipientAccount.balances.some(
+    b => b.asset_code === assetObj.code && b.asset_issuer === assetObj.issuer
+  );
+
+  if (!hasTrustline) {
+    const err = new Error(
+      `Recipient has no ${assetObj.code} trustline. They must add a trustline before receiving ${assetObj.code}.`
+    );
+    err.status = 400;
+    throw err;
+  }
+}
+
 // Send payment
 async function sendPayment({ senderPublicKey, encryptedSecretKey, recipientPublicKey, amount, asset = 'XLM', memo }) {
+  const assetObj = resolveAsset(asset);
+
+  // Trustline check is only required for non-native assets
+  if (asset !== 'XLM') {
+    await checkTrustline(recipientPublicKey, assetObj);
+  }
+
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-
   const senderAccount = await server.loadAccount(senderPublicKey);
-
-  const assetObj = asset === 'XLM'
-    ? StellarSdk.Asset.native()
-    : new StellarSdk.Asset(asset, process.env[`${asset}_ISSUER`]);
 
   const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
     fee: await server.fetchBaseFee(),
