@@ -7,9 +7,12 @@ CREATE TABLE users (
   full_name     VARCHAR(100) NOT NULL,
   email         VARCHAR(255) UNIQUE NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
-  phone         VARCHAR(20),
-  created_at    TIMESTAMPTZ DEFAULT NOW(),
-  updated_at    TIMESTAMPTZ DEFAULT NOW()
+  phone              VARCHAR(20),
+  email_verified     BOOLEAN     NOT NULL DEFAULT FALSE,
+  verification_token VARCHAR(64),
+  token_expires_at   TIMESTAMPTZ,
+  created_at         TIMESTAMPTZ DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE wallets (
