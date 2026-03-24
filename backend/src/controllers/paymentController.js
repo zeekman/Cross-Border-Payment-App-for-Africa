@@ -1,34 +1,67 @@
-const { v4: uuidv4 } = require('uuid');
-const db = require('../db');
-const { sendPayment } = require('../services/stellar');
+const { v4: uuidv4 } = require("uuid");
+const db = require("../db");
+const { sendPayment } = require("../services/stellar");
+
+// Configurable KYC transaction threshold in USD equivalent
+const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
+
+// Approximate XLM/USD rate — in production replace with a live price feed
+const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
+
+function estimateUSDValue(amount, asset) {
+  if (asset === "USD" || asset === "USDC") return parseFloat(amount);
+  if (asset === "XLM") return parseFloat(amount) * XLM_USD_RATE;
+  return 0; // unknown assets default to 0 — do not block
+}
 
 // Basic fraud check: block if >5 transactions in last 10 minutes
 async function fraudCheck(walletAddress) {
   const result = await db.query(
     `SELECT COUNT(*) FROM transactions
      WHERE sender_wallet = $1 AND created_at > NOW() - INTERVAL '10 minutes'`,
-    [walletAddress]
+    [walletAddress],
   );
   return parseInt(result.rows[0].count) >= 5;
 }
 
 async function send(req, res, next) {
   try {
-    const { recipient_address, amount, asset = 'XLM', memo } = req.body;
+    const { recipient_address, amount, asset = "XLM", memo } = req.body;
+
+    // KYC check for high-value transactions
+    const estimatedUSD = estimateUSDValue(amount, asset);
+    if (estimatedUSD >= KYC_THRESHOLD_USD) {
+      const kycResult = await db.query("SELECT kyc_status FROM users WHERE id = $1", [
+        req.user.userId,
+      ]);
+      const kycStatus = kycResult.rows[0]?.kyc_status || "unverified";
+      if (kycStatus !== "verified") {
+        return res.status(403).json({
+          error:
+            "KYC verification required for transactions above $" +
+            KYC_THRESHOLD_USD +
+            " USD equivalent.",
+          kyc_status: kycStatus,
+          code: "KYC_REQUIRED",
+        });
+      }
+    }
 
     // Get sender wallet
     const walletResult = await db.query(
-      'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
-      [req.user.userId]
+      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+      [req.user.userId],
     );
-    if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
+    if (!walletResult.rows[0]) return res.status(404).json({ error: "Wallet not found" });
 
     const { public_key, encrypted_secret_key } = walletResult.rows[0];
 
     // Fraud protection
     const isSuspicious = await fraudCheck(public_key);
     if (isSuspicious) {
-      return res.status(429).json({ error: 'Transaction limit reached. Please wait before sending again.' });
+      return res
+        .status(429)
+        .json({ error: "Transaction limit reached. Please wait before sending again." });
     }
 
     // Broadcast to Stellar
@@ -38,7 +71,7 @@ async function send(req, res, next) {
       recipientPublicKey: recipient_address,
       amount,
       asset,
-      memo
+      memo,
     });
 
     // Save to DB
@@ -46,25 +79,24 @@ async function send(req, res, next) {
     await db.query(
       `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'completed')`,
-      [txId, public_key, recipient_address, amount, asset, memo || null, transactionHash]
+      [txId, public_key, recipient_address, amount, asset, memo || null, transactionHash],
     );
 
     res.json({
-      message: 'Payment sent successfully',
+      message: "Payment sent successfully",
       transaction: {
         id: txId,
         tx_hash: transactionHash,
         ledger,
         amount,
         asset,
-        recipient: recipient_address
-      }
+        recipient: recipient_address,
+      },
     });
   } catch (err) {
-    // Log failed transaction
     if (err.response?.data) {
       const extras = err.response.data?.extras;
-      return res.status(400).json({ error: 'Transaction failed', details: extras });
+      return res.status(400).json({ error: "Transaction failed", details: extras });
     }
     next(err);
   }
@@ -73,10 +105,10 @@ async function send(req, res, next) {
 async function history(req, res, next) {
   try {
     const walletResult = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1',
-      [req.user.userId]
+      "SELECT public_key FROM wallets WHERE user_id = $1",
+      [req.user.userId],
     );
-    if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
+    if (!walletResult.rows[0]) return res.status(404).json({ error: "Wallet not found" });
 
     const { public_key } = walletResult.rows[0];
     const result = await db.query(
@@ -84,12 +116,12 @@ async function history(req, res, next) {
        FROM transactions
        WHERE sender_wallet = $1 OR recipient_wallet = $1
        ORDER BY created_at DESC LIMIT 50`,
-      [public_key]
+      [public_key],
     );
 
-    const transactions = result.rows.map(tx => ({
+    const transactions = result.rows.map((tx) => ({
       ...tx,
-      direction: tx.sender_wallet === public_key ? 'sent' : 'received'
+      direction: tx.sender_wallet === public_key ? "sent" : "received",
     }));
 
     res.json({ transactions });
