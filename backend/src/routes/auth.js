@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
-const { register, login, getMe } = require('../controllers/authController');
+const { register, login, getMe, setPIN, verifyPIN } = require('../controllers/authController');
+const { register, login, verifyEmail, getMe } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
 
 const validate = (req, res, next) => {
@@ -28,6 +29,25 @@ router.post('/login',
   login
 );
 
+router.get('/verify-email', verifyEmail);
 router.get('/me', authMiddleware, getMe);
+
+router.post('/set-pin',
+  authMiddleware,
+  [
+    body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')
+  ],
+  validate,
+  setPIN
+);
+
+router.post('/verify-pin',
+  authMiddleware,
+  [
+    body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')
+  ],
+  validate,
+  verifyPIN
+);
 
 module.exports = router;

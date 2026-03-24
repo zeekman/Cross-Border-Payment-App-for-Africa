@@ -1,6 +1,6 @@
 import React from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Send, Download, Clock, User, LogOut } from 'lucide-react';
+import { LayoutDashboard, Send, Download, Clock, User, LogOut, Webhook } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 const navItems = [
@@ -8,6 +8,7 @@ const navItems = [
   { to: '/send', icon: Send, label: 'Send' },
   { to: '/receive', icon: Download, label: 'Receive' },
   { to: '/history', icon: Clock, label: 'History' },
+  { to: '/webhooks', icon: Webhook, label: 'Webhooks' },
   { to: '/profile', icon: User, label: 'Profile' },
 ];
 

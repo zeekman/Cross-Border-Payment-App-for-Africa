@@ -32,7 +32,9 @@ export default function TransactionHistory() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(() => { fetchTransactions(); }, []);
 
   const loadMore = () => {
     const nextPage = page + 1;
@@ -88,6 +90,16 @@ export default function TransactionHistory() {
       {loading ? (
         <div className="flex justify-center py-12">
           <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : error ? (
+        <div className="text-center py-12 text-gray-500">
+          <p className="text-red-400 mb-3">{error}</p>
+          <button
+            onClick={fetchTransactions}
+            className="px-4 py-2 bg-primary-500 text-white rounded-lg text-sm hover:bg-primary-600 transition-colors"
+          >
+            Try again
+          </button>
         </div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-12 text-gray-500">

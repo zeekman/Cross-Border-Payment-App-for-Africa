@@ -12,6 +12,7 @@ import ReceiveMoney from "./pages/ReceiveMoney";
 import TransactionHistory from "./pages/TransactionHistory";
 import Profile from "./pages/Profile";
 import KYCVerification from "./pages/KYCVerification";
+import Webhooks from "./pages/Webhooks";
 import Layout from "./components/Layout";
 
 function PrivateRoute({ children }) {
@@ -80,6 +81,7 @@ export default function App() {
             <Route path="history" element={<TransactionHistory />} />
             <Route path="profile" element={<Profile />} />
             <Route path="kyc" element={<KYCVerification />} />
+            <Route path="webhooks" element={<Webhooks />} />
           </Route>
         </Routes>
       </BrowserRouter>

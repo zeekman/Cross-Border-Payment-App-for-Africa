@@ -1,3 +1,14 @@
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const rateLimit = require("express-rate-limit");
+
+const authRoutes = require("./routes/auth");
+const walletRoutes = require("./routes/wallet");
+const paymentRoutes = require("./routes/payments");
+const kycRoutes = require("./routes/kyc");
+const adminRoutes = require("./routes/admin");
+const webhookRoutes = require("./routes/webhooks");
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -31,6 +42,12 @@ const authLimiter = rateLimit({
 app.use('/api', limiter);
 app.use('/api/auth', authLimiter);
 
+app.use("/api/auth", authRoutes);
+app.use("/api/wallet", walletRoutes);
+app.use("/api/payments", paymentRoutes);
+app.use("/api/kyc", kycRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/webhooks", webhookRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/payments', paymentRoutes);

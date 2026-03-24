@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 import { Eye, EyeOff, ArrowLeft } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import PINSetupModal from '../components/PINSetupModal';
 
 export default function Register() {
   const { register } = useAuth();
@@ -12,6 +13,7 @@ export default function Register() {
   const [form, setForm] = useState({ full_name: '', email: '', password: '', phone: '' });
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [showPINSetup, setShowPINSetup] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -19,12 +21,17 @@ export default function Register() {
     try {
       await register(form);
       toast.success(t('register.success'));
-      navigate('/dashboard');
+      // Show PIN setup modal instead of immediately navigating
+      setShowPINSetup(true);
     } catch (err) {
       toast.error(err.response?.data?.error || t('register.error'));
     } finally {
       setLoading(false);
     }
+  };
+
+  const handlePINSetupComplete = () => {
+    navigate('/dashboard');
   };
 
   return (
@@ -103,6 +110,13 @@ export default function Register() {
           <Link to="/login" className="text-primary-500 hover:underline">{t('register.sign_in')}</Link>
         </p>
       </div>
+
+      {/* PIN Setup Modal */}
+      <PINSetupModal
+        isOpen={showPINSetup}
+        onClose={() => setShowPINSetup(false)}
+        onSuccess={handlePINSetupComplete}
+      />
     </div>
   );
 }
