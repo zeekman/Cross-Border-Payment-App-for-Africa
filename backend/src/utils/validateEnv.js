@@ -8,7 +8,7 @@ function validateEnv() {
   const horizonUrl = process.env.STELLAR_HORIZON_URL || EXPECTED_URLS.testnet;
   const expected = EXPECTED_URLS[network];
 
-  if (expected && !horizonUrl.includes(expected.replace('https://', ''))) {
+  if (expected && horizonUrl.replace(/\/$/, '') !== expected) {
     console.error(
       `\x1b[31m[CONFIG ERROR] STELLAR_HORIZON_URL "${horizonUrl}" does not match STELLAR_NETWORK="${network}". Expected URL containing "${expected}".\x1b[0m`
     );
