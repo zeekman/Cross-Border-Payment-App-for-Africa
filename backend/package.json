@@ -6,10 +6,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "jest"
+    "test": "jest --runInBand",
     "migrate": "node-pg-migrate -m ../database/migrations up",
     "migrate:rollback": "node-pg-migrate -m ../database/migrations down 1"
-    "test": "jest --runInBand"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0",
@@ -27,7 +26,6 @@
   },
   "devDependencies": {
     "jest": "^30.3.0",
-    "nodemon": "^3.0.2"
     "nodemon": "^3.0.2",
     "supertest": "^7.2.2"
   }
