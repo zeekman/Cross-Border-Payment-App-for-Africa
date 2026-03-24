@@ -3,10 +3,12 @@ import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 import { Eye, EyeOff, ArrowLeft } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [form, setForm] = useState({ email: '', password: '' });
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -18,7 +20,7 @@ export default function Login() {
       await login(form.email, form.password);
       navigate('/dashboard');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Login failed');
+      toast.error(err.response?.data?.error || t('login.error'));
     } finally {
       setLoading(false);
     }
@@ -27,17 +29,17 @@ export default function Login() {
   return (
     <div className="min-h-screen bg-gray-950 flex flex-col px-6 py-8">
       <button onClick={() => navigate('/')} className="text-gray-400 hover:text-white mb-6 flex items-center gap-1">
-        <ArrowLeft size={18} /> Back
+        <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
       <div className="flex-1 flex flex-col justify-center max-w-sm mx-auto w-full">
         <div className="w-12 h-12 bg-primary-500 rounded-2xl flex items-center justify-center text-2xl mb-6">💸</div>
-        <h2 className="text-2xl font-bold text-white mb-1">Welcome back</h2>
-        <p className="text-gray-400 mb-8">Sign in to your AfriPay account</p>
+        <h2 className="text-2xl font-bold text-white mb-1">{t('login.title')}</h2>
+        <p className="text-gray-400 mb-8">{t('login.subtitle')}</p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="text-sm text-gray-400 mb-1 block">Email</label>
+            <label className="text-sm text-gray-400 mb-1 block">{t('login.email')}</label>
             <input
               type="email"
               required
@@ -48,12 +50,12 @@ export default function Login() {
             />
           </div>
           <div>
-            <label className="text-sm text-gray-400 mb-1 block">Password</label>
+            <label className="text-sm text-gray-400 mb-1 block">{t('login.password')}</label>
             <div className="relative">
               <input
                 type={showPass ? 'text' : 'password'}
                 required
-                placeholder="Your password"
+                placeholder={t('login.password_placeholder')}
                 value={form.password}
                 onChange={e => setForm({ ...form, password: e.target.value })}
                 className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors pr-12"
@@ -70,13 +72,13 @@ export default function Login() {
             disabled={loading}
             className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl transition-colors mt-2"
           >
-            {loading ? 'Signing in...' : 'Sign In'}
+            {loading ? t('login.submitting') : t('login.submit')}
           </button>
         </form>
 
         <p className="text-center text-gray-500 mt-6 text-sm">
-          Don't have an account?{' '}
-          <Link to="/register" className="text-primary-500 hover:underline">Create one</Link>
+          {t('login.no_account')}{' '}
+          <Link to="/register" className="text-primary-500 hover:underline">{t('login.create_one')}</Link>
         </p>
       </div>
     </div>

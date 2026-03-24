@@ -5,10 +5,12 @@ import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 import { truncateAddress, CURRENCIES, convertFromXLM } from '../utils/currency';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 
 export default function Dashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [wallet, setWallet] = useState(null);
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -48,7 +50,7 @@ export default function Dashboard() {
       {/* Greeting */}
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-gray-400 text-sm">Good day,</p>
+          <p className="text-gray-400 text-sm">{t('dashboard.greeting')}</p>
           <h2 className="text-xl font-bold text-white">{user?.full_name?.split(' ')[0]} 👋</h2>
         </div>
         <button onClick={() => window.location.reload()} className="text-gray-400 hover:text-white">
@@ -58,7 +60,7 @@ export default function Dashboard() {
 
       {/* Balance Card */}
       <div className="bg-gradient-to-br from-primary-600 to-primary-700 rounded-2xl p-5 shadow-lg shadow-primary-500/20">
-        <p className="text-primary-100 text-sm mb-1">Total Balance</p>
+        <p className="text-primary-100 text-sm mb-1">{t('dashboard.total_balance')}</p>
         <div className="flex items-end gap-2 mb-4">
           <span className="text-4xl font-bold text-white">{parseFloat(displayBalance).toLocaleString()}</span>
           <span className="text-primary-200 mb-1">{selectedCurrency}</span>
@@ -101,7 +103,7 @@ export default function Dashboard() {
           <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
             <Send size={20} />
           </div>
-          <span className="font-semibold text-white">Send</span>
+          <span className="font-semibold text-white">{t('dashboard.send')}</span>
         </button>
         <button
           onClick={() => navigate('/receive')}
@@ -110,22 +112,22 @@ export default function Dashboard() {
           <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
             <Download size={20} />
           </div>
-          <span className="font-semibold text-white">Receive</span>
+          <span className="font-semibold text-white">{t('dashboard.receive')}</span>
         </button>
       </div>
 
       {/* Recent transactions */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-white">Recent Activity</h3>
+          <h3 className="font-semibold text-white">{t('dashboard.recent_activity')}</h3>
           <button onClick={() => navigate('/history')} className="text-primary-500 text-sm hover:underline">
-            See all
+            {t('common.see_all')}
           </button>
         </div>
 
         {transactions.length === 0 ? (
           <div className="bg-gray-900 rounded-xl p-6 text-center text-gray-500 text-sm">
-            No transactions yet. Send your first payment!
+            {t('dashboard.no_transactions')}
           </div>
         ) : (
           <div className="space-y-2">
@@ -138,7 +140,9 @@ export default function Dashboard() {
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-white font-medium truncate">
-                    {tx.direction === 'sent' ? `To ${truncateAddress(tx.recipient_wallet)}` : `From ${truncateAddress(tx.sender_wallet)}`}
+                    {tx.direction === 'sent'
+                      ? `${t('dashboard.to')} ${truncateAddress(tx.recipient_wallet)}`
+                      : `${t('dashboard.from')} ${truncateAddress(tx.sender_wallet)}`}
                   </p>
                   <p className="text-xs text-gray-500">{new Date(tx.created_at).toLocaleDateString()}</p>
                 </div>

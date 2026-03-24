@@ -1,0 +1,107 @@
+{
+  "common": {
+    "back": "Rudi",
+    "loading": "Inapakia...",
+    "copied": "Imenakiliwa!",
+    "copy": "Nakili Anwani",
+    "share": "Shiriki",
+    "save": "Hifadhi Mawasiliano",
+    "add": "Ongeza",
+    "cancel": "Ghairi",
+    "sign_out": "Toka",
+    "no_transactions": "Hakuna miamala iliyopatikana",
+    "see_all": "Ona yote"
+  },
+  "welcome": {
+    "tagline": "Malipo ya haraka na salama ya kimataifa yanayoendeshwa na Stellar blockchain",
+    "feature_instant_title": "Uhamisho wa Papo Hapo",
+    "feature_instant_desc": "Tuma pesa Afrika kwa sekunde",
+    "feature_secure_title": "Salama na Imara",
+    "feature_secure_desc": "Usalama unaotumia blockchain",
+    "feature_multi_title": "Sarafu Nyingi",
+    "feature_multi_desc": "NGN, GHS, KES, USD na zaidi",
+    "get_started": "Anza",
+    "have_account": "Nina akaunti tayari"
+  },
+  "register": {
+    "title": "Fungua akaunti",
+    "subtitle": "Jiunge na mamilioni wanaotuma pesa Afrika",
+    "full_name": "Jina Kamili",
+    "email": "Barua pepe",
+    "phone": "Simu (si lazima)",
+    "password": "Nenosiri",
+    "password_placeholder": "Angalau herufi 8",
+    "submit": "Fungua Akaunti",
+    "submitting": "Inafungua akaunti...",
+    "have_account": "Una akaunti tayari?",
+    "sign_in": "Ingia",
+    "success": "Akaunti imefunguliwa! Pochi yako iko tayari.",
+    "error": "Usajili umeshindwa"
+  },
+  "login": {
+    "title": "Karibu tena",
+    "subtitle": "Ingia kwenye akaunti yako ya AfriPay",
+    "email": "Barua pepe",
+    "password": "Nenosiri",
+    "password_placeholder": "Nenosiri lako",
+    "submit": "Ingia",
+    "submitting": "Inaingia...",
+    "no_account": "Huna akaunti?",
+    "create_one": "Fungua moja",
+    "error": "Kuingia kumeshindwa"
+  },
+  "dashboard": {
+    "greeting": "Habari,",
+    "total_balance": "Jumla ya Salio",
+    "send": "Tuma",
+    "receive": "Pokea",
+    "recent_activity": "Shughuli za Hivi Karibuni",
+    "no_transactions": "Hakuna miamala bado. Tuma malipo yako ya kwanza!",
+    "to": "Kwa",
+    "from": "Kutoka"
+  },
+  "send": {
+    "title": "Tuma Pesa",
+    "recipient_label": "Anwani ya Mpokeaji",
+    "recipient_placeholder": "G... anwani ya Stellar",
+    "contacts": "Mawasiliano",
+    "amount": "Kiasi",
+    "memo": "Kumbukumbu (si lazima)",
+    "memo_placeholder": "Maelezo ya malipo...",
+    "confirm_title": "Thibitisha Muamala",
+    "confirm_to": "Kwa:",
+    "confirm_amount": "Kiasi:",
+    "confirm_memo": "Kumbukumbu:",
+    "review": "Kagua Malipo",
+    "confirm_send": "Thibitisha na Tuma",
+    "success": "Malipo yametumwa!",
+    "error": "Muamala umeshindwa"
+  },
+  "receive": {
+    "title": "Pokea Pesa",
+    "subtitle": "Shiriki anwani yako ya pochi au msimbo wa QR kupokea malipo",
+    "address_label": "Anwani Yako ya Pochi ya Stellar",
+    "warning": "Tuma XLM au mali za Stellar pekee kwenye anwani hii",
+    "address_copied": "Anwani imenakiliwa!"
+  },
+  "history": {
+    "title": "Historia",
+    "filter_all": "yote",
+    "filter_sent": "zilizotumwa",
+    "filter_received": "zilizopokelewa",
+    "to": "Kwa:",
+    "from": "Kutoka:"
+  },
+  "profile": {
+    "title": "Wasifu",
+    "member": "Mwanachama wa AfriPay",
+    "frequent_contacts": "Mawasiliano ya Mara kwa Mara",
+    "no_contacts": "Hakuna mawasiliano bado",
+    "contact_name_placeholder": "Jina la mawasiliano",
+    "contact_address_placeholder": "G... anwani ya pochi",
+    "contact_added": "Mawasiliano yameongezwa",
+    "contact_error": "Imeshindwa kuongeza mawasiliano",
+    "address_copied": "Anwani imenakiliwa!",
+    "language": "Lugha"
+  }
+}

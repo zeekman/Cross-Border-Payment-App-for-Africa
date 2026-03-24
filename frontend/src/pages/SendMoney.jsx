@@ -4,9 +4,11 @@ import { ArrowLeft, Send, ChevronDown, Users } from 'lucide-react';
 import api from '../utils/api';
 import { CURRENCIES, convertFromXLM } from '../utils/currency';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 
 export default function SendMoney() {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [form, setForm] = useState({ recipient_address: '', amount: '', asset: 'XLM', memo: '' });
   const [contacts, setContacts] = useState([]);
   const [showContacts, setShowContacts] = useState(false);
@@ -26,16 +28,16 @@ export default function SendMoney() {
     if (!confirmed) { setConfirmed(true); return; }
     setLoading(true);
     try {
-      const res = await api.post('/payments/send', {
+      await api.post('/payments/send', {
         recipient_address: form.recipient_address,
         amount: parseFloat(form.amount),
         asset: form.asset,
         memo: form.memo || undefined
       });
-      toast.success('Payment sent successfully!');
+      toast.success(t('send.success'));
       navigate('/dashboard');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Transaction failed');
+      toast.error(err.response?.data?.error || t('send.error'));
       setConfirmed(false);
     } finally {
       setLoading(false);
@@ -45,32 +47,31 @@ export default function SendMoney() {
   return (
     <div className="px-4 py-6 max-w-lg mx-auto">
       <button onClick={() => navigate(-1)} className="text-gray-400 hover:text-white mb-6 flex items-center gap-1">
-        <ArrowLeft size={18} /> Back
+        <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
-      <h2 className="text-2xl font-bold text-white mb-6">Send Money</h2>
+      <h2 className="text-2xl font-bold text-white mb-6">{t('send.title')}</h2>
 
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Recipient */}
         <div>
           <div className="flex items-center justify-between mb-1">
-            <label className="text-sm text-gray-400">Recipient Address</label>
+            <label className="text-sm text-gray-400">{t('send.recipient_label')}</label>
             {contacts.length > 0 && (
               <button type="button" onClick={() => setShowContacts(!showContacts)}
                 className="text-primary-500 text-xs flex items-center gap-1">
-                <Users size={12} /> Contacts
+                <Users size={12} /> {t('send.contacts')}
               </button>
             )}
           </div>
           <input
             type="text"
             required
-            placeholder="G... Stellar address"
+            placeholder={t('send.recipient_placeholder')}
             value={form.recipient_address}
             onChange={e => setForm({ ...form, recipient_address: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors font-mono text-sm"
           />
-          {/* Contacts dropdown */}
           {showContacts && contacts.length > 0 && (
             <div className="mt-1 bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
               {contacts.map(c => (
@@ -90,7 +91,7 @@ export default function SendMoney() {
 
         {/* Amount + Asset */}
         <div>
-          <label className="text-sm text-gray-400 mb-1 block">Amount</label>
+          <label className="text-sm text-gray-400 mb-1 block">{t('send.amount')}</label>
           <div className="flex gap-2">
             <input
               type="number"
@@ -120,11 +121,11 @@ export default function SendMoney() {
 
         {/* Memo */}
         <div>
-          <label className="text-sm text-gray-400 mb-1 block">Memo (optional)</label>
+          <label className="text-sm text-gray-400 mb-1 block">{t('send.memo')}</label>
           <input
             type="text"
             maxLength={28}
-            placeholder="Payment note..."
+            placeholder={t('send.memo_placeholder')}
             value={form.memo}
             onChange={e => setForm({ ...form, memo: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors"
@@ -134,11 +135,11 @@ export default function SendMoney() {
         {/* Confirmation preview */}
         {confirmed && (
           <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 space-y-2">
-            <p className="text-yellow-400 font-semibold text-sm">Confirm Transaction</p>
+            <p className="text-yellow-400 font-semibold text-sm">{t('send.confirm_title')}</p>
             <div className="text-sm text-gray-300 space-y-1">
-              <p>To: <span className="font-mono text-xs">{form.recipient_address.slice(0, 20)}...</span></p>
-              <p>Amount: <span className="text-white font-semibold">{form.amount} {form.asset}</span></p>
-              {form.memo && <p>Memo: {form.memo}</p>}
+              <p>{t('send.confirm_to')} <span className="font-mono text-xs">{form.recipient_address.slice(0, 20)}...</span></p>
+              <p>{t('send.confirm_amount')} <span className="text-white font-semibold">{form.amount} {form.asset}</span></p>
+              {form.memo && <p>{t('send.confirm_memo')} {form.memo}</p>}
             </div>
           </div>
         )}
@@ -155,14 +156,14 @@ export default function SendMoney() {
           {loading ? (
             <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
           ) : (
-            <><Send size={18} /> {confirmed ? 'Confirm & Send' : 'Review Payment'}</>
+            <><Send size={18} /> {confirmed ? t('send.confirm_send') : t('send.review')}</>
           )}
         </button>
 
         {confirmed && (
           <button type="button" onClick={() => setConfirmed(false)}
             className="w-full text-gray-400 hover:text-white text-sm py-2 transition-colors">
-            Cancel
+            {t('common.cancel')}
           </button>
         )}
       </form>

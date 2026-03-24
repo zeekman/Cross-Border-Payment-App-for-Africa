@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Send, Download, ExternalLink, Filter } from 'lucide-react';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS = {
   completed: 'text-primary-400 bg-primary-500/10',
@@ -12,9 +13,10 @@ const STATUS_COLORS = {
 
 export default function TransactionHistory() {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState('all'); // all | sent | received
+  const [filter, setFilter] = useState('all');
 
   useEffect(() => {
     api.get('/payments/history')
@@ -29,28 +31,34 @@ export default function TransactionHistory() {
     return true;
   });
 
+  const filters = [
+    { key: 'all', label: t('history.filter_all') },
+    { key: 'sent', label: t('history.filter_sent') },
+    { key: 'received', label: t('history.filter_received') },
+  ];
+
   return (
     <div className="px-4 py-6 max-w-lg mx-auto">
       <button onClick={() => navigate(-1)} className="text-gray-400 hover:text-white mb-6 flex items-center gap-1">
-        <ArrowLeft size={18} /> Back
+        <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-2xl font-bold text-white">History</h2>
+        <h2 className="text-2xl font-bold text-white">{t('history.title')}</h2>
         <Filter size={18} className="text-gray-400" />
       </div>
 
       {/* Filter tabs */}
       <div className="flex gap-2 mb-6">
-        {['all', 'sent', 'received'].map(f => (
+        {filters.map(f => (
           <button
-            key={f}
-            onClick={() => setFilter(f)}
+            key={f.key}
+            onClick={() => setFilter(f.key)}
             className={`px-4 py-1.5 rounded-full text-sm font-medium capitalize transition-colors ${
-              filter === f ? 'bg-primary-500 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'
+              filter === f.key ? 'bg-primary-500 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'
             }`}
           >
-            {f}
+            {f.label}
           </button>
         ))}
       </div>
@@ -62,7 +70,7 @@ export default function TransactionHistory() {
       ) : filtered.length === 0 ? (
         <div className="text-center py-12 text-gray-500">
           <p className="text-4xl mb-3">📭</p>
-          <p>No transactions found</p>
+          <p>{t('common.no_transactions')}</p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -83,8 +91,8 @@ export default function TransactionHistory() {
                   </div>
                   <p className="text-xs text-gray-500 mt-0.5">
                     {tx.direction === 'sent'
-                      ? `To: ${truncateAddress(tx.recipient_wallet)}`
-                      : `From: ${truncateAddress(tx.sender_wallet)}`}
+                      ? `${t('history.to')} ${truncateAddress(tx.recipient_wallet)}`
+                      : `${t('history.from')} ${truncateAddress(tx.sender_wallet)}`}
                   </p>
                   {tx.memo && <p className="text-xs text-gray-600 mt-0.5">"{tx.memo}"</p>}
                   <div className="flex items-center justify-between mt-2">

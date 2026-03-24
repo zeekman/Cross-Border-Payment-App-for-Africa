@@ -1,0 +1,107 @@
+{
+  "common": {
+    "back": "Back",
+    "loading": "Loading...",
+    "copied": "Copied!",
+    "copy": "Copy Address",
+    "share": "Share",
+    "save": "Save Contact",
+    "add": "Add",
+    "cancel": "Cancel",
+    "sign_out": "Sign Out",
+    "no_transactions": "No transactions found",
+    "see_all": "See all"
+  },
+  "welcome": {
+    "tagline": "Fast, secure cross-border payments powered by Stellar blockchain",
+    "feature_instant_title": "Instant Transfers",
+    "feature_instant_desc": "Send money across Africa in seconds",
+    "feature_secure_title": "Secure & Safe",
+    "feature_secure_desc": "Blockchain-powered security",
+    "feature_multi_title": "Multi-Currency",
+    "feature_multi_desc": "NGN, GHS, KES, USD and more",
+    "get_started": "Get Started",
+    "have_account": "I already have an account"
+  },
+  "register": {
+    "title": "Create account",
+    "subtitle": "Join millions sending money across Africa",
+    "full_name": "Full Name",
+    "email": "Email",
+    "phone": "Phone (optional)",
+    "password": "Password",
+    "password_placeholder": "Min. 8 characters",
+    "submit": "Create Account",
+    "submitting": "Creating account...",
+    "have_account": "Already have an account?",
+    "sign_in": "Sign in",
+    "success": "Account created! Your wallet is ready.",
+    "error": "Registration failed"
+  },
+  "login": {
+    "title": "Welcome back",
+    "subtitle": "Sign in to your AfriPay account",
+    "email": "Email",
+    "password": "Password",
+    "password_placeholder": "Your password",
+    "submit": "Sign In",
+    "submitting": "Signing in...",
+    "no_account": "Don't have an account?",
+    "create_one": "Create one",
+    "error": "Login failed"
+  },
+  "dashboard": {
+    "greeting": "Good day,",
+    "total_balance": "Total Balance",
+    "send": "Send",
+    "receive": "Receive",
+    "recent_activity": "Recent Activity",
+    "no_transactions": "No transactions yet. Send your first payment!",
+    "to": "To",
+    "from": "From"
+  },
+  "send": {
+    "title": "Send Money",
+    "recipient_label": "Recipient Address",
+    "recipient_placeholder": "G... Stellar address",
+    "contacts": "Contacts",
+    "amount": "Amount",
+    "memo": "Memo (optional)",
+    "memo_placeholder": "Payment note...",
+    "confirm_title": "Confirm Transaction",
+    "confirm_to": "To:",
+    "confirm_amount": "Amount:",
+    "confirm_memo": "Memo:",
+    "review": "Review Payment",
+    "confirm_send": "Confirm & Send",
+    "success": "Payment sent successfully!",
+    "error": "Transaction failed"
+  },
+  "receive": {
+    "title": "Receive Money",
+    "subtitle": "Share your wallet address or QR code to receive payments",
+    "address_label": "Your Stellar Wallet Address",
+    "warning": "Only send XLM or Stellar-based assets to this address",
+    "address_copied": "Address copied!"
+  },
+  "history": {
+    "title": "History",
+    "filter_all": "all",
+    "filter_sent": "sent",
+    "filter_received": "received",
+    "to": "To:",
+    "from": "From:"
+  },
+  "profile": {
+    "title": "Profile",
+    "member": "AfriPay Member",
+    "frequent_contacts": "Frequent Contacts",
+    "no_contacts": "No contacts yet",
+    "contact_name_placeholder": "Contact name",
+    "contact_address_placeholder": "G... wallet address",
+    "contact_added": "Contact added",
+    "contact_error": "Failed to add contact",
+    "address_copied": "Address copied!",
+    "language": "Language"
+  }
+}
