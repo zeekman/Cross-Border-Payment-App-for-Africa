@@ -49,6 +49,13 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
 });
+require('dotenv').config();
+const validateEnv = require('./utils/validateEnv');
+const logger = require('./utils/logger');
+
+validateEnv();
+
+const app = require('./app');
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => logger.info(`Server running on port ${PORT}`, { port: PORT }));

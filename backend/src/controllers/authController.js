@@ -60,8 +60,7 @@ async function login(req, res, next) {
     const { email, password } = req.body;
 
     const result = await db.query(
-      `SELECT u.id, u.full_name, u.email, u.password_hash, u.email_verified, w.public_key
-      `SELECT u.id, u.full_name, u.email, u.password_hash, u.role, w.public_key
+      `SELECT u.id, u.full_name, u.email, u.password_hash, u.email_verified, u.role, w.public_key
        FROM users u LEFT JOIN wallets w ON w.user_id = u.id
        WHERE u.email = $1`,
       [email]

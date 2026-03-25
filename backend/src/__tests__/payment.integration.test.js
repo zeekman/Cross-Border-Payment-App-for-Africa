@@ -50,6 +50,7 @@ process.env.KYC_THRESHOLD_USD = '100';
 process.env.XLM_USD_RATE      = '0.11';
 
 const express      = require('express');
+const StellarSdk   = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const idempotency  = require('../middleware/idempotency');
 const { send, history } = require('../controllers/paymentController');
@@ -68,7 +69,14 @@ app.post(
   '/api/payments/send',
   authMiddleware,
   [
-    body('recipient_address').notEmpty().withMessage('Recipient address is required'),
+    body('recipient_address')
+      .notEmpty().withMessage('Recipient address is required')
+      .custom((value) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
+          throw new Error('Invalid Stellar wallet address');
+        }
+        return true;
+      }),
     body('amount').isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
     body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES'])
   ],
@@ -97,8 +105,8 @@ app.use((err, req, res, next) => {
 // ---------------------------------------------------------------------------
 const JWT_SECRET       = 'test-jwt-secret';
 const USER_ID          = uuidv4();
-const SENDER_KEY       = 'GABC1SENDERWALLETADDRESSFORINTEGRATIONTESTINGONLY1234567';
-const RECIPIENT_KEY    = 'GXYZ1RECIPIENTWALLETADDRESSFORINTEGRATIONTESTING1234567';
+const SENDER_KEY       = 'GCSEQ5XE5YYKPITLT63FZ7LCW2JZNYVP3L2XKMGELRKGPNZXNNBVPOU3';
+const RECIPIENT_KEY    = 'GCUB4U3E5AXUY2OJOFKQGDL2ZIEAFHAXNERCZ4EEKF2J6IFIK7KYYPUI';
 const ENCRYPTED_SECRET = 'deadbeef:deadbeef01234567deadbeef01234567deadbeef01234567';
 const FAKE_TX_HASH     = 'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899';
 const FAKE_LEDGER      = 99;
@@ -266,7 +274,73 @@ describe('POST /api/payments/send — input validation', () => {
 });
 
 // ===========================================================================
-// POST /api/payments/send — success
+// POST /api/payments/send — Stellar address validation
+// ===========================================================================
+describe('POST /api/payments/send — Stellar address validation', () => {
+  const VALID_STELLAR_ADDRESS = 'GCSEQ5XE5YYKPITLT63FZ7LCW2JZNYVP3L2XKMGELRKGPNZXNNBVPOU3';
+
+  test('accepts a valid Stellar public key and proceeds to business logic', async () => {
+    mockSendHappyPath();
+
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: RECIPIENT_KEY, amount: '10', asset: 'XLM' });
+
+    // Validation passes — reaches controller (200 or business-logic error, not 400)
+    expect(res.status).not.toBe(400);
+    expect(res.status).toBe(200);
+  });
+
+  test('returns 400 with user-friendly message for a malformed address', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: 'NOTAVALIDSTELLARKEY', amount: '10', asset: 'XLM' });
+
+    expect(res.status).toBe(400);
+    const messages = res.body.errors.map((e) => e.msg);
+    expect(messages).toContain('Invalid Stellar wallet address');
+    expect(sendPayment).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 for an address that is wrong length but looks base32', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: 'GABC123SHORT', amount: '10', asset: 'XLM' });
+
+    expect(res.status).toBe(400);
+    const messages = res.body.errors.map((e) => e.msg);
+    expect(messages).toContain('Invalid Stellar wallet address');
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 for an empty recipient_address', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: '', amount: '10', asset: 'XLM' });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  test('does not reach DB or Stellar service when address is invalid', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: 'bad-address', amount: '10', asset: 'XLM' });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
 // ===========================================================================
 describe('POST /api/payments/send — success', () => {
   test('returns 200 with correct transaction shape', async () => {
