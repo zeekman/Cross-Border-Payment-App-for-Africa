@@ -50,7 +50,24 @@
     "submitting": "Ana shiga...",
     "no_account": "Ba ka da asusun?",
     "create_one": "Ƙirƙiri ɗaya",
-    "error": "Shiga ya kasa"
+    "error": "Shiga ya kasa",
+    "forgot_password": "Ka manta kalmar sirri?"
+  },
+  "passwordReset": {
+    "forgot_title": "Sake saita kalmar sirri",
+    "forgot_subtitle": "Shigar da imel ɗin ku; za mu aika hanya idan asusu yana nan.",
+    "forgot_submit": "Aika hanyar sake saita",
+    "forgot_submitting": "Ana aika...",
+    "forgot_success_toast": "Duba imel ɗin ku don mataki na gaba.",
+    "reset_title": "Sabi sabuwar kalmar sirri",
+    "reset_subtitle": "Shigar da sabuwar kalmar sirri don asusunku.",
+    "new_password": "Sabuwar kalmar sirri",
+    "reset_submit": "Sabunta kalmar sirri",
+    "reset_submitting": "Ana sabunta...",
+    "reset_success_toast": "An sabunta kalmar sirri. Yanzu zaka iya shiga.",
+    "back_to_login": "Komawa zuwa shiga",
+    "missing_token": "Wannan hanya ba ta da kyau. Nemi sabuwa daga shafin shiga.",
+    "error_generic": "Wani abu ya yi kuskure. Sake gwadawa."
   },
   "dashboard": {
     "greeting": "Barka,",
@@ -76,11 +93,21 @@
     "camera_error": "Ba na iya shiga kamera ba",
     "amount": "Adadin Kuɗi",
     "memo": "Memo (ba tilas ba)",
-    "memo_placeholder": "Bayani na biyan kuɗi...",
+    "memo_placeholder": "Rubutu, lamba, ko hex 64…",
+    "memo_type_label": "Nau'in memo",
+    "memo_type_text": "Rubutu",
+    "memo_type_id": "ID (lamba)",
+    "memo_type_hash": "Hash (hex 64)",
+    "memo_type_return": "Komawa (hex 64)",
+    "memo_hint_text": "Har haruffa 28 (memo rubutu na Stellar).",
+    "memo_hint_id": "Lambobi kawai, uint64 (ID na deposit).",
+    "memo_hint_hash": "Haruffa 16 guda 64 daidai.",
+    "memo_hint_return": "Hex 64 don memo na komawa.",
     "confirm_title": "Tabbatar da Ma'amala",
     "confirm_to": "Zuwa:",
     "confirm_amount": "Adadin Kuɗi:",
     "confirm_memo": "Memo:",
+    "confirm_memo_type": "Nau'i:",
     "review": "Duba Biyan Kuɗi",
     "confirm_send": "Tabbatar da Aika",
     "success": "An aika biyan kuɗi!",
@@ -121,7 +148,8 @@
     "filter_sent": "aika",
     "filter_received": "karɓa",
     "to": "Zuwa:",
-    "from": "Daga:"
+    "from": "Daga:",
+    "export_csv": "Fitar CSV"
   },
   "profile": {
     "title": "Bayanan Kai",

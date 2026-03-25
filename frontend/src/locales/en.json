@@ -50,7 +50,24 @@
     "submitting": "Signing in...",
     "no_account": "Don't have an account?",
     "create_one": "Create one",
-    "error": "Login failed"
+    "error": "Login failed",
+    "forgot_password": "Forgot password?"
+  },
+  "passwordReset": {
+    "forgot_title": "Reset password",
+    "forgot_subtitle": "Enter your email and we will send you a link if an account exists.",
+    "forgot_submit": "Send reset link",
+    "forgot_submitting": "Sending...",
+    "forgot_success_toast": "Check your email for the next steps.",
+    "reset_title": "Choose a new password",
+    "reset_subtitle": "Enter a new password for your account.",
+    "new_password": "New password",
+    "reset_submit": "Update password",
+    "reset_submitting": "Updating...",
+    "reset_success_toast": "Password updated. You can sign in now.",
+    "back_to_login": "Back to sign in",
+    "missing_token": "This reset link is invalid or incomplete. Request a new one from the login page.",
+    "error_generic": "Something went wrong. Please try again."
   },
   "dashboard": {
     "greeting": "Good day,",
@@ -76,11 +93,21 @@
     "camera_error": "Failed to access camera",
     "amount": "Amount",
     "memo": "Memo (optional)",
-    "memo_placeholder": "Payment note...",
+    "memo_placeholder": "Payment note, numeric ID, or 64-char hex…",
+    "memo_type_label": "Memo type",
+    "memo_type_text": "Text",
+    "memo_type_id": "ID (numeric)",
+    "memo_type_hash": "Hash (64 hex)",
+    "memo_type_return": "Return (64 hex)",
+    "memo_hint_text": "Up to 28 characters (Stellar text memo).",
+    "memo_hint_id": "Unsigned 64-bit integer as digits only (exchange deposit IDs).",
+    "memo_hint_hash": "Exactly 64 hexadecimal characters (32 bytes).",
+    "memo_hint_return": "Exactly 64 hexadecimal characters for a return memo.",
     "confirm_title": "Confirm Transaction",
     "confirm_to": "To:",
     "confirm_amount": "Amount:",
     "confirm_memo": "Memo:",
+    "confirm_memo_type": "Memo type:",
     "review": "Review Payment",
     "confirm_send": "Confirm & Send",
     "success": "Payment sent successfully!",
@@ -122,7 +149,8 @@
     "filter_sent": "sent",
     "filter_received": "received",
     "to": "To:",
-    "from": "From:"
+    "from": "From:",
+    "export_csv": "Export CSV"
   },
   "profile": {
     "title": "Profile",

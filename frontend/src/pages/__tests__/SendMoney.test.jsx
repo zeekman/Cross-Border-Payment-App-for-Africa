@@ -24,10 +24,20 @@ i18n.use(initReactI18next).init({
           amount: 'Amount',
           memo: 'Memo (optional)',
           memo_placeholder: 'Payment note...',
+          memo_type_label: 'Memo type',
+          memo_type_text: 'Text',
+          memo_type_id: 'ID',
+          memo_type_hash: 'Hash',
+          memo_type_return: 'Return',
+          memo_hint_text: 'Text hint',
+          memo_hint_id: 'ID hint',
+          memo_hint_hash: 'Hash hint',
+          memo_hint_return: 'Return hint',
           confirm_title: 'Confirm Transaction',
           confirm_to: 'To:',
           confirm_amount: 'Amount:',
           confirm_memo: 'Memo:',
+          confirm_memo_type: 'Memo type:',
           review: 'Review Payment',
           confirm_send: 'Confirm & Send',
           success: 'Payment sent successfully!',
@@ -78,6 +88,13 @@ test('renders form fields', async () => {
   expect(screen.getByPlaceholderText('G... Stellar address')).toBeInTheDocument();
   expect(screen.getByPlaceholderText('0.00')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /review payment/i })).toBeInTheDocument();
+});
+
+test('shows memo type selector after entering memo text', async () => {
+  renderComponent();
+  expect(screen.queryByLabelText('Memo type')).not.toBeInTheDocument();
+  await userEvent.type(screen.getByPlaceholderText('Payment note...'), 'hi');
+  expect(screen.getByLabelText('Memo type')).toBeInTheDocument();
 });
 
 test('first submit shows confirmation preview — does NOT call api.post', async () => {

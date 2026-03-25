@@ -1,9 +1,12 @@
 const router = require('express').Router();
+const { query, validationResult } = require('express-validator');
 const { body, query, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
+const { send, history, exportCSV } = require('../controllers/paymentController');
 const { send, history } = require('../controllers/paymentController');
+const paymentSendValidators = require('../validators/paymentSendValidators');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -13,6 +16,7 @@ const validate = (req, res, next) => {
 
 router.use(authMiddleware);
 
+router.post('/send', paymentSendValidators, validate, idempotency, send);
 router.post('/send',
   [
     body('recipient_address')

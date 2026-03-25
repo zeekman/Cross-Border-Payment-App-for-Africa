@@ -50,7 +50,24 @@
     "submitting": "Inaingia...",
     "no_account": "Huna akaunti?",
     "create_one": "Fungua moja",
-    "error": "Kuingia kumeshindwa"
+    "error": "Kuingia kumeshindwa",
+    "forgot_password": "Umesahau nenosiri?"
+  },
+  "passwordReset": {
+    "forgot_title": "Weka upya nenosiri",
+    "forgot_subtitle": "Ingiza barua pepe; tutakutumia kiungo ikiwa akaunti ipo.",
+    "forgot_submit": "Tuma kiungo",
+    "forgot_submitting": "Inatuma...",
+    "forgot_success_toast": "Angalia barua pepe kwa hatua zinazofuata.",
+    "reset_title": "Chagua nenosiri jipya",
+    "reset_subtitle": "Ingiza nenosiri jipya la akaunti yako.",
+    "new_password": "Nenosiri jipya",
+    "reset_submit": "Sasisha nenosiri",
+    "reset_submitting": "Inasasisha...",
+    "reset_success_toast": "Nenosiri limebadilishwa. Unaweza kuingia sasa.",
+    "back_to_login": "Rudi kuingia",
+    "missing_token": "Kiungo si halali. Omba kipya kutoka ukurasa wa kuingia.",
+    "error_generic": "Kuna hitilafu. Jaribu tena."
   },
   "dashboard": {
     "greeting": "Habari,",
@@ -76,11 +93,21 @@
     "camera_error": "Imeshindwa kuingia kamera",
     "amount": "Kiasi",
     "memo": "Kumbukumbu (si lazima)",
-    "memo_placeholder": "Maelezo ya malipo...",
+    "memo_placeholder": "Maandishi, nambari, au hex 64…",
+    "memo_type_label": "Aina ya kumbukumbu",
+    "memo_type_text": "Maandishi",
+    "memo_type_id": "Kitambulisho (nambari)",
+    "memo_type_hash": "Hash (hex 64)",
+    "memo_type_return": "Rudi (hex 64)",
+    "memo_hint_text": "Hadi herufi 28 (memo ya maandishi ya Stellar).",
+    "memo_hint_id": "Nambari tu, hadi uint64 (ID za uwekaji wa exchange).",
+    "memo_hint_hash": "Herufi 16 pekee 64 (baiti 32).",
+    "memo_hint_return": "Hex 64 kwa memo ya kurudi.",
     "confirm_title": "Thibitisha Muamala",
     "confirm_to": "Kwa:",
     "confirm_amount": "Kiasi:",
     "confirm_memo": "Kumbukumbu:",
+    "confirm_memo_type": "Aina:",
     "review": "Kagua Malipo",
     "confirm_send": "Thibitisha na Tuma",
     "success": "Malipo yametumwa!",
@@ -121,7 +148,8 @@
     "filter_sent": "zilizotumwa",
     "filter_received": "zilizopokelewa",
     "to": "Kwa:",
-    "from": "Kutoka:"
+    "from": "Kutoka:",
+    "export_csv": "Hamisha CSV"
   },
   "profile": {
     "title": "Wasifu",

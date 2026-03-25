@@ -13,8 +13,15 @@ const {
   generateRefreshToken,
   refreshTokenExpiresAt,
 } = require('../utils/tokens');
+const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
 
 const TOKEN_TTL_MS = 96 * 60 * 60 * 1000; // 96 hours
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+const FORGOT_PASSWORD_MESSAGE = {
+  message:
+    'If an account exists for this email, you will receive password reset instructions shortly.'
+};
 
 function generateVerificationToken() {
   const raw = crypto.randomBytes(32).toString('hex');
@@ -258,6 +265,31 @@ async function refresh(req, res, next) {
 
     res.cookie(COOKIE_NAME, newRaw, COOKIE_OPTIONS);
     res.json({ token });
+module.exports = { register, login, verifyEmail, getMe, setPIN, verifyPIN };
+async function forgotPassword(req, res, next) {
+  try {
+    const email = req.body.email;
+    const found = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (found.rows.length === 0) {
+      return res.status(200).json(FORGOT_PASSWORD_MESSAGE);
+    }
+
+    const userId = found.rows[0].id;
+    const raw = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+
+    await db.query(
+      'DELETE FROM password_reset_tokens WHERE user_id = $1 AND used_at IS NULL',
+      [userId]
+    );
+    await db.query(
+      `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+      [userId, tokenHash, expiresAt]
+    );
+
+    await sendPasswordResetEmail(email, raw);
+    return res.status(200).json(FORGOT_PASSWORD_MESSAGE);
   } catch (err) {
     next(err);
   }
@@ -273,8 +305,50 @@ async function logout(req, res, next) {
     res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
     res.json({ message: 'Logged out successfully' });
   } catch (err) {
+async function resetPassword(req, res, next) {
+  try {
+    const { token, password } = req.body;
+    if (!token) {
+      return res.status(400).json({ error: 'Reset token is required' });
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const found = await db.query(
+      `SELECT id, user_id FROM password_reset_tokens
+       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()`,
+      [tokenHash]
+    );
+
+    if (found.rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    const { user_id: userId } = found.rows[0];
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    await db.query('BEGIN');
+    await db.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [passwordHash, userId]);
+    await db.query(
+      `UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
+      [userId]
+    );
+    await db.query('COMMIT');
+
+    res.json({ message: 'Password has been reset. You can now log in.' });
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {});
     next(err);
   }
 }
 
 module.exports = { register, login, refresh, logout, verifyEmail, getMe, setPIN, verifyPIN };
+module.exports = {
+  register,
+  login,
+  verifyEmail,
+  getMe,
+  setPIN,
+  verifyPIN,
+  forgotPassword,
+  resetPassword
+};

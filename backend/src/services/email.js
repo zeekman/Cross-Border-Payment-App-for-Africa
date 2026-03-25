@@ -21,4 +21,16 @@ async function sendVerificationEmail(email, token) {
   });
 }
 
-module.exports = { sendVerificationEmail };
+async function sendPasswordResetEmail(email, token) {
+  const url = `${process.env.FRONTEND_URL}/reset-password?token=${encodeURIComponent(token)}`;
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to: email,
+    subject: 'Reset your AfriPay password',
+    html: `<p>You requested a password reset. This link expires in 1 hour and can only be used once.</p>
+           <a href="${url}">${url}</a>
+           <p>If you did not request this, you can ignore this email.</p>`
+  });
+}
+
+module.exports = { sendVerificationEmail, sendPasswordResetEmail };

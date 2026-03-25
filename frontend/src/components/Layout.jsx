@@ -1,8 +1,9 @@
 import React from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Send, Download, Clock, User, LogOut, Webhook, Sun, Moon } from 'lucide-react';
+import { LayoutDashboard, Send, Download, Clock, User, LogOut, Webhook, Sun, Moon, Bell, BellOff } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
+import { usePushNotifications } from '../hooks/usePushNotifications';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -19,6 +20,7 @@ export default function Layout() {
   const { logout } = useAuth();
   const navigate = useNavigate();
   const { theme, toggleTheme } = useTheme();
+  const { supported, subscribed, loading, subscribe, unsubscribe } = usePushNotifications();
 
   const handleLogout = () => { logout(); navigate('/'); };
 
@@ -39,6 +41,16 @@ export default function Layout() {
           <button onClick={toggleTheme} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors" title="Toggle theme">
             {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           </button>
+          {supported && (
+            <button
+              onClick={subscribed ? unsubscribe : subscribe}
+              disabled={loading}
+              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors disabled:opacity-50"
+              title={subscribed ? 'Disable payment notifications' : 'Enable payment notifications'}
+            >
+              {subscribed ? <Bell size={18} className="text-primary-500" /> : <BellOff size={18} />}
+            </button>
+          )}
           <button onClick={handleLogout} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors" title="Logout">
             <LogOut size={18} />
           </button>

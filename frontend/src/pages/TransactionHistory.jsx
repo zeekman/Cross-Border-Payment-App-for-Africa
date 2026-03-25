@@ -55,6 +55,21 @@ export default function TransactionHistory() {
     return true;
   });
 
+  async function handleExportCSV() {
+    setExporting(true);
+    try {
+      const params = filter !== 'all' ? { status: filter } : {};
+      const res = await api.get('/payments/export', { params, responseType: 'blob' });
+      const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'transactions.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {}
+    setExporting(false);
+  }
+
   const filters = [
     { key: 'all', label: t('history.filter_all') },
     { key: 'sent', label: t('history.filter_sent') },
@@ -69,7 +84,17 @@ export default function TransactionHistory() {
 
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-2xl font-bold text-white">{t('history.title')}</h2>
-        <Filter size={18} className="text-gray-400" />
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleExportCSV}
+            disabled={exporting}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800 text-gray-300 hover:text-white hover:bg-gray-700 text-sm font-medium transition-colors disabled:opacity-50"
+          >
+            <Download size={14} />
+            {exporting ? '...' : t('history.export_csv')}
+          </button>
+          <Filter size={18} className="text-gray-400" />
+        </div>
       </div>
 
       {/* Filter tabs */}

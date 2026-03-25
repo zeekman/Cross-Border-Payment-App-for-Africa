@@ -359,10 +359,77 @@ describe('sendPayment', () => {
       recipientPublicKey: recipientKeypair.publicKey(),
       amount: '1',
       asset: 'XLM',
-      memo: 'This memo is longer than 28 characters and should be cut'
+      memo: 'This memo is longer than 28 characters and should be cut',
+      memoType: 'text'
     });
 
     expect(capturedTx.memo.value.toString()).toHaveLength(28);
+    expect(capturedTx.memo.type).toBe('text');
+  });
+
+  test('adds MEMO_ID when memoType is id', async () => {
+    let capturedTx;
+    mockServer.submitTransaction.mockImplementation(tx => {
+      capturedTx = tx;
+      return Promise.resolve({ hash: 'id-memo-hash', ledger: 21 });
+    });
+
+    await stellar.sendPayment({
+      senderPublicKey: senderKeypair.publicKey(),
+      encryptedSecretKey: encryptedSecret,
+      recipientPublicKey: recipientKeypair.publicKey(),
+      amount: '1',
+      asset: 'XLM',
+      memo: '42424242',
+      memoType: 'id'
+    });
+
+    expect(capturedTx.memo.type).toBe('id');
+    expect(String(capturedTx.memo.value)).toBe('42424242');
+  });
+
+  test('adds MEMO_HASH when memoType is hash (64 hex)', async () => {
+    const hex64 = 'a'.repeat(64);
+    let capturedTx;
+    mockServer.submitTransaction.mockImplementation(tx => {
+      capturedTx = tx;
+      return Promise.resolve({ hash: 'hash-memo', ledger: 22 });
+    });
+
+    await stellar.sendPayment({
+      senderPublicKey: senderKeypair.publicKey(),
+      encryptedSecretKey: encryptedSecret,
+      recipientPublicKey: recipientKeypair.publicKey(),
+      amount: '1',
+      asset: 'XLM',
+      memo: hex64,
+      memoType: 'hash'
+    });
+
+    expect(capturedTx.memo.type).toBe('hash');
+    expect(Buffer.from(capturedTx.memo.value).toString('hex')).toBe(hex64);
+  });
+
+  test('adds MEMO_RETURN when memoType is return (64 hex)', async () => {
+    const hex64 = 'b'.repeat(64);
+    let capturedTx;
+    mockServer.submitTransaction.mockImplementation(tx => {
+      capturedTx = tx;
+      return Promise.resolve({ hash: 'return-memo', ledger: 23 });
+    });
+
+    await stellar.sendPayment({
+      senderPublicKey: senderKeypair.publicKey(),
+      encryptedSecretKey: encryptedSecret,
+      recipientPublicKey: recipientKeypair.publicKey(),
+      amount: '1',
+      asset: 'XLM',
+      memo: hex64,
+      memoType: 'return'
+    });
+
+    expect(capturedTx.memo.type).toBe('return');
+    expect(Buffer.from(capturedTx.memo.value).toString('hex')).toBe(hex64);
   });
 
   test('sends without memo when memo is not provided', async () => {

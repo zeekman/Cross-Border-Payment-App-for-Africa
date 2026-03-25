@@ -103,8 +103,61 @@ async function checkTrustline(recipientPublicKey, assetObj) {
   }
 }
 
+const MEMO_ID_MAX = 2n ** 64n - 1n;
+
+function memoValidationError(message) {
+  const err = new Error(message);
+  err.status = 400;
+  return err;
+}
+
+/**
+ * Build a Stellar memo from user input. Default type is `text` (max 28 chars).
+ * @param {string} memo - trimmed memo payload
+ * @param {string} [memoType='text'] - text | id | hash | return
+ */
+function buildStellarMemo(memo, memoType = 'text') {
+  if (!memo) return null;
+  const type = (memoType || 'text').toLowerCase();
+
+  switch (type) {
+    case 'text':
+      return StellarSdk.Memo.text(memo.slice(0, 28));
+    case 'id': {
+      if (!/^\d+$/.test(memo)) throw memoValidationError('Memo ID must be a numeric string');
+      try {
+        const n = BigInt(memo);
+        if (n < 0n || n > MEMO_ID_MAX) throw memoValidationError('Memo ID is out of range');
+      } catch (e) {
+        if (e.status === 400) throw e;
+        throw memoValidationError('Memo ID is invalid');
+      }
+      return StellarSdk.Memo.id(memo);
+    }
+    case 'hash':
+    case 'return': {
+      const hex = memo.replace(/^0x/i, '');
+      if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+        throw memoValidationError('Memo hash must be exactly 64 hexadecimal characters');
+      }
+      const buf = Buffer.from(hex, 'hex');
+      return type === 'hash' ? StellarSdk.Memo.hash(buf) : StellarSdk.Memo.return(buf);
+    }
+    default:
+      throw memoValidationError(`Unsupported memo type: ${memoType}`);
+  }
+}
+
 // Send payment
-async function sendPayment({ senderPublicKey, encryptedSecretKey, recipientPublicKey, amount, asset = 'XLM', memo }) {
+async function sendPayment({
+  senderPublicKey,
+  encryptedSecretKey,
+  recipientPublicKey,
+  amount,
+  asset = 'XLM',
+  memo,
+  memoType = 'text'
+}) {
   const assetObj = resolveAsset(asset);
 
   // Trustline check is only required for non-native assets
@@ -127,7 +180,8 @@ async function sendPayment({ senderPublicKey, encryptedSecretKey, recipientPubli
     }))
     .setTimeout(30);
 
-  if (memo) txBuilder.addMemo(StellarSdk.Memo.text(memo.slice(0, 28)));
+  const memoObj = memo ? buildStellarMemo(memo, memoType) : null;
+  if (memoObj) txBuilder.addMemo(memoObj);
 
   const transaction = txBuilder.build();
   transaction.sign(senderKeypair);

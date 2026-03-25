@@ -29,7 +29,8 @@ CREATE TABLE transactions (
   recipient_wallet VARCHAR(56) NOT NULL,
   amount           DECIMAL(20, 7) NOT NULL,
   asset            VARCHAR(12) DEFAULT 'XLM',
-  memo             VARCHAR(28),
+  memo             VARCHAR(128),
+  memo_type        VARCHAR(10),
   tx_hash          VARCHAR(64) UNIQUE,
   status           VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending','completed','failed')),
   created_at       TIMESTAMPTZ DEFAULT NOW()
@@ -44,11 +45,22 @@ CREATE TABLE contacts (
   UNIQUE(user_id, wallet_address)
 );
 
+CREATE TABLE password_reset_tokens (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash  VARCHAR(64) NOT NULL,
+  expires_at  TIMESTAMPTZ NOT NULL,
+  used_at     TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Indexes
 CREATE INDEX idx_transactions_sender ON transactions(sender_wallet);
 CREATE INDEX idx_transactions_recipient ON transactions(recipient_wallet);
 CREATE INDEX idx_wallets_user ON wallets(user_id);
 CREATE INDEX idx_contacts_user ON contacts(user_id);
+CREATE INDEX idx_password_reset_tokens_user ON password_reset_tokens(user_id);
+CREATE INDEX idx_password_reset_tokens_active ON password_reset_tokens(token_hash) WHERE used_at IS NULL;
 
 -- Keep users.updated_at in sync on every UPDATE (INSERT still uses column DEFAULT)
 CREATE OR REPLACE FUNCTION set_users_updated_at()

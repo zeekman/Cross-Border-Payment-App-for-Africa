@@ -1,4 +1,5 @@
 const { v4: uuidv4 } = require("uuid");
+const { stringify } = require("csv-stringify");
 const db = require("../db");
 const { sendPayment } = require("../services/stellar");
 const webhook = require("../services/webhook");
@@ -32,6 +33,9 @@ async function send(req, res, next) {
   let public_key;
   const { recipient_address, amount, asset = "XLM", memo } = req.body;
   try {
+    const { recipient_address, amount, asset = "XLM", memo: rawMemo, memo_type: rawMemoType } = req.body;
+    const memo = typeof rawMemo === "string" ? rawMemo.trim() : "";
+    const memo_type = memo ? (rawMemoType || "text") : null;
 
     // KYC check for high-value transactions
     const estimatedUSD = estimateUSDValue(amount, asset);
@@ -82,14 +86,15 @@ async function send(req, res, next) {
       recipientPublicKey: recipient_address,
       amount,
       asset,
-      memo,
+      memo: memo || undefined,
+      memoType: memo ? memo_type : undefined,
     });
 
     // Save to DB
     await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'completed')`,
-      [txId, public_key, recipient_address, amount, asset, memo || null, transactionHash],
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'completed')`,
+      [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash],
     );
 
     // Invalidate sender's cached balance — it changed after this payment
@@ -145,7 +150,7 @@ async function history(req, res, next) {
         [public_key],
       ),
       db.query(
-        `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, created_at
+        `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at
          FROM transactions
          WHERE sender_wallet = $1 OR recipient_wallet = $1
          ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
@@ -171,4 +176,64 @@ async function history(req, res, next) {
   }
 }
 
-module.exports = { send, history };
+async function exportCSV(req, res, next) {
+  try {
+    const walletResult = await db.query(
+      "SELECT public_key FROM wallets WHERE user_id = $1",
+      [req.user.userId],
+    );
+    if (!walletResult.rows[0]) return res.status(404).json({ error: "Wallet not found" });
+
+    const { public_key } = walletResult.rows[0];
+
+    const params = [public_key];
+    let dateFilter = "";
+    if (req.query.from) {
+      params.push(req.query.from);
+      dateFilter += ` AND created_at >= $${params.length}`;
+    }
+    if (req.query.to) {
+      params.push(req.query.to);
+      dateFilter += ` AND created_at <= $${params.length}`;
+    }
+    if (req.query.status) {
+      params.push(req.query.status);
+      dateFilter += ` AND status = $${params.length}`;
+    }
+
+    const result = await db.query(
+      `SELECT created_at, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status
+       FROM transactions
+       WHERE (sender_wallet = $1 OR recipient_wallet = $1)${dateFilter}
+       ORDER BY created_at DESC`,
+      params,
+    );
+
+    const rows = result.rows.map((tx) => ({
+      date: new Date(tx.created_at).toISOString(),
+      direction: tx.sender_wallet === public_key ? "sent" : "received",
+      amount: tx.amount,
+      asset: tx.asset,
+      recipient_or_sender: tx.sender_wallet === public_key ? tx.recipient_wallet : tx.sender_wallet,
+      memo: tx.memo || "",
+      tx_hash: tx.tx_hash || "",
+      status: tx.status,
+    }));
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", 'attachment; filename="transactions.csv"');
+
+    stringify(
+      rows,
+      { header: true, columns: ["date", "direction", "amount", "asset", "recipient_or_sender", "memo", "tx_hash", "status"] },
+      (err, output) => {
+        if (err) return next(err);
+        res.send(output);
+      },
+    );
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { send, history, exportCSV };

@@ -24,11 +24,17 @@ echo "Contract Directory: $CONTRACT_DIR"
 # Step 1: Check prerequisites
 echo -e "\n${YELLOW}Step 1: Checking prerequisites...${NC}"
 
-if ! command -v soroban &> /dev/null; then
-    echo -e "${RED}Error: soroban CLI is not installed.${NC}"
-    echo "Install from: https://github.com/stellar/rs-soroban-sdk"
+# Support both 'stellar' (new) and 'soroban' (legacy) CLI names
+if command -v stellar &> /dev/null; then
+    SOROBAN_CLI="stellar"
+elif command -v soroban &> /dev/null; then
+    SOROBAN_CLI="soroban"
+else
+    echo -e "${RED}Error: Stellar CLI is not installed.${NC}"
+    echo "Install from: https://developers.stellar.org/docs/tools/developer-tools/cli/install-cli"
     exit 1
 fi
+echo "Using CLI: $SOROBAN_CLI"
 
 if ! command -v cargo &> /dev/null; then
     echo -e "${RED}Error: cargo is not installed.${NC}"
@@ -65,11 +71,11 @@ echo "WASM file: $WASM_FILE"
 echo -e "\n${YELLOW}Step 3: Optimizing WASM...${NC}"
 
 # Use 'soroban contract optimize' if available, otherwise use wasm-opt
-if soroban contract optimize --help > /dev/null 2>&1; then
-    soroban contract optimize --wasm "$WASM_FILE" --output-wasm "$WASM_FILE"
-    echo -e "${GREEN}✓ WASM optimized with soroban contract optimize${NC}"
+if $SOROBAN_CLI contract optimize --help > /dev/null 2>&1; then
+    $SOROBAN_CLI contract optimize --wasm "$WASM_FILE" --output-wasm "$WASM_FILE"
+    echo -e "${GREEN}✓ WASM optimized${NC}"
 else
-    echo -e "${YELLOW}Note: soroban contract optimize not available, skipping optimization${NC}"
+    echo -e "${YELLOW}Note: contract optimize not available, skipping${NC}"
 fi
 
 # Step 4: Deploy to Stellar Network
@@ -102,20 +108,10 @@ if [ -z "$SOROBAN_SECRET_KEY" ]; then
 fi
 
 # Deploy using soroban CLI
-CONTRACT_ID=$(soroban contract deploy \
+CONTRACT_ID=$($SOROBAN_CLI contract deploy \
     --wasm "$WASM_FILE" \
     --source "$SOROBAN_SECRET_KEY" \
-    --network "$NETWORK" \
-    2>&1 | grep -oP '(?<=Contract ID: )[^ ]+' || true)
-
-if [ -z "$CONTRACT_ID" ]; then
-    # Try alternative parsing for different version outputs
-    CONTRACT_ID=$(soroban contract deploy \
-        --wasm "$WASM_FILE" \
-        --source "$SOROBAN_SECRET_KEY" \
-        --network "$NETWORK" \
-        2>&1 | tail -1 || true)
-fi
+    --network "$NETWORK" 2>&1 | tail -1 || true)
 
 if [ -z "$CONTRACT_ID" ]; then
     echo -e "${RED}Error: Failed to deploy contract${NC}"

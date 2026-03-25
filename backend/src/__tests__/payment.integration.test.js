@@ -54,7 +54,8 @@ const StellarSdk   = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const idempotency  = require('../middleware/idempotency');
 const { send, history } = require('../controllers/paymentController');
-const { body, query: qv, validationResult } = require('express-validator');
+const { query: qv, validationResult } = require('express-validator');
+const paymentSendValidators = require('../validators/paymentSendValidators');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -68,6 +69,7 @@ app.use(express.json());
 app.post(
   '/api/payments/send',
   authMiddleware,
+  paymentSendValidators,
   [
     body('recipient_address')
       .notEmpty().withMessage('Recipient address is required')
@@ -175,6 +177,7 @@ function makeTxRow(overrides = {}) {
     amount:           '10.0000000',
     asset:            'XLM',
     memo:             null,
+    memo_type:        null,
     tx_hash:          FAKE_TX_HASH,
     status:           'completed',
     created_at:       new Date().toISOString(),
@@ -267,6 +270,46 @@ describe('POST /api/payments/send — input validation', () => {
       .post('/api/payments/send')
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ recipient_address: RECIPIENT_KEY, amount: '10', asset: 'BTC' });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when memo_type is id but memo is missing', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: RECIPIENT_KEY, amount: '10', memo_type: 'id' });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when memo_type is id but memo is not numeric', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        recipient_address: RECIPIENT_KEY,
+        amount: '10',
+        memo: 'not-a-number',
+        memo_type: 'id'
+      });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when memo_type is hash but memo is not 64 hex chars', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        recipient_address: RECIPIENT_KEY,
+        amount: '10',
+        memo: 'deadbeef',
+        memo_type: 'hash'
+      });
 
     expect(res.status).toBe(400);
     expect(sendPayment).not.toHaveBeenCalled();
@@ -378,7 +421,28 @@ describe('POST /api/payments/send — success', () => {
       recipientPublicKey: RECIPIENT_KEY,
       amount:             '5',
       asset:              'XLM',
-      memo:               'school fees'
+      memo:               'school fees',
+      memoType:           'text'
+    }));
+  });
+
+  test('calls sendPayment with memoType id for exchange-style memos', async () => {
+    mockSendHappyPath();
+
+    await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        recipient_address: RECIPIENT_KEY,
+        amount: '1',
+        asset: 'XLM',
+        memo: '987654321',
+        memo_type: 'id'
+      });
+
+    expect(sendPayment).toHaveBeenCalledWith(expect.objectContaining({
+      memo: '987654321',
+      memoType: 'id'
     }));
   });
 
@@ -395,12 +459,12 @@ describe('POST /api/payments/send — success', () => {
     );
     expect(insertCall).toBeDefined();
     const params = insertCall[1];
-    // [txId, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash]
+    // [txId, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash]
     expect(params[1]).toBe(SENDER_KEY);
     expect(params[2]).toBe(RECIPIENT_KEY);
     expect(params[3]).toBe('10');
     expect(params[4]).toBe('XLM');
-    expect(params[6]).toBe(FAKE_TX_HASH);
+    expect(params[7]).toBe(FAKE_TX_HASH);
   });
 
   test('stores null memo when memo is not provided', async () => {
@@ -416,6 +480,7 @@ describe('POST /api/payments/send — success', () => {
     );
     expect(insertCall).toBeDefined();
     expect(insertCall[1][5]).toBeNull();
+    expect(insertCall[1][6]).toBeNull();
   });
 });
 
