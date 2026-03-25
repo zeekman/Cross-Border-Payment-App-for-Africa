@@ -50,7 +50,24 @@
     "submitting": "Signing in...",
     "no_account": "Don't have an account?",
     "create_one": "Create one",
-    "error": "Login failed"
+    "error": "Login failed",
+    "forgot_password": "Forgot password?"
+  },
+  "passwordReset": {
+    "forgot_title": "Reset password",
+    "forgot_subtitle": "Enter your email and we will send you a link if an account exists.",
+    "forgot_submit": "Send reset link",
+    "forgot_submitting": "Sending...",
+    "forgot_success_toast": "Check your email for the next steps.",
+    "reset_title": "Choose a new password",
+    "reset_subtitle": "Enter a new password for your account.",
+    "new_password": "New password",
+    "reset_submit": "Update password",
+    "reset_submitting": "Updating...",
+    "reset_success_toast": "Password updated. You can sign in now.",
+    "back_to_login": "Back to sign in",
+    "missing_token": "This reset link is invalid or incomplete. Request a new one from the login page.",
+    "error_generic": "Something went wrong. Please try again."
   },
   "dashboard": {
     "greeting": "Good day,",

@@ -18,7 +18,7 @@ app.use(express.json());
 app.use('/wallet', walletRouter);
 
 // A real valid Stellar public key for tests
-const VALID_ADDRESS = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+const VALID_ADDRESS = 'GCSEQ5XE5YYKPITLT63FZ7LCW2JZNYVP3L2XKMGELRKGPNZXNNBVPOU3';
 const INVALID_ADDRESS = 'NOTASTELLARKEY';
 
 beforeEach(() => jest.clearAllMocks());
@@ -45,7 +45,7 @@ describe('POST /wallet/contacts', () => {
     expect(res.status).toBe(400);
     expect(res.body.errors).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ path: 'wallet_address' })
+        expect.objectContaining({ path: 'wallet_address', msg: 'Invalid Stellar wallet address' })
       ])
     );
   });

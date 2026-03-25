@@ -27,7 +27,7 @@ router.post('/contacts',
       .notEmpty().withMessage('Wallet address is required')
       .custom((value) => {
         if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
-          throw new Error('wallet_address must be a valid Stellar public key');
+          throw new Error('Invalid Stellar wallet address');
         }
         return true;
       })

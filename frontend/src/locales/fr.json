@@ -50,7 +50,24 @@
     "submitting": "Connexion...",
     "no_account": "Vous n'avez pas de compte ?",
     "create_one": "En créer un",
-    "error": "Échec de la connexion"
+    "error": "Échec de la connexion",
+    "forgot_password": "Mot de passe oublié ?"
+  },
+  "passwordReset": {
+    "forgot_title": "Réinitialiser le mot de passe",
+    "forgot_subtitle": "Entrez votre e-mail ; nous enverrons un lien si un compte existe.",
+    "forgot_submit": "Envoyer le lien",
+    "forgot_submitting": "Envoi...",
+    "forgot_success_toast": "Consultez votre e-mail pour la suite.",
+    "reset_title": "Nouveau mot de passe",
+    "reset_subtitle": "Choisissez un nouveau mot de passe.",
+    "new_password": "Nouveau mot de passe",
+    "reset_submit": "Mettre à jour",
+    "reset_submitting": "Mise à jour...",
+    "reset_success_toast": "Mot de passe mis à jour. Vous pouvez vous connecter.",
+    "back_to_login": "Retour à la connexion",
+    "missing_token": "Lien invalide. Demandez-en un nouveau depuis la connexion.",
+    "error_generic": "Une erreur s'est produite. Réessayez."
   },
   "dashboard": {
     "greeting": "Bonjour,",

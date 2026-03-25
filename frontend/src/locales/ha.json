@@ -50,7 +50,24 @@
     "submitting": "Ana shiga...",
     "no_account": "Ba ka da asusun?",
     "create_one": "Ƙirƙiri ɗaya",
-    "error": "Shiga ya kasa"
+    "error": "Shiga ya kasa",
+    "forgot_password": "Ka manta kalmar sirri?"
+  },
+  "passwordReset": {
+    "forgot_title": "Sake saita kalmar sirri",
+    "forgot_subtitle": "Shigar da imel ɗin ku; za mu aika hanya idan asusu yana nan.",
+    "forgot_submit": "Aika hanyar sake saita",
+    "forgot_submitting": "Ana aika...",
+    "forgot_success_toast": "Duba imel ɗin ku don mataki na gaba.",
+    "reset_title": "Sabi sabuwar kalmar sirri",
+    "reset_subtitle": "Shigar da sabuwar kalmar sirri don asusunku.",
+    "new_password": "Sabuwar kalmar sirri",
+    "reset_submit": "Sabunta kalmar sirri",
+    "reset_submitting": "Ana sabunta...",
+    "reset_success_toast": "An sabunta kalmar sirri. Yanzu zaka iya shiga.",
+    "back_to_login": "Komawa zuwa shiga",
+    "missing_token": "Wannan hanya ba ta da kyau. Nemi sabuwa daga shafin shiga.",
+    "error_generic": "Wani abu ya yi kuskure. Sake gwadawa."
   },
   "dashboard": {
     "greeting": "Barka,",

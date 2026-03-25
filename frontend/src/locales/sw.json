@@ -50,7 +50,24 @@
     "submitting": "Inaingia...",
     "no_account": "Huna akaunti?",
     "create_one": "Fungua moja",
-    "error": "Kuingia kumeshindwa"
+    "error": "Kuingia kumeshindwa",
+    "forgot_password": "Umesahau nenosiri?"
+  },
+  "passwordReset": {
+    "forgot_title": "Weka upya nenosiri",
+    "forgot_subtitle": "Ingiza barua pepe; tutakutumia kiungo ikiwa akaunti ipo.",
+    "forgot_submit": "Tuma kiungo",
+    "forgot_submitting": "Inatuma...",
+    "forgot_success_toast": "Angalia barua pepe kwa hatua zinazofuata.",
+    "reset_title": "Chagua nenosiri jipya",
+    "reset_subtitle": "Ingiza nenosiri jipya la akaunti yako.",
+    "new_password": "Nenosiri jipya",
+    "reset_submit": "Sasisha nenosiri",
+    "reset_submitting": "Inasasisha...",
+    "reset_success_toast": "Nenosiri limebadilishwa. Unaweza kuingia sasa.",
+    "back_to_login": "Rudi kuingia",
+    "missing_token": "Kiungo si halali. Omba kipya kutoka ukurasa wa kuingia.",
+    "error_generic": "Kuna hitilafu. Jaribu tena."
   },
   "dashboard": {
     "greeting": "Habari,",

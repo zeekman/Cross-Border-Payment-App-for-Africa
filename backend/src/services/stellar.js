@@ -1,5 +1,6 @@
 const StellarSdk = require('@stellar/stellar-sdk');
 const crypto = require('crypto');
+const logger = require('../utils/logger');
 
 const isTestnet = process.env.STELLAR_NETWORK !== 'mainnet';
 const server = new StellarSdk.Horizon.Server(
@@ -38,7 +39,7 @@ async function createWallet() {
     try {
       await fetch(`https://friendbot.stellar.org?addr=${publicKey}`);
     } catch (e) {
-      console.warn('Friendbot funding failed:', e.message);
+      logger.warn('Friendbot funding failed', { error: e.message });
     }
   }
 
