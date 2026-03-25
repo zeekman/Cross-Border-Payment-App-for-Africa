@@ -103,12 +103,32 @@ async function checkTrustline(recipientPublicKey, assetObj) {
   }
 }
 
+// Check that the recipient account exists on the ledger
+async function checkRecipientExists(recipientPublicKey) {
+  try {
+    await server.loadAccount(recipientPublicKey);
+  } catch (e) {
+    if (e.response?.status === 404) {
+      const err = new Error(
+        'Recipient account does not exist on the Stellar network. They need to activate their wallet first.'
+      );
+      err.code = 'RECIPIENT_NOT_FOUND';
+      err.status = 400;
+      throw err;
+    }
+    throw e;
+  }
+}
+
 // Send payment
 async function sendPayment({ senderPublicKey, encryptedSecretKey, recipientPublicKey, amount, asset = 'XLM', memo }) {
   const assetObj = resolveAsset(asset);
 
-  // Trustline check is only required for non-native assets
-  if (asset !== 'XLM') {
+  if (asset === 'XLM') {
+    // For native XLM, just verify the account exists (no trustline needed)
+    await checkRecipientExists(recipientPublicKey);
+  } else {
+    // For non-native assets, trustline check implicitly verifies account existence
     await checkTrustline(recipientPublicKey, assetObj);
   }
 
