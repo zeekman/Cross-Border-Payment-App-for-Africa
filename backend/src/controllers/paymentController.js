@@ -1,5 +1,5 @@
 const { v4: uuidv4 } = require("uuid");
-const { stringify } = require("csv-stringify");
+const { stringify } = require("csv-stringify/sync");
 const db = require("../db");
 const { sendPayment } = require("../services/stellar");
 
@@ -150,24 +150,29 @@ async function exportCSV(req, res, next) {
     const { public_key } = walletResult.rows[0];
 
     const params = [public_key];
-    let dateFilter = "";
+    let filters = "";
     if (req.query.from) {
       params.push(req.query.from);
-      dateFilter += ` AND created_at >= $${params.length}`;
+      filters += ` AND created_at >= $${params.length}`;
     }
     if (req.query.to) {
       params.push(req.query.to);
-      dateFilter += ` AND created_at <= $${params.length}`;
+      filters += ` AND created_at <= $${params.length}`;
     }
     if (req.query.status) {
       params.push(req.query.status);
-      dateFilter += ` AND status = $${params.length}`;
+      filters += ` AND status = $${params.length}`;
+    }
+    if (req.query.direction === "sent") {
+      filters += " AND sender_wallet = $1";
+    } else if (req.query.direction === "received") {
+      filters += " AND recipient_wallet = $1";
     }
 
     const result = await db.query(
       `SELECT created_at, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status
        FROM transactions
-       WHERE (sender_wallet = $1 OR recipient_wallet = $1)${dateFilter}
+       WHERE (sender_wallet = $1 OR recipient_wallet = $1)${filters}
        ORDER BY created_at DESC`,
       params,
     );
@@ -186,14 +191,11 @@ async function exportCSV(req, res, next) {
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", 'attachment; filename="transactions.csv"');
 
-    stringify(
-      rows,
-      { header: true, columns: ["date", "direction", "amount", "asset", "recipient_or_sender", "memo", "tx_hash", "status"] },
-      (err, output) => {
-        if (err) return next(err);
-        res.send(output);
-      },
-    );
+    const output = stringify(rows, {
+      header: true,
+      columns: ["date", "direction", "amount", "asset", "recipient_or_sender", "memo", "tx_hash", "status"],
+    });
+    res.send(output);
   } catch (err) {
     next(err);
   }
