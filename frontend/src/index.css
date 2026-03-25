@@ -5,11 +5,11 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 body {
-  @apply bg-gray-950 text-white font-sans;
+  @apply bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100 font-sans;
   -webkit-font-smoothing: antialiased;
 }
 
 /* Custom scrollbar */
 ::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-track { @apply bg-gray-900; }
+::-webkit-scrollbar-track { @apply bg-gray-200 dark:bg-gray-900; }
 ::-webkit-scrollbar-thumb { @apply bg-primary-600 rounded-full; }

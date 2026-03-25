@@ -50,8 +50,8 @@ export default function Dashboard() {
       {/* Greeting */}
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-gray-400 text-sm">{t('dashboard.greeting')}</p>
-          <h2 className="text-xl font-bold text-white">{user?.full_name?.split(' ')[0]} 👋</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-sm">{t('dashboard.greeting')}</p>
+          <h2 className="text-xl font-bold text-gray-900 dark:text-white">{user?.full_name?.split(' ')[0]} 👋</h2>
         </div>
         <button onClick={() => window.location.reload()} className="text-gray-400 hover:text-white">
           <RefreshCw size={18} />
@@ -98,48 +98,48 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 gap-3">
         <button
           onClick={() => navigate('/send')}
-          className="bg-gray-800 hover:bg-gray-700 rounded-xl p-4 flex items-center gap-3 transition-colors"
+          className="bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 border border-gray-100 dark:border-gray-700 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
         >
           <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
             <Send size={20} />
           </div>
-          <span className="font-semibold text-white">{t('dashboard.send')}</span>
+          <span className="font-semibold text-gray-900 dark:text-white">{t('dashboard.send')}</span>
         </button>
         <button
           onClick={() => navigate('/receive')}
-          className="bg-gray-800 hover:bg-gray-700 rounded-xl p-4 flex items-center gap-3 transition-colors"
+          className="bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 border border-gray-100 dark:border-gray-700 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
         >
           <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
             <Download size={20} />
           </div>
-          <span className="font-semibold text-white">{t('dashboard.receive')}</span>
+          <span className="font-semibold text-gray-900 dark:text-white">{t('dashboard.receive')}</span>
         </button>
       </div>
 
       {/* Recent transactions */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-white">{t('dashboard.recent_activity')}</h3>
+          <h3 className="font-semibold text-gray-900 dark:text-white">{t('dashboard.recent_activity')}</h3>
           <button onClick={() => navigate('/history')} className="text-primary-500 text-sm hover:underline">
             {t('common.see_all')}
           </button>
         </div>
 
         {transactions.length === 0 ? (
-          <div className="bg-gray-900 rounded-xl p-6 text-center text-gray-500 text-sm">
+          <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-6 text-center text-gray-500 text-sm shadow-sm">
             {t('dashboard.no_transactions')}
           </div>
         ) : (
           <div className="space-y-2">
             {transactions.map(tx => (
-              <div key={tx.id} className="bg-gray-900 rounded-xl p-3 flex items-center gap-3">
+              <div key={tx.id} className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-3 flex items-center gap-3 shadow-sm">
                 <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
                   tx.direction === 'sent' ? 'bg-red-500/10 text-red-400' : 'bg-primary-500/10 text-primary-400'
                 }`}>
                   {tx.direction === 'sent' ? <Send size={16} /> : <Download size={16} />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-white font-medium truncate">
+                  <p className="text-sm text-gray-900 dark:text-white font-medium truncate">
                     {tx.direction === 'sent'
                       ? `${t('dashboard.to')} ${truncateAddress(tx.recipient_wallet)}`
                       : `${t('dashboard.from')} ${truncateAddress(tx.sender_wallet)}`}

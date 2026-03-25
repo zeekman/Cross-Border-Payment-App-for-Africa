@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import { ThemeProvider } from "./context/ThemeContext";
 
 import Welcome from "./pages/Welcome";
 import Login from "./pages/Login";
@@ -20,7 +21,7 @@ function PrivateRoute({ children }) {
   const { user, loading } = useAuth();
   if (loading)
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-950">
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950 transition-colors duration-200">
         <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
       </div>
     );
@@ -35,6 +36,23 @@ function PublicRoute({ children }) {
 
 export default function App() {
   return (
+    <AuthProvider>
+      <ThemeProvider>
+        <BrowserRouter>
+        <Toaster
+          position="top-center"
+          toastOptions={{
+            style: { background: "#1e293b", color: "#fff", border: "1px solid #334155" },
+          }}
+        />
+        <Routes>
+          <Route
+            path="/"
+            element={
+              <PublicRoute>
+                <Welcome />
+              </PublicRoute>
+            }
     <ErrorBoundary>
       <AuthProvider>
         <BrowserRouter>
@@ -122,6 +140,7 @@ export default function App() {
           </Route>
         </Routes>
       </BrowserRouter>
-    </AuthProvider>
+    </ThemeProvider>
+  </AuthProvider>
   );
 }
