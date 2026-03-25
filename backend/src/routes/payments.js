@@ -5,6 +5,29 @@ const authMiddleware = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
 const { send, history } = require('../controllers/paymentController');
 
+// Stellar minimum: 1 stroop = 0.0000001 XLM
+const STELLAR_MIN = 0.0000001;
+// Configurable max per transaction (env var, default 100 000)
+const MAX_TX = parseFloat(process.env.MAX_TRANSACTION_AMOUNT || '100000');
+
+/**
+ * Reusable amount validator: enforces Stellar minimum and configured maximum.
+ */
+function amountLimits(field = 'amount') {
+  return body(field)
+    .isFloat({ gt: 0 }).withMessage('Amount must be greater than 0')
+    .custom((v) => {
+      const n = parseFloat(v);
+      if (n < STELLAR_MIN) {
+        throw new Error(`Amount must be at least ${STELLAR_MIN} (1 stroop)`);
+      }
+      if (n > MAX_TX) {
+        throw new Error(`Amount exceeds the maximum allowed per transaction (${MAX_TX})`);
+      }
+      return true;
+    });
+}
+
 const validate = (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -23,8 +46,8 @@ router.post('/send',
         }
         return true;
       }),
-    body('amount').isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
-    body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES'])
+    amountLimits('amount'),
+    body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES']),
   ],
   validate,
   idempotency,

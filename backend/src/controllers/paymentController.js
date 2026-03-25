@@ -9,6 +9,9 @@ const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
 // Approximate XLM/USD rate — in production replace with a live price feed
 const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
 
+// Configurable daily send limit
+const DAILY_SEND_LIMIT = parseFloat(process.env.DAILY_SEND_LIMIT || "50000");
+
 function estimateUSDValue(amount, asset) {
   if (asset === "USD" || asset === "USDC") return parseFloat(amount);
   if (asset === "XLM") return parseFloat(amount) * XLM_USD_RATE;
@@ -23,6 +26,24 @@ async function fraudCheck(walletAddress) {
     [walletAddress],
   );
   return parseInt(result.rows[0].count) >= 5;
+}
+
+/**
+ * Daily send limit check.
+ * Sums all completed/pending transactions sent today (UTC) for this wallet.
+ * Returns true if adding `amount` would exceed the limit.
+ */
+async function dailyLimitExceeded(walletAddress, amount) {
+  const result = await db.query(
+    `SELECT COALESCE(SUM(amount), 0) AS total
+     FROM transactions
+     WHERE sender_wallet = $1
+       AND status != 'failed'
+       AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')`,
+    [walletAddress],
+  );
+  const totalToday = parseFloat(result.rows[0].total);
+  return totalToday + parseFloat(amount) > DAILY_SEND_LIMIT;
 }
 
 async function send(req, res, next) {
@@ -61,6 +82,15 @@ async function send(req, res, next) {
     // Prevent self-payment
     if (recipient_address === public_key) {
       return res.status(400).json({ error: 'Cannot send payment to your own wallet' });
+    }
+
+    // Daily send limit check
+    const overLimit = await dailyLimitExceeded(public_key, amount);
+    if (overLimit) {
+      return res.status(400).json({
+        error: `Daily send limit of ${DAILY_SEND_LIMIT} reached. Try again tomorrow.`,
+        code: 'DAILY_LIMIT_EXCEEDED',
+      });
     }
 
     // Fraud protection
