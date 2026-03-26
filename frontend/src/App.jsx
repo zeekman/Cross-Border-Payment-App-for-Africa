@@ -13,6 +13,7 @@ import Dashboard from "./pages/Dashboard";
 import SendMoney from "./pages/SendMoney";
 import ReceiveMoney from "./pages/ReceiveMoney";
 import RequestMoney from "./pages/RequestMoney";
+import ScheduledPayments from "./pages/ScheduledPayments";
 import TransactionHistory from "./pages/TransactionHistory";
 import Profile from "./pages/Profile";
 import KYCVerification from "./pages/KYCVerification";
@@ -102,6 +103,7 @@ export default function App() {
               <Route path="send" element={<SendMoney />} />
               <Route path="receive" element={<ReceiveMoney />} />
               <Route path="request" element={<RequestMoney />} />
+              <Route path="scheduled" element={<ScheduledPayments />} />
               <Route path="history" element={<TransactionHistory />} />
               <Route path="profile" element={<Profile />} />
               <Route path="kyc" element={<KYCVerification />} />
