@@ -6,6 +6,7 @@ const { send, history, findPath, sendPath } = require('../controllers/paymentCon
 const { send, history, exportCSV } = require('../controllers/paymentController');
 const { send, history } = require('../controllers/paymentController');
 const paymentSendValidators = require('../validators/paymentSendValidators');
+const { ALLOWED_HISTORY_ASSETS } = require('../utils/historyQuery');
 
 // Stellar minimum: 1 stroop = 0.0000001 XLM
 const STELLAR_MIN = 0.0000001;
@@ -82,6 +83,21 @@ router.get(
       .optional()
       .isInt({ min: 1, max: 100 })
       .withMessage('limit must be between 1 and 100'),
+    query('from')
+      .optional({ values: 'falsy' })
+      .trim()
+      .isISO8601()
+      .withMessage('from must be a valid ISO 8601 date'),
+    query('to')
+      .optional({ values: 'falsy' })
+      .trim()
+      .isISO8601()
+      .withMessage('to must be a valid ISO 8601 date'),
+    query('asset')
+      .optional({ values: 'falsy' })
+      .trim()
+      .isIn(ALLOWED_HISTORY_ASSETS)
+      .withMessage(`asset must be one of: ${ALLOWED_HISTORY_ASSETS.join(', ')}`),
   ],
   validate,
   history

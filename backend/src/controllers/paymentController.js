@@ -4,6 +4,7 @@ const db = require("../db");
 const { sendPayment, sendPathPayment, findPaymentPath } = require("../services/stellar");
 const webhook = require("../services/webhook");
 const cache = require("../utils/cache");
+const { parseHistoryFrom, parseHistoryTo, normalizeAsset } = require("../utils/historyQuery");
 
 // Configurable KYC transaction threshold in USD equivalent
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
@@ -200,9 +201,31 @@ async function send(req, res, next) {
 
 async function history(req, res, next) {
   try {
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
     const offset = (page - 1) * limit;
+
+    let fromBound = null;
+    let toBound = null;
+    if (req.query.from != null && String(req.query.from).trim() !== "") {
+      fromBound = parseHistoryFrom(req.query.from);
+      if (!fromBound) return res.status(400).json({ error: "Invalid from date; use ISO 8601 (e.g. YYYY-MM-DD)" });
+    }
+    if (req.query.to != null && String(req.query.to).trim() !== "") {
+      toBound = parseHistoryTo(req.query.to);
+      if (!toBound) return res.status(400).json({ error: "Invalid to date; use ISO 8601 (e.g. YYYY-MM-DD)" });
+    }
+    if (fromBound && toBound && fromBound.getTime() > toBound.getTime()) {
+      return res.status(400).json({ error: "from must be before or equal to to" });
+    }
+
+    let assetFilter = null;
+    if (req.query.asset != null && String(req.query.asset).trim() !== "") {
+      assetFilter = normalizeAsset(req.query.asset);
+      if (!assetFilter) {
+        return res.status(400).json({ error: "Invalid asset filter" });
+      }
+    }
 
     const walletResult = await db.query(
       "SELECT public_key FROM wallets WHERE user_id = $1",
@@ -212,21 +235,36 @@ async function history(req, res, next) {
 
     const { public_key } = walletResult.rows[0];
 
-    const [countResult, result] = await Promise.all([
-      db.query(
-        `SELECT COUNT(*) FROM transactions WHERE sender_wallet = $1 OR recipient_wallet = $1`,
-        [public_key],
-      ),
-      db.query(
-        `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at
+    const conditions = ["(sender_wallet = $1 OR recipient_wallet = $1)"];
+    const baseParams = [public_key];
+    if (fromBound) {
+      conditions.push(`created_at >= $${baseParams.length + 1}`);
+      baseParams.push(fromBound);
+    }
+    if (toBound) {
+      conditions.push(`created_at <= $${baseParams.length + 1}`);
+      baseParams.push(toBound);
+    }
+    if (assetFilter) {
+      conditions.push(`asset = $${baseParams.length + 1}`);
+      baseParams.push(assetFilter);
+    }
+    const whereClause = conditions.join(" AND ");
+
+    const countSql = `SELECT COUNT(*)::text AS count FROM transactions WHERE ${whereClause}`;
+    const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at
          FROM transactions
-         WHERE sender_wallet = $1 OR recipient_wallet = $1
-         ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-        [public_key, limit, offset],
-      ),
+         WHERE ${whereClause}
+         ORDER BY created_at DESC LIMIT $${baseParams.length + 1} OFFSET $${baseParams.length + 2}`;
+
+    const dataParams = [...baseParams, limit, offset];
+
+    const [countResult, result] = await Promise.all([
+      db.query(countSql, baseParams),
+      db.query(listSql, dataParams),
     ]);
 
-    const total = parseInt(countResult.rows[0].count);
+    const total = parseInt(countResult.rows[0].count, 10);
     const transactions = result.rows.map((tx) => ({
       ...tx,
       direction: tx.sender_wallet === public_key ? "sent" : "received",
@@ -237,7 +275,7 @@ async function history(req, res, next) {
       total,
       page,
       limit,
-      pages: Math.ceil(total / limit),
+      pages: Math.ceil(total / limit) || 0,
     });
   } catch (err) {
     next(err);

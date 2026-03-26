@@ -144,6 +144,14 @@
     "address_copied": "An kwafi adireshi!"
   },
   "history": {
+    "search_placeholder": "Bincika memo, adireshin, ko adadin",
+    "date_from": "Kwanan wata (daga)",
+    "date_to": "Kwanan wata (zuwa)",
+    "asset_label": "Dukiya",
+    "asset_all": "Duk dukiya",
+    "load_error": "An kasa loda ma'amaloli",
+    "load_more": "Kara loda",
+    "loading_more": "Ana loda...",
     "title": "Tarihi",
     "filter_all": "duka",
     "filter_sent": "aika",

@@ -55,6 +55,7 @@ const idempotency  = require('../middleware/idempotency');
 const { send, history } = require('../controllers/paymentController');
 const { query: qv, validationResult } = require('express-validator');
 const paymentSendValidators = require('../validators/paymentSendValidators');
+const { ALLOWED_HISTORY_ASSETS } = require('../utils/historyQuery');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -79,7 +80,10 @@ app.get(
   authMiddleware,
   [
     qv('page').optional().isInt({ min: 1 }),
-    qv('limit').optional().isInt({ min: 1, max: 100 })
+    qv('limit').optional().isInt({ min: 1, max: 100 }),
+    qv('from').optional({ values: 'falsy' }).trim().isISO8601(),
+    qv('to').optional({ values: 'falsy' }).trim().isISO8601(),
+    qv('asset').optional({ values: 'falsy' }).trim().isIn(ALLOWED_HISTORY_ASSETS),
   ],
   validate,
   history
@@ -758,6 +762,93 @@ describe('GET /api/payments/history — validation', () => {
       .get('/api/payments/history?limit=101')
       .set('Authorization', `Bearer ${makeToken()}`);
     expect(res.status).toBe(400);
+  });
+
+  test('returns 400 when from is after to', async () => {
+    const res = await request(app)
+      .get('/api/payments/history?from=2024-06-10&to=2024-01-01')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/from must be before/i);
+  });
+
+  test('returns 400 for invalid asset filter', async () => {
+    const res = await request(app)
+      .get('/api/payments/history?asset=BTC')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(400);
+  });
+
+  test('returns 400 for non-ISO from date', async () => {
+    const res = await request(app)
+      .get('/api/payments/history?from=not-a-date')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(400);
+  });
+});
+
+// ===========================================================================
+// GET /api/payments/history — date & asset filters (server-side)
+// ===========================================================================
+describe('GET /api/payments/history — filters', () => {
+  test('applies from, to, and asset in SQL when all query params set', async () => {
+    const txRow = makeTxRow({ asset: 'USDC', tx_hash: 'usdc' + FAKE_TX_HASH.slice(4) });
+    db.query
+      .mockResolvedValueOnce({ rows: [{ public_key: SENDER_KEY }] })
+      .mockResolvedValueOnce({ rows: [{ count: '1' }] })
+      .mockResolvedValueOnce({ rows: [txRow] });
+
+    const res = await request(app)
+      .get('/api/payments/history?from=2024-01-01&to=2024-12-31&asset=USDC&page=1&limit=20')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(1);
+    expect(res.body.transactions[0].asset).toBe('USDC');
+
+    const dataCall = db.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('SELECT id') && c[0].includes('FROM transactions'),
+    );
+    expect(dataCall[0]).toMatch(/created_at >=/);
+    expect(dataCall[0]).toMatch(/created_at <=/);
+    expect(dataCall[0]).toMatch(/asset =/);
+    expect(dataCall[1]).toEqual(
+      expect.arrayContaining([SENDER_KEY, expect.any(Date), expect.any(Date), 'USDC', 20, 0]),
+    );
+  });
+
+  test('returns 200 with only from bound (open-ended range to now)', async () => {
+    mockHistoryHappyPath([]);
+
+    const res = await request(app)
+      .get('/api/payments/history?from=2020-01-01')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    const dataCall = db.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('SELECT id') && c[0].includes('FROM transactions'),
+    );
+    expect(dataCall[0]).toMatch(/created_at >=/);
+    expect(dataCall[0]).not.toMatch(/created_at <=/);
+  });
+
+  test('returns 200 with only asset filter', async () => {
+    const rows = [makeTxRow({ asset: 'XLM', tx_hash: 'onlyxlm' + FAKE_TX_HASH.slice(5) })];
+    db.query
+      .mockResolvedValueOnce({ rows: [{ public_key: SENDER_KEY }] })
+      .mockResolvedValueOnce({ rows: [{ count: '1' }] })
+      .mockResolvedValueOnce({ rows });
+
+    const res = await request(app)
+      .get('/api/payments/history?asset=XLM')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.transactions[0].asset).toBe('XLM');
+    const dataCall = db.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('SELECT id') && c[0].includes('FROM transactions'),
+    );
+    expect(dataCall[1]).toEqual(expect.arrayContaining([SENDER_KEY, 'XLM', 20, 0]));
   });
 });
 

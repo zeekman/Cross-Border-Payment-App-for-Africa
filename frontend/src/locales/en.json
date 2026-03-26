@@ -150,7 +150,15 @@
     "filter_received": "received",
     "to": "To:",
     "from": "From:",
-    "export_csv": "Export CSV"
+    "export_csv": "Export CSV",
+    "search_placeholder": "Search memo, address, or amount",
+    "date_from": "From date",
+    "date_to": "To date",
+    "asset_label": "Asset",
+    "asset_all": "All assets",
+    "load_error": "Failed to load transactions",
+    "load_more": "Load more",
+    "loading_more": "Loading..."
   },
   "profile": {
     "title": "Profile",

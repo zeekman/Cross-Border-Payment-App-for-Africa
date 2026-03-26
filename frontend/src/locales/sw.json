@@ -150,7 +150,15 @@
     "filter_received": "zilizopokelewa",
     "to": "Kwa:",
     "from": "Kutoka:",
-    "export_csv": "Hamisha CSV"
+    "export_csv": "Hamisha CSV",
+    "search_placeholder": "Tafuta memo, anwani, au kiasi",
+    "date_from": "Tarehe ya kuanzia",
+    "date_to": "Tarehe ya mwisho",
+    "asset_label": "Mali",
+    "asset_all": "Mali zote",
+    "load_error": "Imeshindwa kupakia miamala",
+    "load_more": "Pakia zaidi",
+    "loading_more": "Inapakia..."
   },
   "profile": {
     "title": "Wasifu",
