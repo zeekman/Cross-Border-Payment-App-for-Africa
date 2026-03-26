@@ -12,7 +12,7 @@ export default function ReceiveMoney() {
   const { user } = useAuth();
   const { t } = useTranslation();
   const [walletAddress, setWalletAddress] = useState(user?.wallet_address || '');
-  const [copied, setCopied] = useState(false);
+  const [federationAddress, setFederationAddress] = useState('');
 
   useEffect(() => {
     if (!walletAddress) {
@@ -20,11 +20,17 @@ export default function ReceiveMoney() {
     }
   }, [walletAddress]);
 
-  const copyAddress = () => {
-    navigator.clipboard.writeText(walletAddress);
-    setCopied(true);
+  useEffect(() => {
+    if (user?.email && walletAddress) {
+      const domain = process.env.REACT_APP_FEDERATION_DOMAIN || 'afripay.com';
+      const username = user.email.split('@')[0];
+      setFederationAddress(`${username}*${domain}`);
+    }
+  }, [user, walletAddress]);
+
+  const copyAddress = (addr) => {
+    navigator.clipboard.writeText(addr);
     toast.success(t('receive.address_copied'));
-    setTimeout(() => setCopied(false), 2000);
   };
 
   const shareAddress = async () => {
@@ -56,22 +62,41 @@ export default function ReceiveMoney() {
       </div>
 
       {/* Address display */}
-      <div className="bg-gray-900 rounded-xl p-4 mb-4">
-        <p className="text-xs text-gray-500 mb-2">{t('receive.address_label')}</p>
-        <p className="text-white font-mono text-sm break-all leading-relaxed">{walletAddress}</p>
+      <div className="space-y-3 mb-4">
+        {federationAddress && (
+          <div className="bg-primary-500/10 border border-primary-500/30 rounded-xl p-4">
+            <p className="text-xs text-gray-400 mb-2">{t('receive.federation_label') || 'Federation Address'}</p>
+            <p className="text-white font-mono text-sm break-all leading-relaxed">{federationAddress}</p>
+            <button
+              onClick={() => copyAddress(federationAddress)}
+              className="text-primary-400 hover:text-primary-300 text-xs mt-2 flex items-center gap-1"
+            >
+              <Copy size={14} /> {t('common.copy')}
+            </button>
+          </div>
+        )}
+        <div className="bg-gray-900 rounded-xl p-4">
+          <p className="text-xs text-gray-500 mb-2">{t('receive.address_label')}</p>
+          <p className="text-white font-mono text-sm break-all leading-relaxed">{walletAddress}</p>
+          <button
+            onClick={() => copyAddress(walletAddress)}
+            className="text-gray-400 hover:text-gray-300 text-xs mt-2 flex items-center gap-1"
+          >
+            <Copy size={14} /> {t('common.copy')}
+          </button>
+        </div>
       </div>
 
       {/* Action buttons */}
       <div className="grid grid-cols-2 gap-3">
         <button
-          onClick={copyAddress}
+          onClick={() => copyAddress(walletAddress)}
           className="bg-gray-800 hover:bg-gray-700 rounded-xl py-3.5 flex items-center justify-center gap-2 text-white font-medium transition-colors"
         >
-          {copied ? <CheckCheck size={18} className="text-primary-500" /> : <Copy size={18} />}
-          {copied ? t('common.copied') : t('common.copy')}
+          <Copy size={18} /> {t('common.copy')}
         </button>
         <button
-          onClick={shareAddress}
+          onClick={() => navigator.share?.({ title: 'My AfriPay Wallet', text: federationAddress || walletAddress })}
           className="bg-primary-500 hover:bg-primary-600 rounded-xl py-3.5 flex items-center justify-center gap-2 text-white font-medium transition-colors"
         >
           <Share2 size={18} /> {t('common.share')}

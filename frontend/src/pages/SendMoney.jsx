@@ -64,8 +64,16 @@ export default function SendMoney() {
     setLoading(true);
     try {
       const m = form.memo.trim();
+      let recipientAddress = form.recipient_address;
+      
+      // Resolve federation address if needed
+      if (recipientAddress.includes('*')) {
+        const res = await api.get('/payments/resolve-federation', { params: { address: recipientAddress } });
+        recipientAddress = res.data.public_key;
+      }
+      
       const payload = {
-        recipient_address: form.recipient_address,
+        recipient_address: recipientAddress,
         amount: parseFloat(form.amount),
         asset: form.asset
       };
@@ -118,7 +126,7 @@ export default function SendMoney() {
           <input
             type="text"
             required
-            placeholder={t('send.recipient_placeholder')}
+            placeholder={t('send.recipient_placeholder') || 'Wallet address or username*domain'}
             value={form.recipient_address}
             onChange={e => setForm({ ...form, recipient_address: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors font-mono text-sm"

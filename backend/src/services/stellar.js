@@ -148,6 +148,23 @@ function buildStellarMemo(memo, memoType = 'text') {
   }
 }
 
+// Resolve federation address to public key
+async function resolveFederationAddress(address) {
+  if (!address.includes('*')) return address;
+  
+  try {
+    const federationServer = new StellarSdk.FederationServer(
+      `https://${address.split('*')[1]}/.well-known/stellar.toml`
+    );
+    const result = await federationServer.resolveAddress(address);
+    return result.account_id;
+  } catch (e) {
+    const err = new Error(`Failed to resolve federation address: ${address}`);
+    err.status = 400;
+    throw err;
+  }
+}
+
 // Send payment
 async function sendPayment({
   senderPublicKey,
@@ -158,11 +175,12 @@ async function sendPayment({
   memo,
   memoType = 'text'
 }) {
+  const resolvedRecipient = await resolveFederationAddress(recipientPublicKey);
   const assetObj = resolveAsset(asset);
 
   // Trustline check is only required for non-native assets
   if (asset !== 'XLM') {
-    await checkTrustline(recipientPublicKey, assetObj);
+    await checkTrustline(resolvedRecipient, assetObj);
   }
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
@@ -174,7 +192,7 @@ async function sendPayment({
     networkPassphrase
   })
     .addOperation(StellarSdk.Operation.payment({
-      destination: recipientPublicKey,
+      destination: resolvedRecipient,
       asset: assetObj,
       amount: String(amount)
     }))
@@ -214,4 +232,4 @@ async function getTransactions(publicKey, limit = 20) {
   }
 }
 
-module.exports = { createWallet, getBalance, sendPayment, getTransactions, decryptPrivateKey };
+module.exports = { createWallet, getBalance, sendPayment, getTransactions, decryptPrivateKey, resolveFederationAddress };
