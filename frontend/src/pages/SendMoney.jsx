@@ -1,12 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Send, ChevronDown, Users, Camera } from 'lucide-react';
+import { ArrowLeft, Send, ChevronDown, Users, Camera, ArrowRightLeft } from 'lucide-react';
 import api from '../utils/api';
 import { useExchangeRates } from '../hooks/useExchangeRates';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import QRScanner from '../components/QRScanner';
 import PINVerificationModal from '../components/PINVerificationModal';
+
+const SLIPPAGE_OPTIONS = [0.5, 1, 2];
+const DEFAULT_SLIPPAGE = 1;
 
 export default function SendMoney() {
   const navigate = useNavigate();
@@ -16,6 +19,8 @@ export default function SendMoney() {
     amount: '',
     asset: 'XLM',
     memo: '',
+    destination_asset: '',
+    slippage: DEFAULT_SLIPPAGE,
     memo_type: 'text'
   });
   const [contacts, setContacts] = useState([]);
@@ -25,15 +30,50 @@ export default function SendMoney() {
   const [loading, setLoading] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
+  const [pathResult, setPathResult] = useState(null);
+  const [pathLoading, setPathLoading] = useState(false);
+
+  const isCrossAsset = form.destination_asset && form.destination_asset !== form.asset;
 
   useEffect(() => {
     api.get('/wallet/contacts').then(r => setContacts(r.data.contacts || [])).catch(() => {});
   }, []);
 
+  // Debounced path finding
+  const findPath = useCallback(async () => {
+    if (!isCrossAsset || !form.amount || !form.recipient_address) {
+      setPathResult(null);
+      return;
+    }
+    setPathLoading(true);
+    try {
+      const res = await api.post('/payments/find-path', {
+        source_asset: form.asset,
+        source_amount: parseFloat(form.amount),
+        destination_asset: form.destination_asset,
+        recipient_address: form.recipient_address,
+      });
+      setPathResult(res.data);
+    } catch {
+      setPathResult(null);
+    } finally {
+      setPathLoading(false);
+    }
+  }, [form.amount, form.asset, form.destination_asset, form.recipient_address, isCrossAsset]);
+
+  useEffect(() => {
+    const timer = setTimeout(findPath, 600);
+    return () => clearTimeout(timer);
+  }, [findPath]);
+
   const estimatedValue = form.amount && form.asset === 'XLM'
-    ? `≈ $${convertFromXLM(form.amount, 'USD')} USD`
+    ? `≈ ${convertFromXLM(form.amount, 'USD')} USD`
     : '';
 
+  // Minimum destination amount after slippage
+  const destMin = pathResult
+    ? (parseFloat(pathResult.destinationAmount) * (1 - form.slippage / 100)).toFixed(7)
+    : null;
   const memoTrimmed = form.memo.trim();
   const memoMaxLen =
     form.memo_type === 'id' ? 20 : form.memo_type === 'text' ? 28 : 64;
@@ -41,13 +81,30 @@ export default function SendMoney() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!confirmed) { setConfirmed(true); return; }
-    // Show PIN verification modal instead of directly submitting
     setShowPINVerification(true);
   };
 
   const handlePINVerified = async () => {
     setLoading(true);
     try {
+      if (isCrossAsset && pathResult) {
+        await api.post('/payments/send-path', {
+          recipient_address: form.recipient_address,
+          source_asset: form.asset,
+          source_amount: parseFloat(form.amount),
+          destination_asset: form.destination_asset,
+          destination_min_amount: parseFloat(destMin),
+          path: pathResult.path,
+          memo: form.memo || undefined,
+        });
+      } else {
+        await api.post('/payments/send', {
+          recipient_address: form.recipient_address,
+          amount: parseFloat(form.amount),
+          asset: form.asset,
+          memo: form.memo || undefined,
+        });
+      }
       const m = form.memo.trim();
       const payload = {
         recipient_address: form.recipient_address,
@@ -125,7 +182,7 @@ export default function SendMoney() {
           )}
         </div>
 
-        {/* Amount + Asset */}
+        {/* Amount + Source Asset */}
         <div>
           <label className="text-sm text-gray-400 mb-1 block">{t('send.amount')}</label>
           <div className="flex gap-2">
@@ -157,6 +214,69 @@ export default function SendMoney() {
               <p className="text-xs text-gray-500">{estimatedValue}</p>
               {usingApproximateRates && (
                 <p className="text-xs text-amber-500/90">{t('common.rates_disclaimer')}</p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Destination Asset (cross-asset toggle) */}
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-sm text-gray-400 flex items-center gap-1">
+              <ArrowRightLeft size={13} /> Recipient receives (optional)
+            </label>
+            {form.destination_asset && (
+              <button type="button" onClick={() => { setForm({ ...form, destination_asset: '' }); setPathResult(null); }}
+                className="text-xs text-gray-500 hover:text-white transition-colors">
+                Clear
+              </button>
+            )}
+          </div>
+          <div className="relative">
+            <select
+              value={form.destination_asset}
+              onChange={e => setForm({ ...form, destination_asset: e.target.value })}
+              className="appearance-none w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
+            >
+              <option value="">Same as sent ({form.asset})</option>
+              {CURRENCIES.filter(c => c.code !== form.asset).map(c => (
+                <option key={c.code} value={c.code}>{c.flag} {c.code}</option>
+              ))}
+            </select>
+            <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          </div>
+
+          {/* Path result / loading */}
+          {isCrossAsset && (
+            <div className="mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm">
+              {pathLoading && <p className="text-gray-400 animate-pulse">Finding best rate...</p>}
+              {!pathLoading && pathResult && (
+                <div className="space-y-1">
+                  <p className="text-green-400">
+                    Recipient receives ≈ <span className="font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span>
+                  </p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-gray-500">Slippage tolerance:</span>
+                    {SLIPPAGE_OPTIONS.map(s => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setForm({ ...form, slippage: s })}
+                        className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${
+                          form.slippage === s
+                            ? 'border-primary-500 text-primary-400'
+                            : 'border-gray-600 text-gray-400 hover:border-gray-400'
+                        }`}
+                      >
+                        {s}%
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-gray-500">Min received: {destMin} {form.destination_asset}</p>
+                </div>
+              )}
+              {!pathLoading && !pathResult && form.amount && form.recipient_address && (
+                <p className="text-yellow-500 text-xs">No conversion path found for these assets</p>
               )}
             </div>
           )}
@@ -201,6 +321,10 @@ export default function SendMoney() {
             <div className="text-sm text-gray-300 space-y-1">
               <p>{t('send.confirm_to')} <span className="font-mono text-xs">{form.recipient_address.slice(0, 20)}...</span></p>
               <p>{t('send.confirm_amount')} <span className="text-white font-semibold">{form.amount} {form.asset}</span></p>
+              {isCrossAsset && pathResult && (
+                <p>Recipient receives ≈ <span className="text-white font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span> (min {destMin})</p>
+              )}
+              {form.memo && <p>{t('send.confirm_memo')} {form.memo}</p>}
               {form.memo.trim() ? (
                 <>
                   <p>{t('send.confirm_memo')} {form.memo.trim()}</p>
@@ -215,7 +339,7 @@ export default function SendMoney() {
 
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || (isCrossAsset && !pathResult)}
           className={`w-full font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors ${
             confirmed
               ? 'bg-yellow-500 hover:bg-yellow-600 text-black'
@@ -237,14 +361,12 @@ export default function SendMoney() {
         )}
       </form>
 
-      {/* QR Scanner Modal */}
       <QRScanner
         isOpen={showScanner}
         onClose={() => setShowScanner(false)}
         onScan={(address) => setForm({ ...form, recipient_address: address })}
       />
 
-      {/* PIN Verification Modal */}
       <PINVerificationModal
         isOpen={showPINVerification}
         onClose={() => setShowPINVerification(false)}

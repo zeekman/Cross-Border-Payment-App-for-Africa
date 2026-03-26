@@ -58,7 +58,7 @@ export default function TransactionHistory() {
   async function handleExportCSV() {
     setExporting(true);
     try {
-      const params = filter !== 'all' ? { status: filter } : {};
+      const params = filter !== 'all' ? { direction: filter } : {};
       const res = await api.get('/payments/export', { params, responseType: 'blob' });
       const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
       const a = document.createElement('a');

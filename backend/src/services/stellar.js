@@ -214,4 +214,103 @@ async function getTransactions(publicKey, limit = 20) {
   }
 }
 
-module.exports = { createWallet, getBalance, sendPayment, getTransactions, decryptPrivateKey };
+/**
+ * Find the best path for a strict-send cross-asset payment.
+ * Returns the top path result from Horizon's path-finding API.
+ *
+ * @param {string} sourceAsset       - Asset the sender is spending (e.g. 'XLM')
+ * @param {string} sourceAmount      - Amount the sender will spend
+ * @param {string} destinationAsset  - Asset the recipient should receive
+ * @param {string} destinationPublicKey - Recipient's Stellar public key
+ * @returns {{ destinationAmount, path }} or null if no path found
+ */
+async function findPaymentPath(sourceAsset, sourceAmount, destinationAsset, destinationPublicKey) {
+  const srcAsset = resolveAsset(sourceAsset);
+  const dstAsset = resolveAsset(destinationAsset);
+
+  const result = await server
+    .strictSendPaths(srcAsset, String(sourceAmount), [dstAsset])
+    .call();
+
+  if (!result.records || result.records.length === 0) return null;
+
+  // Pick the record with the highest destination_amount
+  const best = result.records.reduce((a, b) =>
+    parseFloat(a.destination_amount) >= parseFloat(b.destination_amount) ? a : b
+  );
+
+  return {
+    destinationAmount: best.destination_amount,
+    path: best.path,
+  };
+}
+
+/**
+ * Execute a strict-send path payment.
+ * Sender spends exactly `amount` of `sourceAsset`; recipient receives
+ * at least `destinationMinAmount` of `destinationAsset`.
+ */
+async function sendPathPayment({
+  senderPublicKey,
+  encryptedSecretKey,
+  recipientPublicKey,
+  sourceAsset,
+  sourceAmount,
+  destinationAsset,
+  destinationMinAmount,
+  path = [],
+  memo,
+}) {
+  const srcAsset = resolveAsset(sourceAsset);
+  const dstAsset = resolveAsset(destinationAsset);
+
+  // Trustline check for non-native destination asset
+  if (destinationAsset !== 'XLM') {
+    await checkTrustline(recipientPublicKey, dstAsset);
+  }
+
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const senderAccount = await server.loadAccount(senderPublicKey);
+
+  // Convert path array (from Horizon) to StellarSdk Asset objects
+  const sdkPath = path.map((p) =>
+    p.asset_type === 'native'
+      ? StellarSdk.Asset.native()
+      : new StellarSdk.Asset(p.asset_code, p.asset_issuer)
+  );
+
+  const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
+    fee: await server.fetchBaseFee(),
+    networkPassphrase,
+  })
+    .addOperation(
+      StellarSdk.Operation.pathPaymentStrictSend({
+        sendAsset: srcAsset,
+        sendAmount: String(sourceAmount),
+        destination: recipientPublicKey,
+        destAsset: dstAsset,
+        destMin: String(destinationMinAmount),
+        path: sdkPath,
+      })
+    )
+    .setTimeout(30);
+
+  if (memo) txBuilder.addMemo(StellarSdk.Memo.text(memo.slice(0, 28)));
+
+  const transaction = txBuilder.build();
+  transaction.sign(senderKeypair);
+
+  const result = await server.submitTransaction(transaction);
+  return { transactionHash: result.hash, ledger: result.ledger };
+}
+
+module.exports = {
+  createWallet,
+  getBalance,
+  sendPayment,
+  sendPathPayment,
+  findPaymentPath,
+  getTransactions,
+  decryptPrivateKey,
+};
