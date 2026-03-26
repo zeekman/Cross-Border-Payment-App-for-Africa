@@ -11,6 +11,7 @@ import PINVerificationModal from '../components/PINVerificationModal';
 export default function SendMoney() {
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const submitButtonRef = React.useRef(null);
   const [form, setForm] = useState({
     recipient_address: '',
     amount: '',
@@ -24,9 +25,24 @@ export default function SendMoney() {
   const [showPINVerification, setShowPINVerification] = useState(false);
   const [loading, setLoading] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
 
   useEffect(() => {
     api.get('/wallet/contacts').then(r => setContacts(r.data.contacts || [])).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.visualViewport) {
+        const isOpen = window.visualViewport.height < window.innerHeight * 0.75;
+        setKeyboardOpen(isOpen);
+        if (isOpen && submitButtonRef.current) {
+          setTimeout(() => submitButtonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 100);
+        }
+      }
+    };
+    window.visualViewport?.addEventListener('resize', handleResize);
+    return () => window.visualViewport?.removeEventListener('resize', handleResize);
   }, []);
 
   const estimatedValue = form.amount && form.asset === 'XLM'
@@ -70,14 +86,14 @@ export default function SendMoney() {
   };
 
   return (
-    <div className="px-4 py-6 max-w-lg mx-auto">
+    <div className="px-4 py-6 max-w-lg mx-auto pb-safe" style={{ paddingBottom: keyboardOpen ? 'max(1.5rem, env(safe-area-inset-bottom))' : '1.5rem' }}>
       <button onClick={() => navigate(-1)} className="text-gray-400 hover:text-white mb-6 flex items-center gap-1">
         <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
       <h2 className="text-2xl font-bold text-white mb-6">{t('send.title')}</h2>
 
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit} className="space-y-4 overflow-y-auto" style={{ maxHeight: keyboardOpen ? 'calc(100vh - 200px)' : 'auto' }}>
         {/* Recipient */}
         <div>
           <div className="flex items-center justify-between mb-1">
@@ -206,6 +222,7 @@ export default function SendMoney() {
         )}
 
         <button
+          ref={submitButtonRef}
           type="submit"
           disabled={loading}
           className={`w-full font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors ${
