@@ -1,6 +1,7 @@
 const StellarSdk = require('@stellar/stellar-sdk');
 const crypto = require('crypto');
 const logger = require('../utils/logger');
+const { withRetry } = require('../utils/retry');
 
 const isTestnet = process.env.STELLAR_NETWORK !== 'mainnet';
 const server = new StellarSdk.Horizon.Server(
@@ -52,7 +53,7 @@ async function createWallet() {
 // Get account balance
 async function getBalance(publicKey) {
   try {
-    const account = await server.loadAccount(publicKey);
+    const account = await withRetry(() => server.loadAccount(publicKey), { label: 'loadAccount' });
     return account.balances.map(b => ({
       asset: b.asset_type === 'native' ? 'XLM' : b.asset_code,
       balance: b.balance
@@ -80,7 +81,7 @@ function resolveAsset(asset) {
 async function checkTrustline(recipientPublicKey, assetObj) {
   let recipientAccount;
   try {
-    recipientAccount = await server.loadAccount(recipientPublicKey);
+    recipientAccount = await withRetry(() => server.loadAccount(recipientPublicKey), { label: 'loadAccount(recipient)' });
   } catch (e) {
     if (e.response?.status === 404) {
       const err = new Error('Recipient account does not exist on the Stellar network.');
@@ -167,10 +168,10 @@ async function sendPayment({
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const senderAccount = await server.loadAccount(senderPublicKey);
+  const senderAccount = await withRetry(() => server.loadAccount(senderPublicKey), { label: 'loadAccount(sender)' });
 
   const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
-    fee: await server.fetchBaseFee(),
+    fee: await withRetry(() => server.fetchBaseFee(), { label: 'fetchBaseFee' }),
     networkPassphrase
   })
     .addOperation(StellarSdk.Operation.payment({
@@ -186,7 +187,7 @@ async function sendPayment({
   const transaction = txBuilder.build();
   transaction.sign(senderKeypair);
 
-  const result = await server.submitTransaction(transaction);
+  const result = await withRetry(() => server.submitTransaction(transaction), { label: 'submitTransaction' });
   return {
     transactionHash: result.hash,
     ledger: result.ledger
