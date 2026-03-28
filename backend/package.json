@@ -7,6 +7,10 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "jest --runInBand",
+    "lint": "eslint . --ext .js",
+    "lint:fix": "eslint . --ext .js --fix",
+    "format": "prettier --write '**/*.{js,json,md}'",
+    "format:check": "prettier --check '**/*.{js,json,md}'",
     "migrate": "node-pg-migrate -m ../database/migrations up",
     "migrate:rollback": "node-pg-migrate -m ../database/migrations down 1"
   },
