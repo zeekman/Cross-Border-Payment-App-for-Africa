@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { LogOut, User, Mail, Phone, Wallet, Copy, CheckCheck, Plus, Globe, Trash2, ShieldAlert, Eye, EyeOff } from 'lucide-react';
+import { LogOut, User, Mail, Phone, Wallet, Copy, CheckCheck, Plus, Globe, Trash2, ShieldAlert, Eye, EyeOff, Building2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { truncateAddress } from '../utils/currency';
 import api from '../utils/api';
@@ -303,6 +303,23 @@ export default function Profile() {
           </div>
         )}
       </div>
+
+      {/* Business Account */}
+      <button
+        onClick={() => navigate('/business')}
+        className="w-full bg-gray-900 hover:bg-gray-800 border border-gray-800 rounded-2xl p-4 flex items-center gap-3 transition-colors"
+      >
+        <Building2 size={18} className="text-primary-400 shrink-0" />
+        <div className="flex-1 text-left">
+          <p className="text-sm font-semibold text-white">Business Account</p>
+          <p className="text-xs text-gray-500">
+            {user?.account_type === 'business' ? 'Manage multisig signers' : 'Upgrade for multisig support'}
+          </p>
+        </div>
+        {user?.account_type === 'business' && (
+          <span className="text-xs bg-primary-500/20 text-primary-400 px-2 py-0.5 rounded-full shrink-0">Active</span>
+        )}
+      </button>
 
       {/* Logout */}
       <button

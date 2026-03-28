@@ -172,7 +172,7 @@ async function verifyEmail(req, res, next) {
 async function getMe(req, res, next) {
   try {
     const result = await db.query(
-      `SELECT u.id, u.full_name, u.email, u.phone, u.pin_setup_completed, u.totp_enabled, w.public_key
+      `SELECT u.id, u.full_name, u.email, u.phone, u.pin_setup_completed, u.totp_enabled, u.account_type, w.public_key
        FROM users u LEFT JOIN wallets w ON w.user_id = u.id
        WHERE u.id = $1`,
       [req.user.userId]
@@ -186,7 +186,8 @@ async function getMe(req, res, next) {
       phone: u.phone,
       wallet_address: u.public_key,
       pin_setup_completed: u.pin_setup_completed,
-      totp_enabled: u.totp_enabled
+      totp_enabled: u.totp_enabled,
+      account_type: u.account_type,
     });
   } catch (err) {
     next(err);
