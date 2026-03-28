@@ -62,11 +62,23 @@ jest.mock('react-router-dom', () => ({
   useNavigate: () => jest.fn(),
 }));
 
-const CONTACT = {
-  id: 1,
-  name: 'Alice',
-  wallet_address: 'GALICE000000000000000000000000000000000000000000000000001',
-};
+const CONTACTS = [
+  {
+    id: 1,
+    name: 'Alice',
+    wallet_address: 'GALICE000000000000000000000000000000000000000000000000001',
+  },
+  {
+    id: 2,
+    name: 'Bob',
+    wallet_address: 'GBOB0000000000000000000000000000000000000000000000000002',
+  },
+  {
+    id: 3,
+    name: 'Charlie',
+    wallet_address: 'GCHARLIE00000000000000000000000000000000000000000000001',
+  },
+];
 const RECIPIENT = 'GBOB0000000000000000000000000000000000000000000000000001';
 
 function renderComponent() {
@@ -163,14 +175,95 @@ test('cancel button resets confirmation state', async () => {
 });
 
 test('selecting a contact populates the recipient field', async () => {
-  api.get.mockResolvedValue({ data: { contacts: [CONTACT] } });
+  api.get.mockResolvedValue({ data: { contacts: [CONTACTS[0]] } });
   renderComponent();
 
   await screen.findByText('Contacts');
   fireEvent.click(screen.getByText('Contacts'));
   fireEvent.click(screen.getByText('Alice'));
 
-  expect(screen.getByPlaceholderText('G... Stellar address')).toHaveValue(CONTACT.wallet_address);
+  expect(screen.getByPlaceholderText('G... Stellar address')).toHaveValue(CONTACTS[0].wallet_address);
+});
+
+test('search input filters contacts by name', async () => {
+  api.get.mockResolvedValue({ data: { contacts: CONTACTS } });
+  renderComponent();
+
+  await screen.findByText('Contacts');
+  fireEvent.click(screen.getByText('Contacts'));
+
+  // Search for "Bob"
+  const searchInput = screen.getByPlaceholderText('Search contacts...');
+  await userEvent.type(searchInput, 'Bob');
+
+  // Should only show Bob
+  expect(screen.getByText('Bob')).toBeInTheDocument();
+  expect(screen.queryByText('Alice')).not.toBeInTheDocument();
+  expect(screen.queryByText('Charlie')).not.toBeInTheDocument();
+});
+
+test('search input filters contacts by wallet address', async () => {
+  api.get.mockResolvedValue({ data: { contacts: CONTACTS } });
+  renderComponent();
+
+  await screen.findByText('Contacts');
+  fireEvent.click(screen.getByText('Contacts'));
+
+  // Search by partial wallet address
+  const searchInput = screen.getByPlaceholderText('Search contacts...');
+  await userEvent.type(searchInput, 'GCHARLIE');
+
+  // Should only show Charlie
+  expect(screen.getByText('Charlie')).toBeInTheDocument();
+  expect(screen.queryByText('Alice')).not.toBeInTheDocument();
+  expect(screen.queryByText('Bob')).not.toBeInTheDocument();
+});
+
+test('shows "No contacts match" when search returns no results', async () => {
+  api.get.mockResolvedValue({ data: { contacts: CONTACTS } });
+  renderComponent();
+
+  await screen.findByText('Contacts');
+  fireEvent.click(screen.getByText('Contacts'));
+
+  // Search for non-existent contact
+  const searchInput = screen.getByPlaceholderText('Search contacts...');
+  await userEvent.type(searchInput, 'NonExistent');
+
+  // Should show "No contacts match"
+  expect(screen.getByText('No contacts match')).toBeInTheDocument();
+});
+
+test('keyboard navigation works in contacts dropdown', async () => {
+  api.get.mockResolvedValue({ data: { contacts: CONTACTS } });
+  renderComponent();
+
+  await screen.findByText('Contacts');
+  fireEvent.click(screen.getByText('Contacts'));
+
+  // Press ArrowDown to select first contact
+  fireEvent.keyDown(screen.getByRole('button', { name: /contacts/i }), { key: 'ArrowDown' });
+
+  // Press Enter to select the highlighted contact
+  fireEvent.keyDown(screen.getByRole('button', { name: /contacts/i }), { key: 'Enter' });
+
+  // Should populate the recipient field with the first contact (Alice)
+  expect(screen.getByPlaceholderText('G... Stellar address')).toHaveValue(CONTACTS[0].wallet_address);
+});
+
+test('search is case-insensitive', async () => {
+  api.get.mockResolvedValue({ data: { contacts: CONTACTS } });
+  renderComponent();
+
+  await screen.findByText('Contacts');
+  fireEvent.click(screen.getByText('Contacts'));
+
+  // Search with lowercase
+  const searchInput = screen.getByPlaceholderText('Search contacts...');
+  await userEvent.type(searchInput, 'alice');
+
+  // Should still find Alice
+  expect(screen.getByText('Alice')).toBeInTheDocument();
 });
 
 test('submit button is disabled while loading', async () => {

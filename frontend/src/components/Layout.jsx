@@ -1,10 +1,10 @@
 import React from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Send, Download, Clock, Upload, Repeat2, User, LogOut, Webhook, Sun, Moon, Bell, BellOff } from 'lucide-react';
-import { LayoutDashboard, Send, Download, Clock, TrendingUp, User, LogOut, Webhook, Sun, Moon, Bell, BellOff } from 'lucide-react';
+import { LayoutDashboard, Send, Download, Clock, Upload, Repeat2, User, LogOut, Webhook, Sun, Moon, Bell, BellOff, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { usePushNotifications } from '../hooks/usePushNotifications';
+import { useStellarStatus } from '../hooks/useStellarStatus';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -24,6 +24,7 @@ export default function Layout() {
   const navigate = useNavigate();
   const { theme, toggleTheme } = useTheme();
   const { supported, subscribed, loading, subscribe, unsubscribe } = usePushNotifications();
+  const { isDegraded, status } = useStellarStatus();
 
   const handleLogout = () => { logout(); navigate('/'); };
 
@@ -32,6 +33,21 @@ export default function Layout() {
       {isTestnet && (
         <div className="bg-yellow-400 text-yellow-900 text-center text-xs font-semibold py-1">
           ⚠️ TESTNET — Do not use real funds
+        </div>
+      )}
+      {/* Stellar Network Status Banner */}
+      {isDegraded && (
+        <div className="bg-yellow-500 text-yellow-900 text-center text-xs font-semibold py-2 px-4 flex items-center justify-center gap-2">
+          <AlertTriangle size={14} />
+          <span>Stellar network is experiencing issues. Payments may be delayed.</span>
+          <a
+            href="https://status.stellar.org"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-yellow-800"
+          >
+            Status Page
+          </a>
         </div>
       )}
       {/* Top bar */}

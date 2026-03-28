@@ -27,7 +27,7 @@ export default function Analytics() {
 
   if (loading) {
     return (
-      <div className="px-4 py-6 max-w-lg mx-auto flex items-center justify-center min-h-screen">
+      <div className="px-4 py-6 max-w-lg mx-auto flex items-center justify-center min-h-screen" role="status" aria-label="Loading">
         <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
       </div>
     );

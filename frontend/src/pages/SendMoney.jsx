@@ -1,8 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Send, ChevronDown, Users, Camera } from 'lucide-react';
-import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Send, ChevronDown, Users, Camera, ArrowRightLeft } from 'lucide-react';
 import api from '../utils/api';
 import { useExchangeRates } from '../hooks/useExchangeRates';
@@ -18,23 +15,22 @@ export default function SendMoney() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const [searchParams] = useSearchParams();
+  const submitButtonRef = React.useRef(null);
   const [form, setForm] = useState({
     recipient_address: searchParams.get('to') || '',
     amount: searchParams.get('amount') || '',
     asset: searchParams.get('asset') || 'XLM',
     memo: searchParams.get('memo') || '',
-  const submitButtonRef = React.useRef(null);
-  const [form, setForm] = useState({
-    recipient_address: '',
-    amount: '',
-    asset: 'XLM',
-    memo: '',
     destination_asset: '',
     slippage: DEFAULT_SLIPPAGE,
     memo_type: 'text'
   });
   const [contacts, setContacts] = useState([]);
   const [showContacts, setShowContacts] = useState(false);
+  const [contactSearch, setContactSearch] = useState('');
+  const [selectedContactIndex, setSelectedContactIndex] = useState(-1);
+  const contactSearchRef = useRef(null);
+  const contactListRef = useRef(null);
   const [showScanner, setShowScanner] = useState(false);
   const [showPINVerification, setShowPINVerification] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -51,6 +47,70 @@ export default function SendMoney() {
   useEffect(() => {
     api.get('/wallet/contacts').then(r => setContacts(r.data.contacts || [])).catch(() => {});
   }, []);
+
+  // Filter contacts based on search term
+  const filteredContacts = useMemo(() => {
+    if (!contactSearch.trim()) return contacts;
+    const searchLower = contactSearch.toLowerCase();
+    return contacts.filter(contact =>
+      contact.name.toLowerCase().includes(searchLower) ||
+      contact.wallet_address.toLowerCase().includes(searchLower)
+    );
+  }, [contacts, contactSearch]);
+
+  // Reset selected index when search changes
+  useEffect(() => {
+    setSelectedContactIndex(-1);
+  }, [contactSearch]);
+
+  // Focus search input when dropdown opens
+  useEffect(() => {
+    if (showContacts && contactSearchRef.current) {
+      contactSearchRef.current.focus();
+    }
+  }, [showContacts]);
+
+  // Handle keyboard navigation in contacts dropdown
+  const handleContactKeyDown = (e) => {
+    if (!showContacts) return;
+
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setSelectedContactIndex(prev =>
+          prev < filteredContacts.length - 1 ? prev + 1 : prev
+        );
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setSelectedContactIndex(prev => prev > 0 ? prev - 1 : 0);
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (selectedContactIndex >= 0 && selectedContactIndex < filteredContacts.length) {
+          const contact = filteredContacts[selectedContactIndex];
+          setForm({ ...form, recipient_address: contact.wallet_address });
+          setShowContacts(false);
+          setContactSearch('');
+        }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        setShowContacts(false);
+        setContactSearch('');
+        break;
+    }
+  };
+
+  // Scroll selected contact into view
+  useEffect(() => {
+    if (selectedContactIndex >= 0 && contactListRef.current) {
+      const selectedElement = contactListRef.current.children[selectedContactIndex];
+      if (selectedElement) {
+        selectedElement.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  }, [selectedContactIndex]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -200,6 +260,7 @@ export default function SendMoney() {
                 onClick={() => setShowScanner(true)}
                 className="text-primary-500 hover:text-primary-400 p-1.5 rounded-lg hover:bg-primary-500/10 transition-colors"
                 title={t('send.scan_qr')}
+                aria-label={t('send.scan_qr')}
               >
                 <Camera size={16} />
               </button>
@@ -220,18 +281,51 @@ export default function SendMoney() {
             className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors font-mono text-sm"
           />
           {showContacts && contacts.length > 0 && (
-            <div className="mt-1 bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
-              {contacts.map(c => (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => { setForm({ ...form, recipient_address: c.wallet_address }); setShowContacts(false); }}
-                  className="w-full px-4 py-2.5 text-left hover:bg-gray-700 transition-colors"
-                >
-                  <p className="text-sm text-white">{c.name}</p>
-                  <p className="text-xs text-gray-500 font-mono">{c.wallet_address.slice(0, 20)}...</p>
-                </button>
-              ))}
+            <div
+              className="mt-1 bg-gray-800 border border-gray-700 rounded-xl overflow-hidden"
+              onKeyDown={handleContactKeyDown}
+            >
+              {/* Search input */}
+              <div className="p-2 border-b border-gray-700">
+                <input
+                  ref={contactSearchRef}
+                  type="text"
+                  placeholder="Search contacts..."
+                  value={contactSearch}
+                  onChange={(e) => setContactSearch(e.target.value)}
+                  className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-400 focus:outline-none focus:border-primary-500"
+                  aria-label="Search contacts"
+                />
+              </div>
+              
+              {/* Contact list */}
+              <div ref={contactListRef} className="max-h-60 overflow-y-auto">
+                {filteredContacts.length > 0 ? (
+                  filteredContacts.map((c, index) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => {
+                        setForm({ ...form, recipient_address: c.wallet_address });
+                        setShowContacts(false);
+                        setContactSearch('');
+                      }}
+                      className={`w-full px-4 py-2.5 text-left transition-colors ${
+                        index === selectedContactIndex
+                          ? 'bg-primary-500/20 text-primary-400'
+                          : 'hover:bg-gray-700'
+                      }`}
+                    >
+                      <p className="text-sm text-white">{c.name}</p>
+                      <p className="text-xs text-gray-500 font-mono">{c.wallet_address.slice(0, 20)}...</p>
+                    </button>
+                  ))
+                ) : (
+                  <div className="px-4 py-6 text-center text-gray-400">
+                    <p className="text-sm">No contacts match</p>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -412,7 +506,7 @@ export default function SendMoney() {
           } disabled:opacity-50`}
         >
           {loading ? (
-            <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+            <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" role="status" aria-label="Loading" />
           ) : (
             <><Send size={18} /> {confirmed ? t('send.confirm_send') : t('send.review')}</>
           )}

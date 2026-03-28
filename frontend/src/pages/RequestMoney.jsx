@@ -109,7 +109,7 @@ export default function RequestMoney() {
             className="w-full bg-primary-500 hover:bg-primary-600 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
           >
             {loading ? (
-              <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" role="status" aria-label="Loading" />
             ) : (
               <><Send size={18} /> {t('request.create') || 'Create Request'}</>
             )}

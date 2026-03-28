@@ -1,11 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Send, Download, RefreshCw, Copy, CheckCheck, FlaskConical } from 'lucide-react';
-import { Send, Download, RefreshCw, Copy, CheckCheck, Plus, Minus } from 'lucide-react';
+import { Send, Download, RefreshCw, Copy, CheckCheck, FlaskConical, Plus, Minus } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
 import { useExchangeRates } from '../hooks/useExchangeRates';
+import { usePaymentStream } from '../hooks/usePaymentStream';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 
@@ -21,7 +21,33 @@ export default function Dashboard() {
   const [copied, setCopied] = useState(false);
   const [selectedCurrency, setSelectedCurrency] = useState('XLM');
   const [funding, setFunding] = useState(false);
+  const [balanceIncreased, setBalanceIncreased] = useState(false);
   const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
+
+  // Handle incoming payment from stream
+  const handlePayment = useCallback((payment) => {
+    // Only process payments to this account
+    if (payment.to === wallet?.public_key) {
+      // Show toast notification
+      toast.success(`Received ${payment.amount} ${payment.asset}`);
+      
+      // Trigger balance increase animation
+      setBalanceIncreased(true);
+      setTimeout(() => setBalanceIncreased(false), 2000);
+      
+      // Refresh balance and transactions
+      Promise.all([
+        api.get('/wallet/balance'),
+        api.get('/payments/history')
+      ]).then(([walletRes, txRes]) => {
+        setWallet(walletRes.data);
+        setTransactions(txRes.data.transactions.slice(0, 5));
+      }).catch(() => {});
+    }
+  }, [wallet?.public_key]);
+
+  // Set up payment stream
+  const { isConnected, error: streamError } = usePaymentStream(wallet?.public_key, handlePayment);
 
   useEffect(() => {
     Promise.all([
@@ -52,6 +78,9 @@ export default function Dashboard() {
       toast.error(err.response?.data?.error || 'Funding failed');
     } finally {
       setFunding(false);
+    }
+  };
+
   const handleAnchorAction = async (action) => {
     try {
       const asset = 'USDC'; // Default to USDC for fiat ramps
@@ -71,7 +100,7 @@ export default function Dashboard() {
     : convertFromXLM(xlmBalance, selectedCurrency);
 
   if (loading) return (
-    <div className="flex items-center justify-center h-64">
+    <div className="flex items-center justify-center h-64" role="status" aria-label="Loading">
       <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
     </div>
   );
@@ -101,13 +130,13 @@ export default function Dashboard() {
           <p className="text-gray-600 dark:text-gray-400 text-sm">{t('dashboard.greeting')}</p>
           <h2 className="text-xl font-bold text-gray-900 dark:text-white">{user?.full_name?.split(' ')[0]} 👋</h2>
         </div>
-        <button onClick={() => window.location.reload()} className="text-gray-400 hover:text-white">
+        <button onClick={() => window.location.reload()} className="text-gray-400 hover:text-white" aria-label="Refresh dashboard">
           <RefreshCw size={18} />
         </button>
       </div>
 
       {/* Balance Card */}
-      <div className="bg-gradient-to-br from-primary-600 to-primary-700 rounded-2xl p-5 shadow-lg shadow-primary-500/20">
+      <div className={`bg-gradient-to-br from-primary-600 to-primary-700 rounded-2xl p-5 shadow-lg shadow-primary-500/20 transition-all duration-500 ${balanceIncreased ? 'ring-4 ring-green-400 ring-opacity-50' : ''}`}>
         <p className="text-primary-100 text-sm mb-1">{t('dashboard.total_balance')}</p>
         <div className="flex items-end gap-2 mb-4">
           <span className="text-4xl font-bold text-white">{parseFloat(displayBalance).toLocaleString()}</span>
@@ -141,7 +170,7 @@ export default function Dashboard() {
           <span className="text-primary-200 text-xs font-mono flex-1 truncate">
             {truncateAddress(wallet?.public_key, 10)}
           </span>
-          <button onClick={copyAddress} className="text-primary-200 hover:text-white shrink-0">
+          <button onClick={copyAddress} className="text-primary-200 hover:text-white shrink-0" aria-label={copied ? 'Address copied' : 'Copy wallet address'}>
             {copied ? <CheckCheck size={14} /> : <Copy size={14} />}
           </button>
         </div>

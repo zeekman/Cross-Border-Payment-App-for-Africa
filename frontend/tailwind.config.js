@@ -20,7 +20,14 @@ module.exports = {
       },
       fontFamily: {
         sans: ['Inter', 'sans-serif']
-      }
+      },
+      // Custom focus styles for accessibility
+      focusStyles: {
+        'focus-visible': {
+          outline: '2px solid #22c55e',
+          'outline-offset': '2px',
+        },
+      },
     }
   },
   plugins: []

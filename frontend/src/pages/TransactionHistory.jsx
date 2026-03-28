@@ -101,7 +101,7 @@ export default function TransactionHistory() {
       if (dateFrom) params.from = dateFrom;
       if (dateTo) params.to = dateTo;
       if (asset) params.asset = asset;
-      const params = filter !== 'all' ? { direction: filter } : {};
+      if (filter !== 'all') params.direction = filter;
       const res = await api.get('/payments/export', { params, responseType: 'blob' });
       const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
       const a = document.createElement('a');
@@ -225,7 +225,7 @@ export default function TransactionHistory() {
       </div>
 
       {loading ? (
-        <div className="flex justify-center py-12">
+        <div className="flex justify-center py-12" role="status" aria-label="Loading">
           <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
         </div>
       ) : error ? (
@@ -300,7 +300,7 @@ export default function TransactionHistory() {
                             rel="noopener noreferrer"
                             className="text-gray-500 hover:text-primary-400 transition-colors"
                           >
-                            <ExternalLink size={12} />
+                            <ExternalLink size={12} aria-label="View transaction on Stellar Explorer" />
                           </a>
                         )}
                       </div>
