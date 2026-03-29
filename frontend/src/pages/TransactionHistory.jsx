@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Send, Download, ExternalLink, Filter, Search } from 'lucide-react';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
+import { TransactionCardSkeleton } from '../components/Skeleton';
 import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS = {
@@ -225,8 +226,8 @@ export default function TransactionHistory() {
       </div>
 
       {loading ? (
-        <div className="flex justify-center py-12" role="status" aria-label="Loading">
-          <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
+        <div className="space-y-3" aria-busy="true" aria-label="Loading transactions">
+          {Array.from({ length: 6 }).map((_, i) => <TransactionCardSkeleton key={i} />)}
         </div>
       ) : error ? (
         <div className="text-center py-12 text-gray-500">
