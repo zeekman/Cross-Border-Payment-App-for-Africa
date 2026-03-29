@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
+const { createWallet, encryptPrivateKey } = require('../services/stellar');
+const audit = require('../services/audit');
 const logger = require('../utils/logger');
 const { createWallet, encryptPrivateKey, addTrustline } = require('../services/stellar');
 const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
@@ -102,6 +104,7 @@ async function login(req, res, next) {
 
     const user = result.rows[0];
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      if (user) audit.log(user.id, 'login_failure', req.ip, req.headers['user-agent']);
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
@@ -134,6 +137,7 @@ async function login(req, res, next) {
     );
 
     res.cookie(COOKIE_NAME, raw, COOKIE_OPTIONS);
+    audit.log(user.id, 'login_success', req.ip, req.headers['user-agent']);
     res.json({
       token,
       user: {
@@ -243,6 +247,7 @@ async function verify2FA(req, res, next) {
       [userId]
     );
 
+    audit.log(userId, '2fa_enabled', req.ip, req.headers['user-agent']);
     res.json({ message: '2FA enabled successfully' });
   } catch (err) {
     next(err);
@@ -264,6 +269,7 @@ async function disable2FA(req, res, next) {
       [userId]
     );
 
+    audit.log(userId, '2fa_disabled', req.ip, req.headers['user-agent']);
     res.json({ message: '2FA disabled' });
   } catch (err) {
     next(err);
@@ -446,9 +452,39 @@ async function resetPassword(req, res, next) {
     );
     await db.query('COMMIT');
 
+    audit.log(userId, 'password_change', req.ip, req.headers['user-agent']);
     res.json({ message: 'Password has been reset. You can now log in.' });
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
+    next(err);
+  }
+}
+
+async function updateProfile(req, res, next) {
+  try {
+    const { full_name, phone } = req.body;
+    const userId = req.user.userId;
+    await db.query(
+      `UPDATE users SET full_name = COALESCE($1, full_name), phone = COALESCE($2, phone) WHERE id = $3`,
+      [full_name || null, phone || null, userId]
+    );
+    audit.log(userId, 'profile_update', req.ip, req.headers['user-agent']);
+    res.json({ message: 'Profile updated' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getActivity(req, res, next) {
+  try {
+    const result = await db.query(
+      `SELECT action, ip_address, user_agent, metadata, created_at
+       FROM audit_logs WHERE user_id = $1
+       ORDER BY created_at DESC LIMIT 50`,
+      [req.user.userId]
+    );
+    res.json({ activity: result.rows });
+  } catch (err) {
     next(err);
   }
 }
@@ -460,13 +496,13 @@ module.exports = {
   logout,
   verifyEmail,
   getMe,
+  updateProfile,
+  getActivity,
   setPIN,
   verifyPIN,
   setup2FA,
   verify2FA,
   disable2FA,
-  refresh,
-  logout,
   forgotPassword,
   resetPassword,
 };

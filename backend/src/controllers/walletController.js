@@ -3,6 +3,7 @@ const db = require('../db');
 const { getBalance, getTransactions, decryptPrivateKey, addAccountSigner, removeAccountSigner, addTrustline, removeTrustline, getTrustlines } = require('../services/stellar');
 const QRCode = require('qrcode');
 const cache = require('../utils/cache');
+const audit = require('../services/audit');
 
 async function getWallet(req, res, next) {
   try {
@@ -89,6 +90,7 @@ async function exportKey(req, res, next) {
     if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
 
     const secretKey = decryptPrivateKey(walletResult.rows[0].encrypted_secret_key);
+    audit.log(req.user.userId, 'wallet_export', req.ip, req.headers['user-agent']);
     res.json({ secret_key: secretKey });
   } catch (err) {
     next(err);

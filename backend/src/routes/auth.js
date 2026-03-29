@@ -7,13 +7,13 @@ const {
   logout,
   verifyEmail,
   getMe,
+  updateProfile,
+  getActivity,
   setPIN,
   verifyPIN,
   setup2FA,
   verify2FA,
   disable2FA,
-  refresh,
-  logout,
   forgotPassword,
   resetPassword,
 } = require('../controllers/authController');
@@ -62,6 +62,8 @@ router.post(
 
 router.get('/verify-email', verifyEmail);
 router.get('/me', authMiddleware, getMe);
+router.patch('/me', authMiddleware, updateProfile);
+router.get('/activity', authMiddleware, getActivity);
 router.post('/refresh', refresh);
 router.post('/logout', logout);
 

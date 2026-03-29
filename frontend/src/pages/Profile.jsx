@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { LogOut, User, Mail, Phone, Wallet, Copy, CheckCheck, Plus, Globe, Trash2, ShieldAlert, Eye, EyeOff, Activity } from 'lucide-react';
 import { LogOut, User, Mail, Phone, Wallet, Copy, CheckCheck, Plus, Globe, Trash2, ShieldAlert, Eye, EyeOff, Building2, Coins } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { truncateAddress } from '../utils/currency';
@@ -28,6 +29,8 @@ export default function Profile() {
   const [showKey, setShowKey] = useState(false);
   const [backupLoading, setBackupLoading] = useState(false);
   const [keyCopied, setKeyCopied] = useState(false);
+  const [activity, setActivity] = useState([]);
+  const [activityLoading, setActivityLoading] = useState(true);
   const [trustlines, setTrustlines] = useState([]);
   const [newAsset, setNewAsset] = useState('');
   const [trustlineLoading, setTrustlineLoading] = useState(false);
@@ -74,7 +77,18 @@ export default function Profile() {
         toast.error('Failed to load contacts');
       }
     };
+    const fetchActivity = async () => {
+      try {
+        const res = await api.get('/auth/activity');
+        setActivity(res.data.activity || []);
+      } catch {
+        // non-critical, silently ignore
+      } finally {
+        setActivityLoading(false);
+      }
+    };
     fetchContacts();
+    fetchActivity();
   }, []);
 
   const copyAddress = () => {
@@ -340,6 +354,27 @@ export default function Profile() {
         )}
       </div>
 
+      {/* Recent Activity */}
+      <div className="bg-gray-900 rounded-2xl p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <Activity size={16} className="text-gray-500" />
+          <h3 className="font-semibold text-white">Recent Activity</h3>
+        </div>
+        {activityLoading ? (
+          <p className="text-gray-500 text-sm text-center py-4">Loading…</p>
+        ) : activity.length === 0 ? (
+          <p className="text-gray-500 text-sm text-center py-4">No activity recorded yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {activity.map((event, i) => (
+              <div key={i} className="flex items-start justify-between gap-3 text-sm">
+                <div className="min-w-0">
+                  <p className="text-white font-medium capitalize">{event.action.replace(/_/g, ' ')}</p>
+                  <p className="text-gray-500 text-xs font-mono">{event.ip_address || '—'}</p>
+                </div>
+                <p className="text-gray-500 text-xs shrink-0 text-right">
+                  {new Date(event.created_at).toLocaleString()}
+                </p>
       {/* Manage Assets */}
       <div className="bg-gray-900 rounded-2xl p-5 space-y-4">
         <div className="flex items-center gap-2">
@@ -368,6 +403,8 @@ export default function Profile() {
             ))}
           </div>
         )}
+      </div>
+
 
         <form onSubmit={handleAddTrustline} className="flex gap-2 pt-1 border-t border-gray-800">
           <input
