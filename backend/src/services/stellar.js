@@ -577,6 +577,76 @@ async function removeAccountSigner({ ownerPublicKey, encryptedSecretKey, signerP
 }
 
 // ---------------------------------------------------------------------------
+// NOTE: Stellar inflation was removed in Protocol 12 (2019).
+// The inflation operation is no longer valid and must NOT be used.
+// No setOptions calls in this codebase set an inflationDest.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Account merge — transfers all XLM to destination and closes the source account.
+// WARNING: This operation is IRREVERSIBLE. The source account is permanently closed.
+// ---------------------------------------------------------------------------
+
+async function mergeAccount({ sourcePublicKey, encryptedSecretKey, destinationPublicKey }) {
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const sourceKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const sourceAccount = await withRetry(
+    () => withFallback(s => s.loadAccount(sourcePublicKey)),
+    { label: 'loadAccount(merge)' }
+  );
+
+  const tx = new StellarSdk.TransactionBuilder(sourceAccount, {
+    fee: await withRetry(() => withFallback(s => s.fetchBaseFee()), { label: 'fetchBaseFee' }),
+    networkPassphrase,
+  })
+    .addOperation(StellarSdk.Operation.accountMerge({ destination: destinationPublicKey }))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(sourceKeypair);
+  const result = await withRetry(
+    () => withFallback(s => s.submitTransaction(tx)),
+    { label: 'submitTransaction(merge)' }
+  );
+  return { transactionHash: result.hash, ledger: result.ledger };
+}
+
+// ---------------------------------------------------------------------------
+// Asset clawback — admin-only operation to reclaim an asset from an account.
+// Requires the asset issuer account to have AUTH_CLAWBACK_ENABLED_FLAG set.
+// Used for regulatory compliance (fraud, court orders).
+// ---------------------------------------------------------------------------
+
+async function clawbackAsset({ issuerPublicKey, encryptedIssuerSecretKey, fromPublicKey, asset, amount }) {
+  const assetObj = resolveAsset(asset);
+  const secretKey = decryptPrivateKey(encryptedIssuerSecretKey);
+  const issuerKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const issuerAccount = await withRetry(
+    () => withFallback(s => s.loadAccount(issuerPublicKey)),
+    { label: 'loadAccount(clawback)' }
+  );
+
+  const tx = new StellarSdk.TransactionBuilder(issuerAccount, {
+    fee: await withRetry(() => withFallback(s => s.fetchBaseFee()), { label: 'fetchBaseFee' }),
+    networkPassphrase,
+  })
+    .addOperation(StellarSdk.Operation.clawback({
+      asset: assetObj,
+      from: fromPublicKey,
+      amount: String(amount),
+    }))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(issuerKeypair);
+  const result = await withRetry(
+    () => withFallback(s => s.submitTransaction(tx)),
+    { label: 'submitTransaction(clawback)' }
+  );
+  return { transactionHash: result.hash, ledger: result.ledger };
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -598,4 +668,6 @@ module.exports = {
   getTrustlines,
   addAccountSigner,
   removeAccountSigner,
+  mergeAccount,
+  clawbackAsset,
 };

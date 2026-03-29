@@ -2,7 +2,7 @@ const router = require('express').Router();
 const { body, param, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
-const { getWallet, getQRCode, getWalletTransactions, exportKey, upgradeToBusinessAccount, addSigner, removeSigner, listSigners, listTrustlines, addTrustlineHandler, removeTrustlineHandler } = require('../controllers/walletController');
+const { getWallet, getQRCode, getWalletTransactions, exportKey, upgradeToBusinessAccount, addSigner, removeSigner, listSigners, listTrustlines, addTrustlineHandler, removeTrustlineHandler, mergeWallet } = require('../controllers/walletController');
 const { getContacts, addContact, deleteContact } = require('../controllers/contactsController');
 
 const validate = (req, res, next) => {
@@ -57,6 +57,21 @@ router.delete('/trustline/:asset',
   [param('asset').isAlphanumeric().isLength({ max: 12 }).withMessage('Invalid asset code')],
   validate,
   removeTrustlineHandler
+);
+
+// Account merge — irreversible, closes source account
+router.post('/merge',
+  [
+    body('destination')
+      .notEmpty().withMessage('Destination address is required')
+      .custom((v) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(v)) throw new Error('Invalid Stellar destination address');
+        return true;
+      }),
+    body('password').notEmpty().withMessage('Password is required'),
+  ],
+  validate,
+  mergeWallet
 );
 
 // Multisig / business account routes

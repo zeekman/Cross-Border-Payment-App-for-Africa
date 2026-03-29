@@ -126,7 +126,22 @@ Examples:
 
 ---
 
-## Stellar Integration
+## Stellar Protocol Compatibility
+
+AfriPay targets **Stellar Protocol 19+**. Note that the inflation operation was removed in **Protocol 12 (2019)** and is not used anywhere in this codebase. No `setOptions` calls set an `inflationDest`. Any SDK examples referencing inflation are outdated and should be ignored.
+
+---
+
+## Compliance — Asset Clawback
+
+For regulatory compliance (fraud investigations, court orders), AfriPay supports the Stellar **clawback** operation on USDC assets. This allows the asset issuer to reclaim tokens from a user's account when legally required.
+
+- Endpoint: `POST /api/admin/clawback` (admin-only)
+- Requires the issuer account to have `AUTH_CLAWBACK_ENABLED_FLAG` set on-chain
+- All clawback operations are recorded in the audit log with reason, amount, and transaction hash
+- Configure `ISSUER_PUBLIC_KEY` and `ISSUER_ENCRYPTED_SECRET_KEY` in your `.env`
+
+---
 
 ### Wallet Generation
 
@@ -239,6 +254,10 @@ node-pg-migrate tracks applied migrations in a `pgmigrations` table that it crea
 | DELETE | /api/wallet/contacts/:id  | Yes  | Remove a contact                   |
 | POST   | /api/payments/send        | Yes  | Broadcast payment to Stellar       |
 | GET    | /api/payments/history     | Yes  | Full transaction history           |
+| POST   | /api/wallet/merge         | Yes  | Merge (close) account into another |
+| POST   | /api/support/tickets      | Yes  | Create a support/dispute ticket    |
+| GET    | /api/support/tickets      | Yes  | List user's support tickets        |
+| POST   | /api/admin/clawback       | Admin| Clawback asset for compliance      |
 
 ---
 

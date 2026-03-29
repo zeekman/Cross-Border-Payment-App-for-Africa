@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Send, Download, ExternalLink, Filter, Search } from 'lucide-react';
+import { ArrowLeft, Send, Download, ExternalLink, Filter, Search, Flag, X } from 'lucide-react';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
 import { TransactionCardSkeleton } from '../components/Skeleton';
@@ -37,6 +37,10 @@ export default function TransactionHistory() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [asset, setAsset] = useState('');
+  const [reportTx, setReportTx] = useState(null); // tx being reported
+  const [reportType, setReportType] = useState('other');
+  const [reportDesc, setReportDesc] = useState('');
+  const [reportLoading, setReportLoading] = useState(false);
 
   const fetchInitial = useCallback(async () => {
     setLoading(true);
@@ -114,6 +118,27 @@ export default function TransactionHistory() {
       /* optional route */
     }
     setExporting(false);
+  }
+
+  async function handleSubmitReport(e) {
+    e.preventDefault();
+    setReportLoading(true);
+    try {
+      await api.post('/support/tickets', {
+        transaction_id: reportTx.id,
+        type: reportType,
+        description: reportDesc,
+      });
+      setReportTx(null);
+      setReportDesc('');
+      setReportType('other');
+      // toast is imported via react-hot-toast in other pages; use alert as fallback
+      alert('Issue reported. Our team will review it shortly.');
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to submit report');
+    } finally {
+      setReportLoading(false);
+    }
   }
 
   const filters = [
@@ -304,6 +329,15 @@ export default function TransactionHistory() {
                             <ExternalLink size={12} aria-label="View transaction on Stellar Explorer" />
                           </a>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => setReportTx(tx)}
+                          className="text-gray-500 hover:text-yellow-400 transition-colors"
+                          aria-label="Report issue with this transaction"
+                          title="Report Issue"
+                        >
+                          <Flag size={12} />
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -322,6 +356,56 @@ export default function TransactionHistory() {
             </button>
           )}
         </>
+      )}
+      {/* Report Issue Modal */}
+      {reportTx && (
+        <div className="fixed inset-0 bg-black/70 flex items-end justify-center z-50 p-4">
+          <div className="bg-gray-900 rounded-2xl w-full max-w-lg p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-white">Report Issue</h3>
+              <button onClick={() => setReportTx(null)} className="text-gray-400 hover:text-white">
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              Transaction: {truncateAddress(reportTx.tx_hash || String(reportTx.id))} &mdash; {reportTx.amount} {reportTx.asset}
+            </p>
+            <form onSubmit={handleSubmitReport} className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Issue type</label>
+                <select
+                  value={reportType}
+                  onChange={e => setReportType(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-primary-500"
+                >
+                  <option value="wrong_address">Wrong address</option>
+                  <option value="wrong_amount">Wrong amount</option>
+                  <option value="failed_deducted">Failed but funds deducted</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Description</label>
+                <textarea
+                  required
+                  rows={3}
+                  maxLength={2000}
+                  value={reportDesc}
+                  onChange={e => setReportDesc(e.target.value)}
+                  placeholder="Describe the issue..."
+                  className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 resize-none"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={reportLoading}
+                className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors"
+              >
+                {reportLoading ? 'Submitting…' : 'Submit Report'}
+              </button>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

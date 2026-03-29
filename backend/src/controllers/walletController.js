@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const db = require('../db');
-const { getBalance, getTransactions, decryptPrivateKey, addAccountSigner, removeAccountSigner, addTrustline, removeTrustline, getTrustlines } = require('../services/stellar');
+const { getBalance, getTransactions, decryptPrivateKey, addAccountSigner, removeAccountSigner, addTrustline, removeTrustline, getTrustlines, mergeAccount } = require('../services/stellar');
 const QRCode = require('qrcode');
 const cache = require('../utils/cache');
 const audit = require('../services/audit');
@@ -235,4 +235,51 @@ async function removeTrustlineHandler(req, res, next) {
   }
 }
 
-module.exports = { getWallet, getQRCode, getWalletTransactions, exportKey, upgradeToBusinessAccount, addSigner, removeSigner, listSigners, listTrustlines, addTrustlineHandler, removeTrustlineHandler };
+module.exports = { getWallet, getQRCode, getWalletTransactions, exportKey, upgradeToBusinessAccount, addSigner, removeSigner, listSigners, listTrustlines, addTrustlineHandler, removeTrustlineHandler, mergeWallet };
+
+async function mergeWallet(req, res, next) {
+  try {
+    const { destination, password } = req.body;
+    if (!password) return res.status(400).json({ error: 'Password is required' });
+    if (!destination) return res.status(400).json({ error: 'Destination address is required' });
+
+    // Re-verify password
+    const userResult = await db.query('SELECT password_hash FROM users WHERE id = $1', [req.user.userId]);
+    if (!userResult.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: 'Incorrect password' });
+
+    const walletResult = await db.query(
+      'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
+      [req.user.userId]
+    );
+    if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
+    const { public_key, encrypted_secret_key } = walletResult.rows[0];
+
+    if (public_key === destination) {
+      return res.status(400).json({ error: 'Destination cannot be the same as the source account' });
+    }
+
+    const { transactionHash, ledger } = await mergeAccount({
+      sourcePublicKey: public_key,
+      encryptedSecretKey: encrypted_secret_key,
+      destinationPublicKey: destination,
+    });
+
+    // Remove wallet record — account is now closed on-chain
+    await db.query('DELETE FROM wallets WHERE user_id = $1', [req.user.userId]);
+
+    audit.log(req.user.userId, 'account_merge', req.ip, req.headers['user-agent'], {
+      destination,
+      transaction_hash: transactionHash,
+    });
+
+    res.json({
+      message: 'Account merged successfully. Your account has been permanently closed.',
+      transaction_hash: transactionHash,
+      ledger,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
