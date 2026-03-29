@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const db = require('../db');
-const { getBalance, getTransactions, decryptPrivateKey } = require('../services/stellar');
+const { getBalance, getTransactions, decryptPrivateKey, addAccountSigner, removeAccountSigner } = require('../services/stellar');
 const QRCode = require('qrcode');
 const cache = require('../utils/cache');
 
@@ -95,4 +95,101 @@ async function exportKey(req, res, next) {
   }
 }
 
-module.exports = { getWallet, getQRCode, getWalletTransactions, exportKey };
+async function upgradeToBusinessAccount(req, res, next) {
+  try {
+    await db.query(
+      `UPDATE users SET account_type = 'business' WHERE id = $1`,
+      [req.user.userId]
+    );
+    res.json({ message: 'Account upgraded to business' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function addSigner(req, res, next) {
+  try {
+    const { signer_public_key, label } = req.body;
+
+    const walletResult = await db.query(
+      'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
+      [req.user.userId]
+    );
+    if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
+
+    const { public_key, encrypted_secret_key } = walletResult.rows[0];
+
+    const { transactionHash } = await addAccountSigner({
+      ownerPublicKey: public_key,
+      encryptedSecretKey: encrypted_secret_key,
+      signerPublicKey: signer_public_key,
+    });
+
+    await db.query(
+      `INSERT INTO wallet_signers (user_id, signer_public_key, label)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, signer_public_key) DO NOTHING`,
+      [req.user.userId, signer_public_key, label || null]
+    );
+
+    res.status(201).json({ message: 'Signer added', transaction_hash: transactionHash });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function removeSigner(req, res, next) {
+  try {
+    const { signer_public_key } = req.params;
+
+    const walletResult = await db.query(
+      'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
+      [req.user.userId]
+    );
+    if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
+
+    const { public_key, encrypted_secret_key } = walletResult.rows[0];
+
+    // Count remaining signers after removal
+    const countResult = await db.query(
+      `SELECT COUNT(*) FROM wallet_signers WHERE user_id = $1 AND signer_public_key != $2`,
+      [req.user.userId, signer_public_key]
+    );
+    const remainingSigners = parseInt(countResult.rows[0].count, 10);
+
+    const { transactionHash } = await removeAccountSigner({
+      ownerPublicKey: public_key,
+      encryptedSecretKey: encrypted_secret_key,
+      signerPublicKey: signer_public_key,
+      remainingSigners,
+    });
+
+    await db.query(
+      `DELETE FROM wallet_signers WHERE user_id = $1 AND signer_public_key = $2`,
+      [req.user.userId, signer_public_key]
+    );
+
+    // Downgrade to personal if no signers left
+    if (remainingSigners === 0) {
+      await db.query(`UPDATE users SET account_type = 'personal' WHERE id = $1`, [req.user.userId]);
+    }
+
+    res.json({ message: 'Signer removed', transaction_hash: transactionHash });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function listSigners(req, res, next) {
+  try {
+    const result = await db.query(
+      `SELECT signer_public_key, label, added_at FROM wallet_signers WHERE user_id = $1 ORDER BY added_at ASC`,
+      [req.user.userId]
+    );
+    res.json({ signers: result.rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getWallet, getQRCode, getWalletTransactions, exportKey, upgradeToBusinessAccount, addSigner, removeSigner, listSigners };
