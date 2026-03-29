@@ -18,7 +18,8 @@ import TransactionHistory from "./pages/TransactionHistory";
 import Profile from "./pages/Profile";
 import Analytics from "./pages/Analytics";
 import KYCVerification from "./pages/KYCVerification";
-import Webhooks from "./pages/Webhooks";
+import BusinessSettings from "./pages/BusinessSettings";
+import Swap from "./pages/Swap";
 import Layout from "./components/Layout";
 import ErrorBoundary from "./components/ErrorBoundary";
 
@@ -114,6 +115,8 @@ export default function App() {
                 <Route path="profile" element={<Profile />} />
                 <Route path="kyc" element={<KYCVerification />} />
                 <Route path="webhooks" element={<Webhooks />} />
+                <Route path="business" element={<BusinessSettings />} />
+                <Route path="swap" element={<Swap />} />
               </Route>
             </Routes>
           </BrowserRouter>

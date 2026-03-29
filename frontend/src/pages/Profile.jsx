@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LogOut, User, Mail, Phone, Wallet, Copy, CheckCheck, Plus, Globe, Trash2, ShieldAlert, Eye, EyeOff, Activity } from 'lucide-react';
+import { LogOut, User, Mail, Phone, Wallet, Copy, CheckCheck, Plus, Globe, Trash2, ShieldAlert, Eye, EyeOff, Building2, Coins } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { truncateAddress } from '../utils/currency';
 import api from '../utils/api';
@@ -30,6 +31,42 @@ export default function Profile() {
   const [keyCopied, setKeyCopied] = useState(false);
   const [activity, setActivity] = useState([]);
   const [activityLoading, setActivityLoading] = useState(true);
+  const [trustlines, setTrustlines] = useState([]);
+  const [newAsset, setNewAsset] = useState('');
+  const [trustlineLoading, setTrustlineLoading] = useState(false);
+
+  React.useEffect(() => {
+    api.get('/wallet/trustlines')
+      .then(r => setTrustlines(r.data.trustlines || []))
+      .catch(() => {});
+  }, []);
+
+  const handleAddTrustline = async (e) => {
+    e.preventDefault();
+    setTrustlineLoading(true);
+    try {
+      await api.post('/wallet/trustline', { asset: newAsset.trim().toUpperCase() });
+      const r = await api.get('/wallet/trustlines');
+      setTrustlines(r.data.trustlines || []);
+      setNewAsset('');
+      toast.success('Trustline added');
+    } catch (err) {
+      toast.error(err.response?.data?.error || err.response?.data?.errors?.[0]?.msg || 'Failed to add trustline');
+    } finally {
+      setTrustlineLoading(false);
+    }
+  };
+
+  const handleRemoveTrustline = async (asset) => {
+    if (!window.confirm(`Remove ${asset} trustline? Your ${asset} balance must be zero.`)) return;
+    try {
+      await api.delete(`/wallet/trustline/${asset}`);
+      setTrustlines(prev => prev.filter(t => t.asset !== asset));
+      toast.success(`${asset} trustline removed`);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to remove trustline');
+    }
+  };
 
   React.useEffect(() => {
     const fetchContacts = async () => {
@@ -338,11 +375,74 @@ export default function Profile() {
                 <p className="text-gray-500 text-xs shrink-0 text-right">
                   {new Date(event.created_at).toLocaleString()}
                 </p>
+      {/* Manage Assets */}
+      <div className="bg-gray-900 rounded-2xl p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <Coins size={16} className="text-gray-500" />
+          <h3 className="font-semibold text-white">Manage Assets</h3>
+        </div>
+
+        {trustlines.length === 0 ? (
+          <p className="text-gray-500 text-sm text-center py-2">No asset trustlines yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {trustlines.map(t => (
+              <div key={t.asset} className="flex items-center gap-3 bg-gray-800 rounded-xl px-3 py-2.5">
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-white">{t.asset}</p>
+                  <p className="text-xs text-gray-500">Balance: {parseFloat(t.balance).toLocaleString()}</p>
+                </div>
+                <button
+                  onClick={() => handleRemoveTrustline(t.asset)}
+                  className="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
+                  aria-label={`Remove ${t.asset} trustline`}
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
             ))}
           </div>
         )}
       </div>
+
+
+        <form onSubmit={handleAddTrustline} className="flex gap-2 pt-1 border-t border-gray-800">
+          <input
+            type="text"
+            required
+            placeholder="Asset code (e.g. USDC)"
+            value={newAsset}
+            onChange={e => setNewAsset(e.target.value)}
+            maxLength={12}
+            className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-primary-500"
+          />
+          <button
+            type="submit"
+            disabled={trustlineLoading}
+            className="bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors flex items-center gap-1.5"
+          >
+            <Plus size={14} />
+            {trustlineLoading ? '…' : 'Add'}
+          </button>
+        </form>
+      </div>
+
+      {/* Business Account */}
+      <button
+        onClick={() => navigate('/business')}
+        className="w-full bg-gray-900 hover:bg-gray-800 border border-gray-800 rounded-2xl p-4 flex items-center gap-3 transition-colors"
+      >
+        <Building2 size={18} className="text-primary-400 shrink-0" />
+        <div className="flex-1 text-left">
+          <p className="text-sm font-semibold text-white">Business Account</p>
+          <p className="text-xs text-gray-500">
+            {user?.account_type === 'business' ? 'Manage multisig signers' : 'Upgrade for multisig support'}
+          </p>
+        </div>
+        {user?.account_type === 'business' && (
+          <span className="text-xs bg-primary-500/20 text-primary-400 px-2 py-0.5 rounded-full shrink-0">Active</span>
+        )}
+      </button>
 
       {/* Logout */}
       <button

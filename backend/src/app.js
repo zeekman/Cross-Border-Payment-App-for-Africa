@@ -21,6 +21,10 @@ const sep31Routes = require('./routes/sep31');
 const devRoutes = require('./routes/dev');
 const stellarTomlRoutes = require('./routes/stellarToml');
 const analyticsRoutes = require('./routes/analytics');
+const dexRoutes = require('./routes/dex');
+
+const swaggerJsdoc = require('swagger-jsdoc');
+const swaggerUi = require('swagger-ui-express');
 
 const logger = require('./utils/logger');
 const { runHealthChecks } = require('./services/health');
@@ -67,6 +71,7 @@ app.use('/api/payment-requests', paymentRequestRoutes);
 app.use('/api/scheduled-payments', scheduledPaymentRoutes);
 app.use('/api/anchor', anchorRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/dex', dexRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/webhooks', webhookRoutes);
@@ -75,6 +80,62 @@ app.use('/.well-known/stellar', sep10Routes);
 app.use('/api/sep31', sep31Routes);
 app.use('/api/dev', devRoutes);
 app.use('/', stellarTomlRoutes);
+
+// Swagger API Documentation
+const swaggerOptions = {
+  definition: {
+    openapi: '3.1.0',
+    info: {
+      title: 'AfriPay API',
+      version: '1.0.0',
+      description: 'Cross-Border Payment App API on Stellar Network. Authenticated with JWT Bearer tokens.',
+      contact: {
+        name: 'AfriPay API Support',
+        email: 'support@afripay.app'
+      }
+    },
+    servers: [
+      {
+        url: `${process.env.NODE_ENV === 'production' ? 'https' : 'http'}://${process.env.HOST || 'localhost:5000'}`,
+        description: 'Development/Production server'
+      }
+    ],
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT'
+        }
+      },
+      schemas: {
+        Error: {
+          type: 'object',
+          properties: {
+            error: {
+              type: 'string'
+            },
+            errors: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  msg: { type: 'string' },
+                  param: { type: 'string' }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  apis: ['./src/routes/*.js']
+};
+
+const specs = swaggerJsdoc(swaggerOptions);
+
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs));
 
 app.get('/health', async (req, res) => {
   try {

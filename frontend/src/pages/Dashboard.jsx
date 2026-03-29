@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Send, Download, RefreshCw, Copy, CheckCheck, FlaskConical, Plus, Minus } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { BalanceCardSkeleton, TransactionRowSkeleton } from '../components/Skeleton';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
 import { useExchangeRates } from '../hooks/useExchangeRates';
@@ -100,8 +101,21 @@ export default function Dashboard() {
     : convertFromXLM(xlmBalance, selectedCurrency);
 
   if (loading) return (
-    <div className="flex items-center justify-center h-64" role="status" aria-label="Loading">
-      <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
+    <div className="px-4 py-6 max-w-lg mx-auto space-y-6" aria-busy="true" aria-label="Loading dashboard">
+      <div className="flex items-center justify-between">
+        <div className="space-y-2">
+          <div className="skeleton h-3 w-20 rounded-lg" />
+          <div className="skeleton h-5 w-32 rounded-lg" />
+        </div>
+      </div>
+      <BalanceCardSkeleton />
+      <div className="grid grid-cols-2 gap-3">
+        <div className="skeleton h-16 rounded-xl" />
+        <div className="skeleton h-16 rounded-xl" />
+      </div>
+      <div className="space-y-2">
+        {Array.from({ length: 4 }).map((_, i) => <TransactionRowSkeleton key={i} />)}
+      </div>
     </div>
   );
 

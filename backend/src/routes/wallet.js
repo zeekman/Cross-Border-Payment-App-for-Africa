@@ -1,8 +1,8 @@
 const router = require('express').Router();
-const { body, validationResult } = require('express-validator');
+const { body, param, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
-const { getWallet, getQRCode, getWalletTransactions, exportKey } = require('../controllers/walletController');
+const { getWallet, getQRCode, getWalletTransactions, exportKey, upgradeToBusinessAccount, addSigner, removeSigner, listSigners, listTrustlines, addTrustlineHandler, removeTrustlineHandler } = require('../controllers/walletController');
 const { getContacts, addContact, deleteContact } = require('../controllers/contactsController');
 
 const validate = (req, res, next) => {
@@ -41,5 +41,49 @@ router.post('/contacts',
   addContact
 );
 router.delete('/contacts/:id', deleteContact);
+
+// Trustline routes
+router.get('/trustlines', listTrustlines);
+router.post('/trustline',
+  [
+    body('asset').trim().notEmpty().withMessage('asset is required')
+      .isAlphanumeric().isLength({ max: 12 }).withMessage('Invalid asset code'),
+    body('limit').optional().isFloat({ min: 0 }).withMessage('limit must be a non-negative number'),
+  ],
+  validate,
+  addTrustlineHandler
+);
+router.delete('/trustline/:asset',
+  [param('asset').isAlphanumeric().isLength({ max: 12 }).withMessage('Invalid asset code')],
+  validate,
+  removeTrustlineHandler
+);
+
+// Multisig / business account routes
+router.post('/upgrade-business', upgradeToBusinessAccount);
+router.get('/signers', listSigners);
+router.post('/signers',
+  [
+    body('signer_public_key')
+      .notEmpty().withMessage('signer_public_key is required')
+      .custom((v) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(v)) throw new Error('Invalid Stellar public key');
+        return true;
+      }),
+    body('label').optional().trim().isLength({ max: 100 }),
+  ],
+  validate,
+  addSigner
+);
+router.delete('/signers/:signer_public_key',
+  [
+    param('signer_public_key').custom((v) => {
+      if (!StellarSdk.StrKey.isValidEd25519PublicKey(v)) throw new Error('Invalid Stellar public key');
+      return true;
+    }),
+  ],
+  validate,
+  removeSigner
+);
 
 module.exports = router;

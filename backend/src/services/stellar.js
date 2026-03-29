@@ -417,6 +417,118 @@ async function sendPathPayment({
 }
 
 // ---------------------------------------------------------------------------
+// Trustline management
+// ---------------------------------------------------------------------------
+
+/**
+ * Add (or update limit on) a trustline for a non-native asset.
+ * limit defaults to the Stellar max if not provided.
+ */
+async function addTrustline({ publicKey, encryptedSecretKey, asset, limit }) {
+  const assetObj = resolveAsset(asset);
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const keypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const account = await withRetry(() => server.loadAccount(publicKey), { label: 'loadAccount(trustline)' });
+
+  const op = StellarSdk.Operation.changeTrust({
+    asset: assetObj,
+    ...(limit !== undefined ? { limit: String(limit) } : {}),
+  });
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: await withRetry(() => server.fetchBaseFee(), { label: 'fetchBaseFee' }),
+    networkPassphrase,
+  })
+    .addOperation(op)
+    .setTimeout(30)
+    .build();
+
+  tx.sign(keypair);
+  const result = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addTrustline)' });
+  return { transactionHash: result.hash };
+}
+
+/**
+ * Remove a trustline by setting limit=0.
+ * Stellar will reject this if the account still holds a balance of that asset.
+ */
+async function removeTrustline({ publicKey, encryptedSecretKey, asset }) {
+  return addTrustline({ publicKey, encryptedSecretKey, asset, limit: '0' });
+}
+
+/**
+ * List all non-native trustlines on an account directly from Horizon.
+ */
+async function getTrustlines(publicKey) {
+  const account = await withRetry(() => server.loadAccount(publicKey), { label: 'loadAccount(trustlines)' });
+  return account.balances
+    .filter(b => b.asset_type !== 'native')
+    .map(b => ({
+      asset: b.asset_code,
+      issuer: b.asset_issuer,
+      balance: b.balance,
+      limit: b.limit,
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Multisig helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Add a signer to a Stellar account and set medium/high thresholds to 2.
+ * low threshold stays 1 so non-payment ops (e.g. trustlines) need only 1 sig.
+ */
+async function addAccountSigner({ ownerPublicKey, encryptedSecretKey, signerPublicKey, weight = 1 }) {
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const ownerKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const account = await withRetry(() => server.loadAccount(ownerPublicKey), { label: 'loadAccount(multisig)' });
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: await withRetry(() => server.fetchBaseFee(), { label: 'fetchBaseFee' }),
+    networkPassphrase,
+  })
+    .addOperation(StellarSdk.Operation.setOptions({
+      signer: { ed25519PublicKey: signerPublicKey, weight },
+      lowThreshold: 1,
+      medThreshold: 2,
+      highThreshold: 2,
+    }))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(ownerKeypair);
+  const result = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addSigner)' });
+  return { transactionHash: result.hash };
+}
+
+/**
+ * Remove a signer (weight=0) and reset thresholds to 1 if no signers remain.
+ */
+async function removeAccountSigner({ ownerPublicKey, encryptedSecretKey, signerPublicKey, remainingSigners = 0 }) {
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const ownerKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const account = await withRetry(() => server.loadAccount(ownerPublicKey), { label: 'loadAccount(removeSigner)' });
+
+  const thresholds = remainingSigners > 0 ? {} : { lowThreshold: 1, medThreshold: 1, highThreshold: 1 };
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: await withRetry(() => server.fetchBaseFee(), { label: 'fetchBaseFee' }),
+    networkPassphrase,
+  })
+    .addOperation(StellarSdk.Operation.setOptions({
+      signer: { ed25519PublicKey: signerPublicKey, weight: 0 },
+      ...thresholds,
+    }))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(ownerKeypair);
+  const result = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(removeSigner)' });
+  return { transactionHash: result.hash };
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -433,4 +545,9 @@ module.exports = {
   sendPathPayment,
   resolveFederationAddress,
   createClaimableBalance,
+  addTrustline,
+  removeTrustline,
+  getTrustlines,
+  addAccountSigner,
+  removeAccountSigner,
 };

@@ -152,12 +152,7 @@ Sender → [approve USDC transfer] → Backend → [sign with keypair]
 
 ---
 
-## Setup
 
-### Prerequisites
-
-- Node.js 18+
-- PostgreSQL 14+
 - A Stellar testnet account (auto-created on registration)
 
 ### 1. Database
@@ -178,19 +173,21 @@ npm run dev
 # Server starts on http://localhost:5000
 ```
 
-### 3. Frontend
+### 2. Docker Compose (Recommended)
 
-```bash
-cd frontend
-npm install
-cp .env.example .env
-npm start
-# App starts on http://localhost:3000
-```
+1. Copy `.env.example` to `.env` and customize:
+   ```
+   cp .env.example .env
+   ```
 
----
+2. Start full stack:
+   ```
+   docker compose up -d --build
+   ```
 
-## Database Migrations
+3. Access:
+   - Frontend: http://localhost:3000
+   - Backend API: http://localhost
 
 AfriPay uses [node-pg-migrate](https://github.com/salsita/node-pg-migrate) for schema version control. All schema changes must be made as numbered migration files inside `database/migrations/` — never by editing `schema.sql` directly.
 

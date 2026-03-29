@@ -1,0 +1,75 @@
+name: Deploy
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    name: Deploy Backend
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    - name: Build Backend
+      run: |
+        cd backend
+        npm ci --only=production
+        npm run build  # if build script exists
+    
+    # Railway example (replace with your platform)
+    - name: Deploy to Railway
+      uses: railwayapp/action@v1
+      with:
+        railwayToken: ${{ secrets.RAILWAY_TOKEN }}
+        serviceId: ${{ secrets.RAILWAY_BACKEND_SERVICE_ID }}
+        source: backend/
+    
+    # Render example alternative
+    # - name: Deploy to Render
+    #   uses: johnbeynon/render-deploy-action@v0.0.8
+    #   with:
+    #     service-id: ${{ secrets.RENDER_SERVICE_ID }}
+    #     api-key: ${{ secrets.RENDER_API_KEY }}
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    name: Deploy Frontend
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    - name: Build Frontend
+      run: |
+        cd frontend
+        npm ci
+        npm run build
+    
+    # Railway example
+    - name: Deploy to Railway  
+      uses: railwayapp/action@v1
+      with:
+        railwayToken: ${{ secrets.RAILWAY_TOKEN }}
+        serviceId: ${{ secrets.RAILWAY_FRONTEND_SERVICE_ID }}
+        source: frontend/
+    
+    # Vercel example alternative
+    # - name: Deploy to Vercel
+    #   uses: amondnet/vercel-action@v25
+    #   with:
+    #     vercel-token: ${{ secrets.VERCEL_TOKEN }}
+    #     vercel-org-id: ${{ secrets.ORG_ID }}
+    #     vercel-project-id: ${{ secrets.PROJECT_ID }}
