@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Soroban Escrow Contract Deployment Script
-# This script builds and deploys the escrow contract to Stellar
+# Soroban Contract Deployment Script
+# Supports: escrow, recurring-payments
+# Usage: [CONTRACT=recurring-payments] STELLAR_NETWORK=testnet SOROBAN_SECRET_KEY=<key> ./deploy.sh
 
 set -e
 
@@ -14,10 +15,27 @@ NC='\033[0m' # No Color
 # Configuration
 NETWORK="${STELLAR_NETWORK:-testnet}"
 CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTRACT_NAME="escrow_contract"
+# Default to escrow for backwards compatibility; override with CONTRACT=recurring-payments
+TARGET_CONTRACT="${CONTRACT:-escrow}"
+
+case "$TARGET_CONTRACT" in
+  escrow)
+    CONTRACT_NAME="escrow_contract"
+    CONTRACT_SUBDIR="escrow"
+    ;;
+  recurring-payments)
+    CONTRACT_NAME="recurring_payments_contract"
+    CONTRACT_SUBDIR="recurring-payments"
+    ;;
+  *)
+    echo -e "${RED}Unknown contract: $TARGET_CONTRACT. Valid options: escrow, recurring-payments${NC}"
+    exit 1
+    ;;
+esac
+
 BUILTIN_CONTRACT_DIR="$HOME/.soroban"
 
-echo -e "${YELLOW}=== Soroban Escrow Contract Deployment ===${NC}"
+echo -e "${YELLOW}=== Soroban ${TARGET_CONTRACT} Contract Deployment ===${NC}"
 echo "Network: $NETWORK"
 echo "Contract Directory: $CONTRACT_DIR"
 
@@ -47,17 +65,17 @@ echo -e "${GREEN}✓ Prerequisites OK${NC}"
 # Step 2: Build the contract
 echo -e "\n${YELLOW}Step 2: Building contract...${NC}"
 
-cd "$CONTRACT_DIR"
+cd "$CONTRACT_DIR/$CONTRACT_SUBDIR"
 
 if [ ! -f "Cargo.toml" ]; then
-    echo -e "${RED}Error: Cargo.toml not found in $CONTRACT_DIR${NC}"
+    echo -e "${RED}Error: Cargo.toml not found in $CONTRACT_DIR/$CONTRACT_SUBDIR${NC}"
     exit 1
 fi
 
 # Build for Soroban target
 cargo build --release --target wasm32-unknown-unknown
 
-WASM_FILE="target/wasm32-unknown-unknown/release/escrow_contract.wasm"
+WASM_FILE="target/wasm32-unknown-unknown/release/${CONTRACT_NAME}.wasm"
 
 if [ ! -f "$WASM_FILE" ]; then
     echo -e "${RED}Error: Contract WASM file not built: $WASM_FILE${NC}"
@@ -124,8 +142,8 @@ echo "Contract ID: $CONTRACT_ID"
 # Step 5: Save deployment info
 echo -e "\n${YELLOW}Step 5: Saving deployment info...${NC}"
 
-DEPLOYMENT_FILE="${CONTRACT_DIR}/deployments/${NETWORK}_deployment.json"
-mkdir -p "${CONTRACT_DIR}/deployments"
+DEPLOYMENT_FILE="${CONTRACT_DIR}/${CONTRACT_SUBDIR}/deployments/${NETWORK}_deployment.json"
+mkdir -p "${CONTRACT_DIR}/${CONTRACT_SUBDIR}/deployments"
 
 cat > "$DEPLOYMENT_FILE" << EOF
 {
