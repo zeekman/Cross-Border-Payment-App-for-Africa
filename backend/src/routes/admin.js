@@ -3,7 +3,7 @@ const { body, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const isAdmin = require('../middleware/isAdmin');
-const { getStats, getUsers, getTransactions, clawback } = require('../controllers/adminController');
+const { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC } = require('../controllers/adminController');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -18,9 +18,7 @@ router.get('/stats', getStats);
 router.get('/users', getUsers);
 router.get('/transactions', getTransactions);
 
-/**
- * @swagger
- * /api/admin/clawback:
+router.post('/clawback',
  *   post:
  *     summary: Clawback an asset from a user account (admin only)
  *     description: >
@@ -75,5 +73,8 @@ router.post('/clawback',
   validate,
   clawback
 );
+
+router.post('/kyc/:userId/approve', approveKYC);
+router.post('/kyc/:userId/revoke', revokeKYC);
 
 module.exports = router;
