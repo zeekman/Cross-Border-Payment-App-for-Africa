@@ -7,6 +7,7 @@ const cache = require("../utils/cache");
 const { checkFraud, logFraudBlock } = require("../services/fraudDetection");
 const { parseHistoryFrom, parseHistoryTo, normalizeAsset } = require("../utils/historyQuery");
 const { isMemoRequired } = require("../services/memoRequired");
+const { depositFee } = require("../services/feeDistributor");
 
 // Configurable KYC transaction threshold in USD equivalent
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
@@ -138,6 +139,17 @@ async function send(req, res, next) {
 
     // Invalidate sender's cached balance — it changed after this payment
     await cache.del(`balance:${public_key}`);
+
+    // Deposit platform fee on-chain (fire-and-forget — never blocks the response)
+    const FEE_BPS = parseInt(process.env.PLATFORM_FEE_BPS || "250", 10);
+    if (asset === "USDC" && FEE_BPS > 0) {
+      const feeStroops = Math.floor(parseFloat(amount) * 1e7 * FEE_BPS / 10000);
+      if (feeStroops > 0) {
+        depositFee(feeStroops).catch((err) =>
+          console.error("Fee deposit failed (non-critical):", err.message)
+        );
+      }
+    }
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, amount, asset, sender: public_key, recipient: recipient_address, type };
     webhook.deliver("payment.sent", txData).catch(() => {});
