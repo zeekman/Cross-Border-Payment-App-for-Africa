@@ -2,10 +2,9 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
-const { createWallet, encryptPrivateKey } = require('../services/stellar');
+const { createWallet, encryptPrivateKey, addTrustline } = require('../services/stellar');
 const audit = require('../services/audit');
 const logger = require('../utils/logger');
-const { createWallet, encryptPrivateKey, addTrustline } = require('../services/stellar');
 const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
 const { generateSecret, verifyToken, generateBackupCodes, useBackupCode } = require('../services/twofa');
@@ -21,7 +20,6 @@ const TOKEN_TTL_MS = 96 * 60 * 60 * 1000;
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 
 const FORGOT_PASSWORD_MESSAGE = {
-  message: 'If an account exists for this email, you will receive password reset instructions shortly.'
   message:
     'If an account exists for this email, you will receive password reset instructions shortly.',
 };
@@ -80,8 +78,6 @@ async function register(req, res, next) {
     }
 
     await sendVerificationEmail(email, raw);
-    res.status(201).json({ message: 'Account created. Please verify your email before logging in.' });
-
     res.status(201).json({
       message: 'Account created. Please verify your email before logging in.',
     });
@@ -124,7 +120,6 @@ async function login(req, res, next) {
       }
     }
 
-    const token = signAccessToken({ userId: user.id, email: user.email, role: user.role });
     const token = signAccessToken({ userId: user.id, email: user.email, role: user.role });
 
     const { raw, hash } = generateRefreshToken();
@@ -286,11 +281,6 @@ async function setPIN(req, res, next) {
     }
 
     const pinHash = await hashPIN(pin);
-    await db.query(
-      `UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`,
-      [pinHash, userId]
-    );
-
     await db.query(`UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`, [
       pinHash,
       userId,
@@ -307,10 +297,6 @@ async function verifyPIN(req, res, next) {
     const { pin } = req.body;
     const userId = req.user.userId;
 
-    const result = await db.query(
-      `SELECT pin_hash FROM users WHERE id = $1`,
-      [userId]
-    );
     const result = await db.query(`SELECT pin_hash FROM users WHERE id = $1`, [userId]);
 
     if (!result.rows[0]) {

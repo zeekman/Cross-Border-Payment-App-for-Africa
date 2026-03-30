@@ -1,5 +1,6 @@
 jest.mock('../src/db');
 jest.mock('../src/services/stellar');
+jest.mock('../src/services/audit', () => ({ log: jest.fn() }));
 jest.mock('../src/services/email', () => ({
   sendVerificationEmail: jest.fn(),
   sendPasswordResetEmail: jest.fn()
@@ -15,6 +16,7 @@ const {
   refresh,
   logout,
   verifyEmail,
+  getMe,
   forgotPassword,
   resetPassword,
 } = require('../src/controllers/authController');
@@ -500,4 +502,42 @@ test('resetPassword: updates password and marks tokens used', async () => {
   expect(res.json).toHaveBeenCalledWith(
     expect.objectContaining({ message: expect.stringContaining('reset') })
   );
+});
+
+// ── getMe ─────────────────────────────────────────────────────────────────────
+
+test('getMe: returns user data for valid JWT', async () => {
+  db.query.mockResolvedValueOnce({
+    rows: [{
+      id: 'u1',
+      full_name: 'Alice',
+      email: 'a@b.com',
+      phone: '+1234',
+      pin_setup_completed: true,
+      totp_enabled: false,
+      account_type: 'personal',
+      public_key: 'GPUB',
+    }],
+  });
+
+  const req = { user: { userId: 'u1' } };
+  const res = mockRes();
+  await getMe(req, res, jest.fn());
+
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+    id: 'u1',
+    email: 'a@b.com',
+    wallet_address: 'GPUB',
+  }));
+});
+
+test('getMe: returns 404 when user not found', async () => {
+  db.query.mockResolvedValueOnce({ rows: [] });
+
+  const req = { user: { userId: 'missing' } };
+  const res = mockRes();
+  await getMe(req, res, jest.fn());
+
+  expect(res.status).toHaveBeenCalledWith(404);
+  expect(res.json).toHaveBeenCalledWith({ error: 'User not found' });
 });
