@@ -20,6 +20,7 @@ export default function Profile() {
   const { t, i18n } = useTranslation();
   const [copied, setCopied] = useState(false);
   const [contacts, setContacts] = useState([]);
+  const [contactsLoading, setContactsLoading] = useState(true);
   const [showAddContact, setShowAddContact] = useState(false);
   const [newContact, setNewContact] = useState({ name: '', wallet_address: '', notes: '', memo_required: false, default_memo: '', tags: '' });
   const [tagFilter, setTagFilter] = useState('');
@@ -43,6 +44,31 @@ export default function Profile() {
     api.get('/wallet/trustlines')
       .then(r => setTrustlines(r.data.trustlines || []))
       .catch(() => {});
+  }, []);
+
+  React.useEffect(() => {
+    const fetchContacts = async () => {
+      try {
+        const res = await api.get('/wallet/contacts');
+        setContacts(res.data.contacts || []);
+      } catch {
+        toast.error('Failed to load contacts');
+      } finally {
+        setContactsLoading(false);
+      }
+    };
+    const fetchActivity = async () => {
+      try {
+        const res = await api.get('/auth/activity');
+        setActivity(res.data.activity || []);
+      } catch {
+        // non-critical, silently ignore
+      } finally {
+        setActivityLoading(false);
+      }
+    };
+    fetchContacts();
+    fetchActivity();
   }, []);
 
   const handleAddTrustline = async (e) => {
@@ -72,29 +98,6 @@ export default function Profile() {
     }
   };
 
-  React.useEffect(() => {
-    const fetchContacts = async () => {
-      try {
-        const res = await api.get('/wallet/contacts');
-        setContacts(res.data.contacts || []);
-      } catch {
-        toast.error('Failed to load contacts');
-      }
-    };
-    const fetchActivity = async () => {
-      try {
-        const res = await api.get('/auth/activity');
-        setActivity(res.data.activity || []);
-      } catch {
-        // non-critical, silently ignore
-      } finally {
-        setActivityLoading(false);
-      }
-    };
-    fetchContacts();
-    fetchActivity();
-  }, []);
-
   const copyAddress = () => {
     navigator.clipboard.writeText(user?.wallet_address || '');
     setCopied(true);
@@ -103,6 +106,11 @@ export default function Profile() {
   };
 
   const handleLogout = () => { logout(); navigate('/'); };
+
+  const changeLanguage = (code) => {
+    i18n.changeLanguage(code);
+    localStorage.setItem('afripay_lang', code);
+  };
 
   const addContact = async (e) => {
     e.preventDefault();
@@ -127,9 +135,6 @@ export default function Profile() {
     } catch {
       toast.error('Failed to delete contact');
     }
-  const changeLanguage = (code) => {
-    i18n.changeLanguage(code);
-    localStorage.setItem('afripay_lang', code);
   };
 
   const handleExportKey = async (e) => {
@@ -323,6 +328,9 @@ export default function Profile() {
         )}
 
         {contacts.length === 0 ? (
+        {contactsLoading ? (
+          <p className="text-gray-500 text-sm text-center py-4" data-testid="contacts-loading">Loading…</p>
+        ) : contacts.length === 0 ? (
           <p className="text-gray-500 text-sm text-center py-4">{t('profile.no_contacts')}</p>
         ) : (
           <div className="space-y-2" data-testid="contacts-list">
@@ -459,6 +467,12 @@ export default function Profile() {
                 <p className="text-gray-500 text-xs shrink-0 text-right">
                   {new Date(event.created_at).toLocaleString()}
                 </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Manage Assets */}
       <div className="bg-gray-900 rounded-2xl p-5 space-y-4">
         <div className="flex items-center gap-2">
@@ -487,8 +501,6 @@ export default function Profile() {
             ))}
           </div>
         )}
-      </div>
-
 
         <form onSubmit={handleAddTrustline} className="flex gap-2 pt-1 border-t border-gray-800">
           <input
