@@ -15,9 +15,11 @@ const {
   generateRefreshToken,
   refreshTokenExpiresAt,
 } = require('../utils/tokens');
+const { sendOTP } = require('../services/sms');
 
 const TOKEN_TTL_MS = 96 * 60 * 60 * 1000;
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
+const PHONE_OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 const FORGOT_PASSWORD_MESSAGE = {
   message:
@@ -26,6 +28,12 @@ const FORGOT_PASSWORD_MESSAGE = {
 
 function generateVerificationToken() {
   const raw = crypto.randomBytes(32).toString('hex');
+  const hashed = crypto.createHash('sha256').update(raw).digest('hex');
+  return { raw, hashed };
+}
+
+function generatePhoneOTP() {
+  const raw = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
   const hashed = crypto.createHash('sha256').update(raw).digest('hex');
   return { raw, hashed };
 }
@@ -58,11 +66,14 @@ async function register(req, res, next) {
       ({ publicKey, encryptedSecretKey } = await createWallet());
     }
 
+    const { raw: otpRaw, hashed: otpHashed } = phone ? generatePhoneOTP() : { raw: null, hashed: null };
+    const otpExpiresAt = phone ? new Date(Date.now() + PHONE_OTP_TTL_MS) : null;
+
     await db.query('BEGIN');
     await db.query(
-      `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at)
-       VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7)`,
-      [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt]
+      `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at)
+       VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9)`,
+      [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, otpHashed, otpExpiresAt]
     );
     await db.query(
       `INSERT INTO wallets (id, user_id, public_key, encrypted_secret_key) VALUES ($1,$2,$3,$4)`,
@@ -78,8 +89,11 @@ async function register(req, res, next) {
     }
 
     await sendVerificationEmail(email, raw);
+    if (phone && otpRaw) {
+      sendOTP(phone, otpRaw).catch(e => logger.warn('Registration OTP SMS failed', { error: e.message }));
+    }
     res.status(201).json({
-      message: 'Account created. Please verify your email before logging in.',
+      message: 'Account created. Please verify your email and phone number.',
     });
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
@@ -140,6 +154,7 @@ async function login(req, res, next) {
         full_name: user.full_name,
         email: user.email,
         wallet_address: user.public_key,
+        phone_verified: user.phone_verified,
       },
     });
   } catch (err) {
@@ -176,10 +191,45 @@ async function verifyEmail(req, res, next) {
   }
 }
 
+async function verifyPhone(req, res, next) {
+  try {
+    const { otp } = req.body;
+    const userId = req.user.userId;
+
+    if (!otp) return res.status(400).json({ error: 'OTP is required' });
+
+    const hashed = crypto.createHash('sha256').update(otp).digest('hex');
+
+    const result = await db.query(
+      `SELECT phone_otp_hash, phone_otp_expires_at, phone FROM users WHERE id = $1`,
+      [userId]
+    );
+
+    const user = result.rows[0];
+    if (!user || user.phone_otp_hash !== hashed) {
+      return res.status(400).json({ error: 'Invalid OTP' });
+    }
+
+    if (new Date(user.phone_otp_expires_at) < new Date()) {
+      return res.status(400).json({ error: 'OTP has expired' });
+    }
+
+    await db.query(
+      `UPDATE users SET phone_verified = TRUE, phone_otp_hash = NULL, phone_otp_expires_at = NULL WHERE id = $1`,
+      [userId]
+    );
+
+    audit.log(userId, 'phone_verified', req.ip, req.headers['user-agent']);
+    res.json({ message: 'Phone number verified successfully.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getMe(req, res, next) {
   try {
     const result = await db.query(
-      `SELECT u.id, u.full_name, u.email, u.phone, u.pin_setup_completed, u.totp_enabled, u.account_type, w.public_key
+      `SELECT u.id, u.full_name, u.email, u.phone, u.phone_verified, u.pin_setup_completed, u.totp_enabled, u.account_type, w.public_key
        FROM users u LEFT JOIN wallets w ON w.user_id = u.id
        WHERE u.id = $1`,
       [req.user.userId]
@@ -191,6 +241,7 @@ async function getMe(req, res, next) {
       full_name: u.full_name,
       email: u.email,
       phone: u.phone,
+      phone_verified: u.phone_verified,
       wallet_address: u.public_key,
       pin_setup_completed: u.pin_setup_completed,
       totp_enabled: u.totp_enabled,
@@ -450,12 +501,41 @@ async function updateProfile(req, res, next) {
   try {
     const { full_name, phone } = req.body;
     const userId = req.user.userId;
+
+    const oldUserResult = await db.query('SELECT phone FROM users WHERE id = $1', [userId]);
+    const oldPhone = oldUserResult.rows[0]?.phone;
+
+    let phoneVerified = undefined;
+    let otpHashed = undefined;
+    let otpExpiresAt = undefined;
+    let otpRaw = undefined;
+
+    if (phone && phone !== oldPhone) {
+      ({ raw: otpRaw, hashed: otpHashed } = generatePhoneOTP());
+      otpExpiresAt = new Date(Date.now() + PHONE_OTP_TTL_MS);
+      phoneVerified = false;
+    }
+
     await db.query(
-      `UPDATE users SET full_name = COALESCE($1, full_name), phone = COALESCE($2, phone) WHERE id = $3`,
-      [full_name || null, phone || null, userId]
+      `UPDATE users SET
+        full_name = COALESCE($1, full_name),
+        phone = COALESCE($2, phone),
+        phone_verified = COALESCE($3, phone_verified),
+        phone_otp_hash = COALESCE($4, phone_otp_hash),
+        phone_otp_expires_at = COALESCE($5, phone_otp_expires_at)
+      WHERE id = $6`,
+      [full_name || null, phone || null, phoneVerified, otpHashed, otpExpiresAt, userId]
     );
+
+    if (otpRaw && phone) {
+      sendOTP(phone, otpRaw).catch(e => logger.warn('Profile update OTP SMS failed', { error: e.message }));
+    }
+
     audit.log(userId, 'profile_update', req.ip, req.headers['user-agent']);
-    res.json({ message: 'Profile updated' });
+    res.json({
+      message: 'Profile updated',
+      phone_verification_required: !!otpRaw
+    });
   } catch (err) {
     next(err);
   }
@@ -481,6 +561,7 @@ module.exports = {
   refresh,
   logout,
   verifyEmail,
+  verifyPhone,
   getMe,
   updateProfile,
   getActivity,
