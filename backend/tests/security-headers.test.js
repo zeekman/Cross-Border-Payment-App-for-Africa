@@ -25,6 +25,24 @@ const ROUTES = [
   { method: 'get',  path: '/health' },
 ];
 
+describe('CORS preflight', () => {
+  test('OPTIONS request returns Access-Control-Max-Age: 86400', async () => {
+    const res = await request(app)
+      .options('/api/auth/login')
+      .set('Origin', 'http://localhost:3000')
+      .set('Access-Control-Request-Method', 'POST');
+    expect(res.headers['access-control-max-age']).toBe('86400');
+  });
+
+  test('OPTIONS request still restricts origin', async () => {
+    const res = await request(app)
+      .options('/api/auth/login')
+      .set('Origin', 'http://evil.com')
+      .set('Access-Control-Request-Method', 'POST');
+    expect(res.headers['access-control-allow-origin']).not.toBe('http://evil.com');
+  });
+});
+
 describe('Security headers', () => {
   test.each(ROUTES)('$method $path has required security headers', async ({ method, path }) => {
     const res = await request(app)[method](path).send({});
