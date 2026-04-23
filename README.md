@@ -374,6 +374,11 @@ Contributions are welcome. Please ensure:
 - [Stellar Discord](https://discord.gg/stellar)
 - [Soroban Smart Contracts](https://soroban.stellar.org)
 
+## Docs
+
+- [Horizon Self-Hosting Guide](docs/horizon-self-hosting.md) — run your own Horizon node in production
+- [Wallet Backup & Recovery](docs/wallet-backup-recovery.md)
+
 ---
 
 ## License
