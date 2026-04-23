@@ -344,6 +344,7 @@ describe('POST /api/disputes/:id/evidence', () => {
   });
 
   test('returns 403 when caller is not a party to the dispute', async () => {
+    // A valid Stellar public key that is neither sender nor recipient
     const otherWallet = 'GDQJUTQYK2MQX2VGDR2FYWLIYAQIEGXTQVTFEMGH3SUELOFZUMZQVNLL';
     db.query
       .mockResolvedValueOnce({ rows: [DISPUTE_ROW] })                          // dispute
