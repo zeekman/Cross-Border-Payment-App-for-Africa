@@ -7,6 +7,7 @@ const StellarSdk = require('@stellar/stellar-sdk');
 const db = require('../db');
 const { sendPushToUser } = require('../controllers/notificationController');
 const logger = require('../utils/logger');
+const { wsConnections } = require('../utils/metrics');
 
 const server = new StellarSdk.Horizon.Server(
   process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org'
@@ -54,6 +55,7 @@ async function startStreamForUser(userId, publicKey) {
     });
 
   activeStreams.set(publicKey, close);
+  wsConnections.set(activeStreams.size);
 }
 
 function stopStreamForUser(publicKey) {
@@ -61,6 +63,7 @@ function stopStreamForUser(publicKey) {
   if (close) {
     close();
     activeStreams.delete(publicKey);
+    wsConnections.set(activeStreams.size);
   }
 }
 

@@ -5,6 +5,8 @@ const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 
 const requestId = require('./middleware/requestId');
+const metricsMiddleware = require('./middleware/metricsMiddleware');
+const { registry } = require('./utils/metrics');
 
 const authRoutes = require('./routes/auth');
 const walletRoutes = require('./routes/wallet');
@@ -35,6 +37,7 @@ const { runHealthChecks } = require('./services/health');
 const app = express();
 
 app.use(requestId);
+app.use(metricsMiddleware);
 app.use(cookieParser());
 app.use(helmet({
   contentSecurityPolicy: {
@@ -155,6 +158,18 @@ app.get('/health', async (req, res) => {
       network: process.env.STELLAR_NETWORK || 'testnet',
     });
   }
+});
+
+app.get('/metrics', async (req, res) => {
+  const token = process.env.METRICS_TOKEN;
+  if (token) {
+    const auth = req.headers.authorization || '';
+    if (auth !== `Bearer ${token}`) {
+      return res.status(401).end();
+    }
+  }
+  res.set('Content-Type', registry.contentType);
+  res.end(await registry.metrics());
 });
 
 app.use((err, req, res, next) => {
