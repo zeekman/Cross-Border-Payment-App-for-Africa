@@ -2,7 +2,7 @@ const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
-const { getWallet, getQRCode, getWalletTransactions } = require('../controllers/walletController');
+const { getWallet, getQRCode, getWalletTransactions, listDataEntries, setEntry, deleteEntry } = require('../controllers/walletController');
 const { getContacts, addContact, deleteContact } = require('../controllers/contactsController');
 
 const validate = (req, res, next) => {
@@ -36,5 +36,17 @@ router.post('/contacts',
   addContact
 );
 router.delete('/contacts/:id', deleteContact);
+
+router.get('/data-entries', listDataEntries);
+router.post('/data-entry',
+  [
+    body('key').trim().notEmpty().withMessage('key is required'),
+    body('value').trim().notEmpty().withMessage('value is required')
+      .isLength({ max: 64 }).withMessage('value must be 64 characters or fewer'),
+  ],
+  validate,
+  setEntry
+);
+router.delete('/data-entry/:key', deleteEntry);
 
 module.exports = router;

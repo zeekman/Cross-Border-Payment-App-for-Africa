@@ -159,4 +159,35 @@ async function getTransactions(publicKey, limit = 20) {
   }
 }
 
-module.exports = { createWallet, getBalance, sendPayment, getTransactions, decryptPrivateKey };
+// Set or delete a data entry on the account (value=null deletes)
+async function setDataEntry({ publicKey, encryptedSecretKey, key, value }) {
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const keypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const account = await server.loadAccount(publicKey);
+
+  const transaction = new StellarSdk.TransactionBuilder(account, {
+    fee: await server.fetchBaseFee(),
+    networkPassphrase
+  })
+    .addOperation(StellarSdk.Operation.manageData({
+      name: key,
+      value: value !== null ? Buffer.from(value, 'utf8') : null
+    }))
+    .setTimeout(30)
+    .build();
+
+  transaction.sign(keypair);
+  const result = await server.submitTransaction(transaction);
+  return { transactionHash: result.hash };
+}
+
+// Get all data entries for an account
+async function getDataEntries(publicKey) {
+  const account = await server.loadAccount(publicKey);
+  return Object.entries(account.data_attr || {}).map(([key, valueB64]) => ({
+    key,
+    value: Buffer.from(valueB64, 'base64').toString('utf8')
+  }));
+}
+
+module.exports = { createWallet, getBalance, sendPayment, getTransactions, decryptPrivateKey, setDataEntry, getDataEntries };
