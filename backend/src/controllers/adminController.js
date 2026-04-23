@@ -1,4 +1,6 @@
 const db = require('../db');
+const { clawbackAsset } = require('../services/stellar');
+const audit = require('../services/audit');
 
 async function getStats(req, res, next) {
   try {
@@ -87,4 +89,47 @@ async function getTransactions(req, res, next) {
   }
 }
 
-module.exports = { getStats, getUsers, getTransactions };
+module.exports = { getStats, getUsers, getTransactions, clawback };
+
+/**
+ * POST /api/admin/clawback
+ * Admin-only: clawback an asset from a user's account for regulatory compliance.
+ * Requires ISSUER_PUBLIC_KEY and ISSUER_ENCRYPTED_SECRET_KEY env vars.
+ * All clawback operations are logged in the audit log.
+ */
+async function clawback(req, res, next) {
+  try {
+    const { from, asset, amount, reason } = req.body;
+
+    const issuerPublicKey = process.env.ISSUER_PUBLIC_KEY;
+    const encryptedIssuerSecretKey = process.env.ISSUER_ENCRYPTED_SECRET_KEY;
+
+    if (!issuerPublicKey || !encryptedIssuerSecretKey) {
+      return res.status(500).json({ error: 'Issuer credentials not configured' });
+    }
+
+    const { transactionHash, ledger } = await clawbackAsset({
+      issuerPublicKey,
+      encryptedIssuerSecretKey,
+      fromPublicKey: from,
+      asset,
+      amount,
+    });
+
+    await audit.log(req.user.userId, 'admin_clawback', req.ip, req.headers['user-agent'], {
+      from,
+      asset,
+      amount,
+      reason: reason || null,
+      transaction_hash: transactionHash,
+    });
+
+    res.json({
+      message: 'Clawback executed successfully',
+      transaction_hash: transactionHash,
+      ledger,
+    });
+  } catch (err) {
+    next(err);
+  }
+}

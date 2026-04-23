@@ -3,23 +3,33 @@ const db = require('../db');
 
 async function getContacts(req, res, next) {
   try {
-    const result = await db.query(
-      'SELECT id, name, wallet_address, created_at FROM contacts WHERE user_id = $1 ORDER BY name',
-      [req.user.userId]
-    );
+    const { tag } = req.query;
+    let query = 'SELECT id, name, wallet_address, notes, memo_required, default_memo, tags, created_at FROM contacts WHERE user_id = $1';
+    const params = [req.user.userId];
+    if (tag) {
+      query += ' AND $2 = ANY(tags)';
+      params.push(tag);
+    }
+    query += ' ORDER BY name';
+    const result = await db.query(query, params);
     res.json({ contacts: result.rows });
   } catch (err) { next(err); }
 }
 
 async function addContact(req, res, next) {
   try {
-    const { name, wallet_address } = req.body;
+    const { name, wallet_address, notes, memo_required, default_memo, tags } = req.body;
     const id = uuidv4();
-    await db.query(
-      'INSERT INTO contacts (id, user_id, name, wallet_address) VALUES ($1,$2,$3,$4) ON CONFLICT (user_id, wallet_address) DO UPDATE SET name = $3',
-      [id, req.user.userId, name, wallet_address]
+    const result = await db.query(
+      `INSERT INTO contacts (id, user_id, name, wallet_address, notes, memo_required, default_memo, tags)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (user_id, wallet_address) DO UPDATE
+         SET name = $3, notes = $5, memo_required = $6, default_memo = $7, tags = $8
+       RETURNING id, name, wallet_address, notes, memo_required, default_memo, tags`,
+      [id, req.user.userId, name, wallet_address,
+       notes || null, memo_required || false, default_memo || null, tags || []]
     );
-    res.status(201).json({ message: 'Contact saved', contact: { id, name, wallet_address } });
+    res.status(201).json({ message: 'Contact saved', contact: result.rows[0] });
   } catch (err) { next(err); }
 }
 

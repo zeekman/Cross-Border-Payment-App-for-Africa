@@ -12,7 +12,8 @@
     "retry": "Réessayer",
     "sign_out": "Se déconnecter",
     "no_transactions": "Aucune transaction trouvée",
-    "see_all": "Voir tout"
+    "see_all": "Voir tout",
+    "rates_disclaimer": "Les taux sont approximatifs et peuvent être mis en cache. Actualisation environ chaque minute."
   },
   "welcome": {
     "tagline": "Paiements transfrontaliers rapides et sécurisés propulsés par la blockchain Stellar",
@@ -50,7 +51,24 @@
     "submitting": "Connexion...",
     "no_account": "Vous n'avez pas de compte ?",
     "create_one": "En créer un",
-    "error": "Échec de la connexion"
+    "error": "Échec de la connexion",
+    "forgot_password": "Mot de passe oublié ?"
+  },
+  "passwordReset": {
+    "forgot_title": "Réinitialiser le mot de passe",
+    "forgot_subtitle": "Entrez votre e-mail ; nous enverrons un lien si un compte existe.",
+    "forgot_submit": "Envoyer le lien",
+    "forgot_submitting": "Envoi...",
+    "forgot_success_toast": "Consultez votre e-mail pour la suite.",
+    "reset_title": "Nouveau mot de passe",
+    "reset_subtitle": "Choisissez un nouveau mot de passe.",
+    "new_password": "Nouveau mot de passe",
+    "reset_submit": "Mettre à jour",
+    "reset_submitting": "Mise à jour...",
+    "reset_success_toast": "Mot de passe mis à jour. Vous pouvez vous connecter.",
+    "back_to_login": "Retour à la connexion",
+    "missing_token": "Lien invalide. Demandez-en un nouveau depuis la connexion.",
+    "error_generic": "Une erreur s'est produite. Réessayez."
   },
   "dashboard": {
     "greeting": "Bonjour,",
@@ -76,11 +94,21 @@
     "camera_error": "Impossible d'accéder à la caméra",
     "amount": "Montant",
     "memo": "Mémo (facultatif)",
-    "memo_placeholder": "Note de paiement...",
+    "memo_placeholder": "Texte, ID numérique ou 64 car. hex…",
+    "memo_type_label": "Type de mémo",
+    "memo_type_text": "Texte",
+    "memo_type_id": "ID (numérique)",
+    "memo_type_hash": "Hash (64 hex)",
+    "memo_type_return": "Retour (64 hex)",
+    "memo_hint_text": "28 caractères max (mémo texte Stellar).",
+    "memo_hint_id": "Entier 64 bits non signé (dépôts exchange).",
+    "memo_hint_hash": "64 caractères hexadécimaux exactement.",
+    "memo_hint_return": "64 caractères hex pour un mémo de retour.",
     "confirm_title": "Confirmer la transaction",
     "confirm_to": "À :",
     "confirm_amount": "Montant :",
     "confirm_memo": "Mémo :",
+    "confirm_memo_type": "Type :",
     "review": "Vérifier le paiement",
     "confirm_send": "Confirmer et envoyer",
     "success": "Paiement envoyé avec succès !",
@@ -121,7 +149,16 @@
     "filter_sent": "envoyés",
     "filter_received": "reçus",
     "to": "À :",
-    "from": "De :"
+    "from": "De :",
+    "export_csv": "Exporter CSV",
+    "search_placeholder": "Rechercher mémo, adresse ou montant",
+    "date_from": "Date de début",
+    "date_to": "Date de fin",
+    "asset_label": "Actif",
+    "asset_all": "Tous les actifs",
+    "load_error": "Échec du chargement des transactions",
+    "load_more": "Charger plus",
+    "loading_more": "Chargement..."
   },
   "profile": {
     "title": "Profil",

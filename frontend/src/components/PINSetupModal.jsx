@@ -163,7 +163,7 @@ export default function PINSetupModal({ isOpen, onClose, onSuccess }) {
                 } disabled:opacity-50`}
               >
                 {loading ? (
-                  <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                  <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" role="status" aria-label="Loading" />
                 ) : (
                   step === 'create' ? t('common.continue') : t('auth.pin_confirm_button')
                 )}

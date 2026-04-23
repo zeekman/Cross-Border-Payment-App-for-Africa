@@ -137,7 +137,7 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
                 className="flex-1 bg-primary-500 hover:bg-primary-600 rounded-xl py-3 text-white font-semibold transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
               >
                 {loading ? (
-                  <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                  <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" role="status" aria-label="Loading" />
                 ) : (
                   t('auth.pin_verify_button')
                 )}

@@ -1,11 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Send, Download, RefreshCw, Copy, CheckCheck } from 'lucide-react';
+import { Send, Download, RefreshCw, Copy, CheckCheck, FlaskConical, Plus, Minus } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { BalanceCardSkeleton, TransactionRowSkeleton } from '../components/Skeleton';
 import api from '../utils/api';
-import { truncateAddress, CURRENCIES, convertFromXLM } from '../utils/currency';
+import { truncateAddress } from '../utils/currency';
+import { useExchangeRates } from '../hooks/useExchangeRates';
+import { usePaymentStream } from '../hooks/usePaymentStream';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+
+const IS_TESTNET = process.env.REACT_APP_STELLAR_NETWORK !== 'mainnet';
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -16,6 +21,34 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [selectedCurrency, setSelectedCurrency] = useState('XLM');
+  const [funding, setFunding] = useState(false);
+  const [balanceIncreased, setBalanceIncreased] = useState(false);
+  const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
+
+  // Handle incoming payment from stream
+  const handlePayment = useCallback((payment) => {
+    // Only process payments to this account
+    if (payment.to === wallet?.public_key) {
+      // Show toast notification
+      toast.success(`Received ${payment.amount} ${payment.asset}`);
+      
+      // Trigger balance increase animation
+      setBalanceIncreased(true);
+      setTimeout(() => setBalanceIncreased(false), 2000);
+      
+      // Refresh balance and transactions
+      Promise.all([
+        api.get('/wallet/balance'),
+        api.get('/payments/history')
+      ]).then(([walletRes, txRes]) => {
+        setWallet(walletRes.data);
+        setTransactions(txRes.data.transactions.slice(0, 5));
+      }).catch(() => {});
+    }
+  }, [wallet?.public_key]);
+
+  // Set up payment stream
+  const { isConnected, error: streamError } = usePaymentStream(wallet?.public_key, handlePayment);
 
   useEffect(() => {
     Promise.all([
@@ -34,32 +67,90 @@ export default function Dashboard() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const fundWallet = async () => {
+    setFunding(true);
+    try {
+      const res = await api.post('/dev/fund-wallet');
+      toast.success(res.data.message);
+      // Refresh balance
+      const walletRes = await api.get('/wallet/balance');
+      setWallet(walletRes.data);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Funding failed');
+    } finally {
+      setFunding(false);
+    }
+  };
+
+  const handleAnchorAction = async (action) => {
+    try {
+      const asset = 'USDC'; // Default to USDC for fiat ramps
+      const endpoint = action === 'deposit' ? '/anchor/deposit' : '/anchor/withdraw';
+      const res = await api.post(endpoint, { asset });
+      
+      // Open anchor iframe/popup
+      window.open(res.data.url, 'anchor', 'width=500,height=600');
+    } catch (err) {
+      toast.error(err.response?.data?.error || `Failed to ${action}`);
+    }
+  };
+
   const xlmBalance = wallet?.balances?.find(b => b.asset === 'XLM')?.balance || '0';
   const displayBalance = selectedCurrency === 'XLM'
     ? xlmBalance
     : convertFromXLM(xlmBalance, selectedCurrency);
 
   if (loading) return (
-    <div className="flex items-center justify-center h-64">
-      <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
+    <div className="px-4 py-6 max-w-lg mx-auto space-y-6" aria-busy="true" aria-label="Loading dashboard">
+      <div className="flex items-center justify-between">
+        <div className="space-y-2">
+          <div className="skeleton h-3 w-20 rounded-lg" />
+          <div className="skeleton h-5 w-32 rounded-lg" />
+        </div>
+      </div>
+      <BalanceCardSkeleton />
+      <div className="grid grid-cols-2 gap-3">
+        <div className="skeleton h-16 rounded-xl" />
+        <div className="skeleton h-16 rounded-xl" />
+      </div>
+      <div className="space-y-2">
+        {Array.from({ length: 4 }).map((_, i) => <TransactionRowSkeleton key={i} />)}
+      </div>
     </div>
   );
 
   return (
     <div className="px-4 py-6 max-w-lg mx-auto space-y-6">
+      {/* Testnet banner — development only */}
+      {IS_TESTNET && (
+        <div className="flex items-center justify-between bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3">
+          <div className="flex items-center gap-2 text-yellow-400 text-sm">
+            <FlaskConical size={15} />
+            <span>Testnet mode — funds have no real value</span>
+          </div>
+          <button
+            onClick={fundWallet}
+            disabled={funding}
+            className="text-xs bg-yellow-500 hover:bg-yellow-600 disabled:opacity-50 text-black font-semibold px-3 py-1.5 rounded-lg transition-colors"
+          >
+            {funding ? 'Funding…' : 'Fund wallet'}
+          </button>
+        </div>
+      )}
+
       {/* Greeting */}
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-gray-400 text-sm">{t('dashboard.greeting')}</p>
-          <h2 className="text-xl font-bold text-white">{user?.full_name?.split(' ')[0]} 👋</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-sm">{t('dashboard.greeting')}</p>
+          <h2 className="text-xl font-bold text-gray-900 dark:text-white">{user?.full_name?.split(' ')[0]} 👋</h2>
         </div>
-        <button onClick={() => window.location.reload()} className="text-gray-400 hover:text-white">
+        <button onClick={() => window.location.reload()} className="text-gray-400 hover:text-white" aria-label="Refresh dashboard">
           <RefreshCw size={18} />
         </button>
       </div>
 
       {/* Balance Card */}
-      <div className="bg-gradient-to-br from-primary-600 to-primary-700 rounded-2xl p-5 shadow-lg shadow-primary-500/20">
+      <div className={`bg-gradient-to-br from-primary-600 to-primary-700 rounded-2xl p-5 shadow-lg shadow-primary-500/20 transition-all duration-500 ${balanceIncreased ? 'ring-4 ring-green-400 ring-opacity-50' : ''}`}>
         <p className="text-primary-100 text-sm mb-1">{t('dashboard.total_balance')}</p>
         <div className="flex items-end gap-2 mb-4">
           <span className="text-4xl font-bold text-white">{parseFloat(displayBalance).toLocaleString()}</span>
@@ -68,7 +159,7 @@ export default function Dashboard() {
 
         {/* Currency selector */}
         <div className="flex gap-2 flex-wrap mb-4">
-          {CURRENCIES.map(c => (
+          {currencies.map(c => (
             <button
               key={c.code}
               onClick={() => setSelectedCurrency(c.code)}
@@ -82,13 +173,18 @@ export default function Dashboard() {
             </button>
           ))}
         </div>
+        {usingApproximateRates && (
+          <p className="text-primary-200/90 text-xs mb-3 leading-snug">
+            {t('common.rates_disclaimer')}
+          </p>
+        )}
 
         {/* Wallet address */}
         <div className="flex items-center gap-2 bg-primary-800/40 rounded-lg px-3 py-2">
           <span className="text-primary-200 text-xs font-mono flex-1 truncate">
             {truncateAddress(wallet?.public_key, 10)}
           </span>
-          <button onClick={copyAddress} className="text-primary-200 hover:text-white shrink-0">
+          <button onClick={copyAddress} className="text-primary-200 hover:text-white shrink-0" aria-label={copied ? 'Address copied' : 'Copy wallet address'}>
             {copied ? <CheckCheck size={14} /> : <Copy size={14} />}
           </button>
         </div>
@@ -98,48 +194,70 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 gap-3">
         <button
           onClick={() => navigate('/send')}
-          className="bg-gray-800 hover:bg-gray-700 rounded-xl p-4 flex items-center gap-3 transition-colors"
+          className="bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 border border-gray-100 dark:border-gray-700 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
         >
           <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
             <Send size={20} />
           </div>
-          <span className="font-semibold text-white">{t('dashboard.send')}</span>
+          <span className="font-semibold text-gray-900 dark:text-white">{t('dashboard.send')}</span>
         </button>
         <button
           onClick={() => navigate('/receive')}
-          className="bg-gray-800 hover:bg-gray-700 rounded-xl p-4 flex items-center gap-3 transition-colors"
+          className="bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 border border-gray-100 dark:border-gray-700 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
         >
           <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
             <Download size={20} />
           </div>
-          <span className="font-semibold text-white">{t('dashboard.receive')}</span>
+          <span className="font-semibold text-gray-900 dark:text-white">{t('dashboard.receive')}</span>
+        </button>
+      </div>
+
+      {/* Fiat on/off ramp buttons */}
+      <div className="grid grid-cols-2 gap-3">
+        <button
+          onClick={() => handleAnchorAction('deposit')}
+          className="bg-green-500/10 hover:bg-green-500/20 border border-green-500/30 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
+        >
+          <div className="w-10 h-10 bg-green-500/20 rounded-lg flex items-center justify-center text-green-500">
+            <Plus size={20} />
+          </div>
+          <span className="font-semibold text-green-600 dark:text-green-400">{t('dashboard.add_money') || 'Add Money'}</span>
+        </button>
+        <button
+          onClick={() => handleAnchorAction('withdraw')}
+          className="bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
+        >
+          <div className="w-10 h-10 bg-blue-500/20 rounded-lg flex items-center justify-center text-blue-500">
+            <Minus size={20} />
+          </div>
+          <span className="font-semibold text-blue-600 dark:text-blue-400">{t('dashboard.withdraw') || 'Withdraw'}</span>
         </button>
       </div>
 
       {/* Recent transactions */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-white">{t('dashboard.recent_activity')}</h3>
+          <h3 className="font-semibold text-gray-900 dark:text-white">{t('dashboard.recent_activity')}</h3>
           <button onClick={() => navigate('/history')} className="text-primary-500 text-sm hover:underline">
             {t('common.see_all')}
           </button>
         </div>
 
         {transactions.length === 0 ? (
-          <div className="bg-gray-900 rounded-xl p-6 text-center text-gray-500 text-sm">
+          <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-6 text-center text-gray-500 text-sm shadow-sm">
             {t('dashboard.no_transactions')}
           </div>
         ) : (
           <div className="space-y-2">
             {transactions.map(tx => (
-              <div key={tx.id} className="bg-gray-900 rounded-xl p-3 flex items-center gap-3">
+              <div key={tx.id} className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-3 flex items-center gap-3 shadow-sm">
                 <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
                   tx.direction === 'sent' ? 'bg-red-500/10 text-red-400' : 'bg-primary-500/10 text-primary-400'
                 }`}>
                   {tx.direction === 'sent' ? <Send size={16} /> : <Download size={16} />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-white font-medium truncate">
+                  <p className="text-sm text-gray-900 dark:text-white font-medium truncate">
                     {tx.direction === 'sent'
                       ? `${t('dashboard.to')} ${truncateAddress(tx.recipient_wallet)}`
                       : `${t('dashboard.from')} ${truncateAddress(tx.sender_wallet)}`}

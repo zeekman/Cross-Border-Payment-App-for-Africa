@@ -1,0 +1,5 @@
+ALTER TABLE transactions
+  ADD COLUMN IF NOT EXISTS memo_type VARCHAR(10);
+
+ALTER TABLE transactions
+  ALTER COLUMN memo TYPE VARCHAR(128);
