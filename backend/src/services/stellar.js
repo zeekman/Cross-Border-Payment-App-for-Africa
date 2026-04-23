@@ -647,6 +647,46 @@ async function clawbackAsset({ issuerPublicKey, encryptedIssuerSecretKey, fromPu
 }
 
 // ---------------------------------------------------------------------------
+// Account data entries (manageData)
+// ---------------------------------------------------------------------------
+
+/**
+ * Set or delete a data entry on the account.
+ * Pass value=null to delete the entry.
+ */
+async function setDataEntry({ publicKey, encryptedSecretKey, key, value }) {
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const keypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const account = await withRetry(() => withFallback(s => s.loadAccount(publicKey)), { label: 'loadAccount(dataEntry)' });
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: await withRetry(() => withFallback(s => s.fetchBaseFee()), { label: 'fetchBaseFee' }),
+    networkPassphrase,
+  })
+    .addOperation(StellarSdk.Operation.manageData({
+      name: key,
+      value: value !== null ? Buffer.from(value, 'utf8') : null,
+    }))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(keypair);
+  const result = await withRetry(() => withFallback(s => s.submitTransaction(tx)), { label: 'submitTransaction(manageData)' });
+  return { transactionHash: result.hash };
+}
+
+/**
+ * Return all data entries for an account, decoded from base64.
+ */
+async function getDataEntries(publicKey) {
+  const account = await withRetry(() => withFallback(s => s.loadAccount(publicKey)), { label: 'loadAccount(dataEntries)' });
+  return Object.entries(account.data_attr || {}).map(([key, valueB64]) => ({
+    key,
+    value: Buffer.from(valueB64, 'base64').toString('utf8'),
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -670,4 +710,6 @@ module.exports = {
   removeAccountSigner,
   mergeAccount,
   clawbackAsset,
+  setDataEntry,
+  getDataEntries,
 };
