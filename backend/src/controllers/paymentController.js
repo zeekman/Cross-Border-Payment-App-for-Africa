@@ -55,9 +55,19 @@ async function send(req, res, next) {
   // Hoist these so the catch block can reference them for the failed-tx INSERT
   let public_key;
   try {
-    const { recipient_address, amount, asset = "XLM", memo: rawMemo, memo_type: rawMemoType } = req.body;
-    const memo = typeof rawMemo === "string" ? rawMemo.trim() : "";
+    const { recipient_address, amount, asset = "XLM", memo: rawMemo, memo_type: rawMemoType, encrypt_memo = false } = req.body;
+    let memo = typeof rawMemo === "string" ? rawMemo.trim() : "";
     const memo_type = memo ? (rawMemoType || "text") : null;
+
+    let is_encrypted = false;
+    let encrypted_memo = null;
+
+    if (encrypt_memo && memo) {
+      const { encryptMemo } = require('../utils/encryption');
+      encrypted_memo = encryptMemo(memo, recipient_address);
+      memo = encrypted_memo; // Use ciphertext as memo
+      is_encrypted = true;
+    }
 
     // KYC check for high-value transactions
     const estimatedUSD = estimateUSDValue(amount, asset);
@@ -126,14 +136,14 @@ async function send(req, res, next) {
       asset,
       memo: memo || undefined,
       memoType: memo ? memo_type : undefined,
-    });
+    }, req.logger);
 
     // Save to DB
     const txStatus = type === "claimable_balance" ? "pending_claim" : "completed";
     await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null],
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo],
     );
 
     // Invalidate sender's cached balance — it changed after this payment
@@ -291,7 +301,19 @@ async function sendPath(req, res, next) {
       destination_min_amount,
       path = [],
       memo,
+      encrypt_memo = false,
     } = req.body);
+
+    let memoStr = typeof memo === "string" ? memo.trim() : "";
+    let is_encrypted = false;
+    let encrypted_memo = null;
+
+    if (encrypt_memo && memoStr) {
+      const { encryptMemo } = require('../utils/encryption');
+      encrypted_memo = encryptMemo(memoStr, recipient_address);
+      memoStr = encrypted_memo; // Use ciphertext as memo
+      is_encrypted = true;
+    }
 
     // KYC check
     const estimatedUSD = estimateUSDValue(source_amount, source_asset);
@@ -335,13 +357,13 @@ async function sendPath(req, res, next) {
       destinationAsset: destination_asset,
       destinationMinAmount: destination_min_amount,
       path,
-      memo,
-    });
+      memo: memoStr,
+    }, req.logger);
 
     await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'completed')`,
-      [txId, public_key, recipient_address, source_amount, source_asset, memo || null, transactionHash],
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'completed',$8,$9,$10)`,
+      [txId, public_key, recipient_address, source_amount, source_asset, memoStr || null, transactionHash, req.requestId, is_encrypted, encrypted_memo],
     );
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, sender: public_key, recipient: recipient_address };
@@ -354,9 +376,9 @@ async function sendPath(req, res, next) {
     });
   } catch (err) {
     await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'failed')`,
-      [txId, public_key || "", recipient_address || "", source_amount || "0", source_asset || "XLM", null, null],
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'failed',$8,$9,$10)`,
+      [txId, public_key || "", recipient_address || "", source_amount || "0", source_asset || "XLM", null, null, req.requestId, false, null],
     ).catch(() => {});
 
     if (err.status === 400 || err.status === 500) {
