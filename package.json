@@ -1,4 +1,10 @@
 {
+  "scripts": {
+    "test:e2e": "cd e2e && npm run test:e2e",
+    "test:e2e:headed": "cd e2e && npm run test:e2e:headed",
+    "test:e2e:ui": "cd e2e && npm run test:e2e:ui",
+    "install:e2e": "cd e2e && npm ci && npx playwright install"
+  },
   "devDependencies": {
     "eslint": "^8.57.1",
     "eslint-config-airbnb": "^19.0.4",
