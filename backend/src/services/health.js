@@ -21,11 +21,18 @@ async function runHealthChecks() {
   ]);
 
   const ok = dbOk && stellarOk;
+  const poolStats = db.getPoolStats();
+
   return {
     status: ok ? 'ok' : 'degraded',
     db: dbOk ? 'ok' : 'down',
     stellar: stellarOk ? 'ok' : 'down',
     network: process.env.STELLAR_NETWORK || 'testnet',
+    pool: {
+      total: poolStats.total,
+      idle: poolStats.idle,
+      waiting: poolStats.waiting,
+    },
   };
 }
 

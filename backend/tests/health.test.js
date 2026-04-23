@@ -11,6 +11,9 @@ const db = require('../src/db');
 const stellar = require('../src/services/stellar');
 const app = require('../src/app');
 
+/** Default pool stats returned by the mock unless overridden per-test. */
+const DEFAULT_POOL_STATS = { total: 5, idle: 3, waiting: 0 };
+
 describe('GET /health', () => {
   let horizonSpy;
 
@@ -27,6 +30,7 @@ describe('GET /health', () => {
       if (String(sql).includes('SELECT 1')) return Promise.resolve({ rows: [{ '?column?': 1 }] });
       return Promise.resolve({ rows: [] });
     });
+    db.getPoolStats.mockReturnValue(DEFAULT_POOL_STATS);
     horizonSpy.mockResolvedValue(true);
   });
 
@@ -38,7 +42,7 @@ describe('GET /health', () => {
     const res = await request(app).get('/health');
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({
+    expect(res.body).toMatchObject({
       status: 'ok',
       db: 'ok',
       stellar: 'ok',
@@ -86,5 +90,45 @@ describe('GET /health', () => {
     expect(res.body.db).toBe('down');
     expect(res.body.stellar).toBe('down');
     expect(res.body.status).toBe('degraded');
+  });
+
+  // ─── Pool stats tests ───────────────────────────────────────────────────────
+
+  test('includes pool stats in a healthy response', async () => {
+    db.getPoolStats.mockReturnValueOnce({ total: 10, idle: 8, waiting: 0 });
+
+    const res = await request(app).get('/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('pool');
+    expect(res.body.pool).toEqual({ total: 10, idle: 8, waiting: 0 });
+  });
+
+  test('includes pool stats even when db is down', async () => {
+    db.query.mockRejectedValueOnce(new Error('connection refused'));
+    db.getPoolStats.mockReturnValueOnce({ total: 20, idle: 0, waiting: 8 });
+
+    const res = await request(app).get('/health');
+
+    expect(res.status).toBe(503);
+    expect(res.body).toHaveProperty('pool');
+    expect(res.body.pool).toMatchObject({ total: 20, idle: 0, waiting: 8 });
+  });
+
+  test('pool stats have the correct numeric fields', async () => {
+    const res = await request(app).get('/health');
+
+    expect(res.status).toBe(200);
+    const { pool } = res.body;
+    expect(typeof pool.total).toBe('number');
+    expect(typeof pool.idle).toBe('number');
+    expect(typeof pool.waiting).toBe('number');
+  });
+
+  test('pool stats reflect the default mock values when not overridden', async () => {
+    const res = await request(app).get('/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body.pool).toEqual(DEFAULT_POOL_STATS);
   });
 });

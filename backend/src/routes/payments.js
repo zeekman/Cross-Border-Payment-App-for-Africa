@@ -4,20 +4,9 @@ const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
 const paymentSendValidators = require('../validators/paymentSendValidators');
-const { send, history, exportCSV, estimateFee } = require('../controllers/paymentController');
-const { query, validationResult, body } = require('express-validator');
-const StellarSdk = require('@stellar/stellar-sdk');
-const authMiddleware = require('../middleware/auth');
-const idempotency = require('../middleware/idempotency');
-const { query, validationResult } = require('express-validator');
-const authMiddleware = require('../middleware/auth');
-const idempotency = require('../middleware/idempotency');
-const { send, history, findPath, sendPath } = require('../controllers/paymentController');
-const { send, history, exportCSV } = require('../controllers/paymentController');
-const { send, history } = require('../controllers/paymentController');
+const { send, history, exportCSV, estimateFee, findPath, sendPath } = require('../controllers/paymentController');
 const { resolveFederationAddress } = require('../services/stellar');
 const { isMemoRequired } = require('../services/memoRequired');
-const paymentSendValidators = require('../validators/paymentSendValidators');
 const { ALLOWED_HISTORY_ASSETS } = require('../utils/historyQuery');
 
 // Stellar minimum: 1 stroop = 0.0000001 XLM
@@ -49,15 +38,12 @@ const validate = (req, res, next) => {
   next();
 };
 
-// Stellar minimum payment is 0.0000001 XLM (1 stroop)
-const STELLAR_MIN_AMOUNT = 0.0000001;
-const MAX_TRANSACTION_AMOUNT = parseFloat(process.env.MAX_TRANSACTION_AMOUNT || '1000000');
+
 
 router.use(authMiddleware);
 
 router.get('/estimate-fee', estimateFee);
 
-router.post('/send', paymentSendValidators, validate, idempotency, send);
 // Federation address resolution
 router.get('/resolve-federation',
   [query('address').notEmpty().withMessage('Address is required')],
@@ -96,19 +82,6 @@ router.post('/send',
         }
         return true;
       }),
-    body('amount')
-      .isFloat({ gt: 0 }).withMessage('Amount must be greater than 0')
-      .custom((value) => {
-        const amount = parseFloat(value);
-        if (amount < STELLAR_MIN_AMOUNT) {
-          throw new Error(`Amount must be at least ${STELLAR_MIN_AMOUNT} XLM (1 stroop)`);
-        }
-        if (amount > MAX_TRANSACTION_AMOUNT) {
-          throw new Error(`Amount exceeds maximum transaction limit of ${MAX_TRANSACTION_AMOUNT}`);
-        }
-        return true;
-      }),
-    body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES'])
     amountLimits('amount'),
     body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES']),
   ],
