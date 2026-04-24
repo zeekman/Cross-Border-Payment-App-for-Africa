@@ -133,3 +133,108 @@ async function clawback(req, res, next) {
     next(err);
   }
 }
+
+const { attestKyc, revokeKyc } = require('../services/kycAttestation');
+
+/**
+ * POST /api/admin/kyc/:userId/approve
+ * Marks user as verified in DB and pushes on-chain attestation.
+ */
+async function approveKYC(req, res, next) {
+  try {
+    const { userId } = req.params;
+
+    const userResult = await db.query(
+      `SELECT u.id, u.kyc_status, u.kyc_data, w.public_key
+       FROM users u JOIN wallets w ON w.user_id = u.id
+       WHERE u.id = $1`,
+      [userId]
+    );
+    if (!userResult.rows[0]) return res.status(404).json({ error: "User not found" });
+
+    const user = userResult.rows[0];
+    if (user.kyc_status === "verified") {
+      return res.status(409).json({ error: "User is already verified" });
+    }
+    if (user.kyc_status !== "pending") {
+      return res.status(400).json({ error: "User has no pending KYC submission" });
+    }
+
+    const adminWallet = await db.query(
+      "SELECT public_key FROM wallets WHERE user_id = $1",
+      [req.user.userId]
+    );
+    const adminPublicKey = adminWallet.rows[0]?.public_key;
+
+    const idType = user.kyc_data?.id_type || "unknown";
+    let txHash = null;
+
+    // Best-effort on-chain attestation — DB update proceeds regardless
+    try {
+      txHash = await attestKyc(adminPublicKey, user.public_key, userId, idType);
+    } catch (attestErr) {
+      // Log but don't block the approval
+      console.error("On-chain attestation failed:", attestErr.message);
+    }
+
+    await db.query(
+      `UPDATE users SET kyc_status = 'verified', updated_at = NOW() WHERE id = $1`,
+      [userId]
+    );
+
+    await audit.log(req.user.userId, "kyc_approved", { target_user: userId, tx_hash: txHash });
+
+    res.json({ message: "KYC approved", tx_hash: txHash });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/admin/kyc/:userId/revoke
+ * Revokes KYC in DB and on-chain.
+ */
+async function revokeKYC(req, res, next) {
+  try {
+    const { userId } = req.params;
+
+    const userResult = await db.query(
+      `SELECT u.id, u.kyc_status, w.public_key
+       FROM users u JOIN wallets w ON w.user_id = u.id
+       WHERE u.id = $1`,
+      [userId]
+    );
+    if (!userResult.rows[0]) return res.status(404).json({ error: "User not found" });
+
+    const user = userResult.rows[0];
+    if (user.kyc_status !== "verified") {
+      return res.status(400).json({ error: "User is not currently verified" });
+    }
+
+    const adminWallet = await db.query(
+      "SELECT public_key FROM wallets WHERE user_id = $1",
+      [req.user.userId]
+    );
+    const adminPublicKey = adminWallet.rows[0]?.public_key;
+
+    let txHash = null;
+    try {
+      txHash = await revokeKyc(adminPublicKey, user.public_key);
+    } catch (revokeErr) {
+      console.error("On-chain revocation failed:", revokeErr.message);
+    }
+
+    await db.query(
+      `UPDATE users SET kyc_status = 'unverified', updated_at = NOW() WHERE id = $1`,
+      [userId]
+    );
+
+    await audit.log(req.user.userId, "kyc_revoked", { target_user: userId, tx_hash: txHash });
+
+    res.json({ message: "KYC revoked", tx_hash: txHash });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC };
