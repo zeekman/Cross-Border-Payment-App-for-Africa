@@ -377,7 +377,8 @@ async function _sendPaymentOnce({
   amount,
   asset = 'XLM',
   memo,
-  memoType = 'text'
+  memoType = 'text',
+  feePriority = 'standard',
 }, logger) {
   const assetObj = resolveAsset(asset);
 
@@ -395,16 +396,7 @@ async function _sendPaymentOnce({
       const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey), logger);
 
       const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
-        fee: await withFallback(s => s.fetchBaseFee(), logger),
-      const senderAccount = validateHorizonResponse(
-        AccountResponseSchema,
-        await withFallback(s => s.loadAccount(senderPublicKey)),
-        'loadAccount(sender)'
-      );
-      const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey), 'loadAccount');
-
-      const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
-        fee: await withFallback(s => s.fetchBaseFee(), 'fetchBaseFee'),
+        fee: await feeForPriority(feePriority),
         networkPassphrase
       })
         .addOperation(StellarSdk.Operation.payment({
@@ -590,6 +582,37 @@ async function getTransactions(publicKey, limit = 20) {
 
 async function fetchFee() {
   return withRetry(() => withFallback(s => s.fetchBaseFee(), 'fetchBaseFee'), { label: 'fetchBaseFee' });
+}
+
+/**
+ * Fetch fee statistics from Horizon and return key percentiles.
+ * Returns { min, p10, p50, p90, p99 } in stroops.
+ */
+async function fetchFeeStats() {
+  const stats = await withRetry(() => withFallback(s => s.feeStats()), { label: 'feeStats' });
+  const fp = stats.fee_charged;
+  return {
+    min: parseInt(fp.min, 10),
+    p10: parseInt(fp.p10, 10),
+    p50: parseInt(fp.p50, 10),
+    p90: parseInt(fp.p90, 10),
+    p99: parseInt(fp.p99, 10),
+  };
+}
+
+/**
+ * Build a TransactionBuilder fee from a priority string.
+ * priority: 'economy' | 'standard' | 'priority'
+ * Falls back to base fee if feeStats is unavailable.
+ */
+async function feeForPriority(priority = 'standard') {
+  try {
+    const stats = await fetchFeeStats();
+    const map = { economy: stats.p10, standard: stats.p50, priority: stats.p90 };
+    return map[priority] ?? stats.p50;
+  } catch {
+    return withRetry(() => withFallback(s => s.fetchBaseFee()), { label: 'fetchBaseFee(fallback)' });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -941,10 +964,59 @@ async function getDataEntries(publicKey) {
 }
 
 // ---------------------------------------------------------------------------
-// Exports
+// Testnet reset detection
 // ---------------------------------------------------------------------------
 
+/**
+ * Detect whether the configured Horizon is a freshly-reset testnet by checking
+ * whether a known "canary" account still exists.  If the account is gone the
+ * testnet was reset and all local data is stale.
+ *
+ * @param {string} canaryPublicKey - A public key that should exist on a live testnet.
+ *   Defaults to the Stellar Foundation's well-known testnet account.
+ * @returns {Promise<boolean>} true if a reset is detected
+ */
+async function detectTestnetReset(canaryPublicKey) {
+  if (!isTestnet) return false;
+  const key = canaryPublicKey || process.env.TESTNET_CANARY_ACCOUNT || 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
+  try {
+    await withFallback(s => s.loadAccount(key));
+    return false; // account exists — no reset
+  } catch (e) {
+    if (e.response?.status === 404) {
+      logger.warn('Testnet reset detected: canary account not found', { canaryPublicKey: key });
+      return true;
+    }
+    throw e;
+  }
+}
+
+/**
+ * Re-fund a list of testnet wallets via Friendbot.
+ * @param {string[]} publicKeys
+ */
+async function refundTestnetWallets(publicKeys) {
+  if (!isTestnet) throw new Error('refundTestnetWallets is only available on testnet');
+  const results = await Promise.allSettled(
+    publicKeys.map(async (pk) => {
+      const res = await fetch(`https://friendbot.stellar.org?addr=${pk}`);
+      if (!res.ok) throw new Error(`Friendbot failed for ${pk}: ${await res.text()}`);
+      return pk;
+    })
+  );
+  return results.map((r, i) => ({
+    publicKey: publicKeys[i],
+    success: r.status === 'fulfilled',
+    error: r.reason?.message || null,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------------
 module.exports = {
+  detectTestnetReset,
+  refundTestnetWallets,
   createWallet,
   getBalance,
   getAccountSigners,
@@ -955,6 +1027,8 @@ module.exports = {
   encryptPrivateKey,
   decryptPrivateKey,
   fetchFee,
+  fetchFeeStats,
+  feeForPriority,
   checkHorizonHealth,
   findPaymentPath,
   sendPathPayment,
@@ -970,4 +1044,6 @@ module.exports = {
   clawbackAsset,
   setDataEntry,
   getDataEntries,
+  server,
+  isTestnet,
 };

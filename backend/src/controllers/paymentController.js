@@ -8,6 +8,7 @@ const {
   sendPathPayment,
   findPaymentPath,
   fetchFee,
+  fetchFeeStats,
   validateBatchRecipient,
 } = require("../services/stellar");
 const webhook = require("../services/webhook");
@@ -132,12 +133,32 @@ async function estimateFee(req, res, next) {
   }
 }
 
+async function getFeeStats(req, res, next) {
+  try {
+    const stats = await fetchFeeStats();
+    res.json({
+      min: stats.min,
+      p10: stats.p10,
+      p50: stats.p50,
+      p90: stats.p90,
+      p99: stats.p99,
+      priorities: {
+        economy: stats.p10,
+        standard: stats.p50,
+        priority: stats.p90,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function send(req, res, next) {
   const txId = uuidv4();
   // Hoist these so the catch block can reference them for the failed-tx INSERT
   let public_key;
   try {
-    const { recipient_address, amount, asset = "XLM", memo: rawMemo, memo_type: rawMemoType, encrypt_memo = false } = req.body;
+    const { recipient_address, amount, asset = "XLM", memo: rawMemo, memo_type: rawMemoType, encrypt_memo = false, fee_priority = "standard" } = req.body;
     let memo = typeof rawMemo === "string" ? rawMemo.trim() : "";
     const memo_type = memo ? (rawMemoType || "text") : null;
 
@@ -236,6 +257,7 @@ async function send(req, res, next) {
       asset,
       memo: memo || undefined,
       memoType: memo ? memo_type : undefined,
+      feePriority: fee_priority,
     }, req.logger);
 
     // Fetch authoritative ledger close time from Horizon (issue #139)
@@ -573,9 +595,9 @@ async function sendBatch(req, res, next) {
 
 async function history(req, res, next) {
   try {
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-    const offset = (page - 1) * limit;
+    // cursor is the transaction id (integer PK) to paginate from
+    const cursor = req.query.cursor ? parseInt(req.query.cursor, 10) : null;
 
     let fromBound = null;
     let toBound = null;
@@ -609,6 +631,11 @@ async function history(req, res, next) {
 
     const conditions = ["(sender_wallet = $1 OR recipient_wallet = $1)"];
     const baseParams = [public_key];
+
+    if (cursor) {
+      conditions.push(`id < $${baseParams.length + 1}`);
+      baseParams.push(cursor);
+    }
     if (fromBound) {
       conditions.push(`created_at >= $${baseParams.length + 1}`);
       baseParams.push(fromBound);
@@ -623,32 +650,23 @@ async function history(req, res, next) {
     }
     const whereClause = conditions.join(" AND ");
 
-    const countSql = `SELECT COUNT(*)::text AS count FROM transactions WHERE ${whereClause}`;
     const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at, ledger_close_time
          FROM transactions
          WHERE ${whereClause}
-         ORDER BY created_at DESC LIMIT $${baseParams.length + 1} OFFSET $${baseParams.length + 2}`;
+         ORDER BY id DESC LIMIT $${baseParams.length + 1}`;
 
-    const dataParams = [...baseParams, limit, offset];
+    const result = await db.query(listSql, [...baseParams, limit + 1]);
 
-    const [countResult, result] = await Promise.all([
-      db.query(countSql, baseParams),
-      db.query(listSql, dataParams),
-    ]);
-
-    const total = parseInt(countResult.rows[0].count, 10);
-    const transactions = result.rows.map((tx) => ({
+    const rows = result.rows;
+    const hasMore = rows.length > limit;
+    const transactions = rows.slice(0, limit).map((tx) => ({
       ...tx,
       direction: tx.sender_wallet === public_key ? "sent" : "received",
     }));
 
-    res.json({
-      transactions,
-      total,
-      page,
-      limit,
-      pages: Math.ceil(total / limit) || 0,
-    });
+    const next_cursor = hasMore ? transactions[transactions.length - 1].id : null;
+
+    res.json({ transactions, next_cursor, has_more: hasMore });
   } catch (err) {
     next(err);
   }
@@ -857,4 +875,4 @@ async function exportCSV(req, res, next) {
   }
 }
 
-module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee };
+module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee, getFeeStats };

@@ -62,7 +62,7 @@ export default function Dashboard() {
     [wallet?.public_key],
   );
 
-  const { isConnected, error: streamError } = usePaymentStream(wallet?.public_key, handlePayment);
+  const { isConnected, isReconnecting, error: streamError } = usePaymentStream(wallet?.public_key, handlePayment);
 
   const loadDashboard = useCallback(async () => {
     if (!navigator.onLine) {
@@ -224,6 +224,14 @@ export default function Dashboard() {
           >
             {funding ? 'Funding…' : 'Fund wallet'}
           </button>
+        </div>
+      )}
+
+      {/* Stream reconnecting indicator */}
+      {isReconnecting && (
+        <div className="flex items-center gap-2 bg-orange-500/10 border border-orange-500/30 rounded-xl px-4 py-2 text-orange-400 text-sm">
+          <div className="w-3 h-3 border-2 border-orange-400 border-t-transparent rounded-full animate-spin" />
+          <span>Reconnecting to live updates…</span>
         </div>
       )}
 

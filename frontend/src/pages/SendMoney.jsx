@@ -23,8 +23,10 @@ export default function SendMoney() {
     memo: searchParams.get('memo') || '',
     destination_asset: '',
     slippage: DEFAULT_SLIPPAGE,
-    memo_type: 'text'
+    memo_type: 'text',
+    fee_priority: 'standard',
   });
+  const [feeStats, setFeeStats] = useState(null);
   const [contacts, setContacts] = useState([]);
   const [showContacts, setShowContacts] = useState(false);
   const [contactSearch, setContactSearch] = useState('');
@@ -62,6 +64,10 @@ export default function SendMoney() {
     availableXlm !== null &&
     form.amount &&
     parseFloat(form.amount) > availableXlm;
+
+  useEffect(() => {
+    api.get('/payments/fee-stats').then((r) => setFeeStats(r.data)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     api.get('/wallet/list').then((r) => {
@@ -285,6 +291,7 @@ export default function SendMoney() {
           amount: parseFloat(form.amount),
           asset: form.asset,
           wallet_id: selectedWallet?.id || undefined,
+          fee_priority: form.fee_priority,
         };
         if (m) {
           payload.memo = m;
@@ -591,6 +598,37 @@ export default function SendMoney() {
               )}
             </div>
           )}
+        </div>
+
+        {/* Fee Priority */}
+        <div>
+          <label className="text-sm text-gray-400 mb-1 block">Network fee priority</label>
+          <div className="flex gap-2">
+            {[
+              { key: 'economy', label: 'Economy', desc: 'Slower' },
+              { key: 'standard', label: 'Standard', desc: 'Normal' },
+              { key: 'priority', label: 'Priority', desc: 'Faster' },
+            ].map(({ key, label, desc }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setForm({ ...form, fee_priority: key })}
+                className={`flex-1 rounded-xl border py-2 px-2 text-center transition-colors ${
+                  form.fee_priority === key
+                    ? 'border-primary-500 bg-primary-500/10 text-primary-400'
+                    : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-500'
+                }`}
+              >
+                <p className="text-xs font-semibold">{label}</p>
+                <p className="text-xs text-gray-500">{desc}</p>
+                {feeStats && (
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {(feeStats.priorities[key] / 1e7).toFixed(5)} XLM
+                  </p>
+                )}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Memo */}

@@ -13,20 +13,25 @@ const server = new StellarSdk.Horizon.Server(
   process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org'
 );
 
-// Map of publicKey -> close() function for active streams
+// Map of publicKey -> { close, cursor } for active streams
 const activeStreams = new Map();
 
-async function startStreamForUser(userId, publicKey) {
+async function startStreamForUser(userId, publicKey, cursor = 'now') {
   if (activeStreams.has(publicKey)) return;
 
-  logger.info('Starting Horizon stream', { userId, publicKey });
+  logger.info('Starting Horizon stream', { userId, publicKey, cursor });
+
+  let lastCursor = cursor;
 
   const close = server
     .payments()
     .forAccount(publicKey)
-    .cursor('now')
+    .cursor(lastCursor)
     .stream({
       onmessage: async (payment) => {
+        // Track cursor for reconnection
+        if (payment.paging_token) lastCursor = payment.paging_token;
+
         // Only care about incoming payments to this account
         if (
           payment.type !== 'payment' ||
@@ -49,8 +54,9 @@ async function startStreamForUser(userId, publicKey) {
       onerror: (err) => {
         logger.warn('Horizon stream error', { publicKey, error: err.message });
         activeStreams.delete(publicKey);
-        // Reconnect after 10 s
-        setTimeout(() => startStreamForUser(userId, publicKey), 10_000);
+        wsConnections.set(activeStreams.size);
+        // Reconnect after 10 s, resuming from last seen cursor
+        setTimeout(() => startStreamForUser(userId, publicKey, lastCursor), 10_000);
       },
     });
 

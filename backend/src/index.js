@@ -11,6 +11,7 @@ const webpush = require('./services/webpush');
 const db = require('./db');
 const app = require('./app');
 const { initStreams } = require('./services/horizonWorker');
+const { detectTestnetReset } = require('./services/stellar');
 
 const PORT = process.env.PORT || 5000;
 const SHUTDOWN_TIMEOUT_MS = 30_000;
@@ -18,6 +19,15 @@ const SHUTDOWN_TIMEOUT_MS = 30_000;
 const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`, { port: PORT });
   initStreams();
+
+  // Warn if testnet was reset since last startup
+  if (process.env.NODE_ENV !== 'production') {
+    detectTestnetReset().then((reset) => {
+      if (reset) {
+        logger.warn('⚠️  Stellar testnet reset detected at startup. Run POST /api/dev/handle-testnet-reset to recover.');
+      }
+    }).catch(() => {});
+  }
 });
 
 async function shutdown(signal) {
