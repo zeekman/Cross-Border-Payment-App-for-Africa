@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS = {
   completed: 'text-primary-400 bg-primary-500/10',
+  confirming: 'text-blue-400 bg-blue-500/10',
   pending: 'text-yellow-400 bg-yellow-500/10',
   failed: 'text-red-400 bg-red-500/10',
 };
@@ -365,7 +366,12 @@ export default function TransactionHistory() {
                           STATUS_COLORS[tx.status] || STATUS_COLORS.pending
                         }`}
                       >
-                        {tx.status}
+                        {tx.status === 'confirming' ? (
+                          <span className="flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse inline-block" />
+                            Confirming...
+                          </span>
+                        ) : tx.status}
                       </span>
                       <div className="flex items-center gap-2">
                         <div className="text-right">

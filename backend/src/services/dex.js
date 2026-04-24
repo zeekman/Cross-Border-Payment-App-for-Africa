@@ -68,4 +68,15 @@ async function executeSwap({
   };
 }
 
-module.exports = { getOrderbook, executeSwap };
+/**
+ * Fetch trade history for an account from Horizon.
+ * Returns raw trade records for syncing into offer_events.
+ */
+async function getTradeHistory(publicKey, cursor = null, limit = 50) {
+  let call = server.trades().forAccount(publicKey).limit(limit).order('asc');
+  if (cursor) call = call.cursor(cursor);
+  const result = await withRetry(() => call.call(), { label: 'trades.forAccount' });
+  return result.records || [];
+}
+
+module.exports = { getOrderbook, executeSwap, getTradeHistory };

@@ -627,6 +627,28 @@ async function findPaymentPath(sourceAsset, sourceAmount, destinationAsset) {
   return { destinationAmount: best.destination_amount, path: best.path };
 }
 
+/**
+ * Find the best path for strict receive (recipient gets exact amount).
+ * Returns the source amount needed and the path.
+ */
+async function findReceivePath(sourceAsset, destinationAsset, destinationAmount, recipientAddress) {
+  const srcAsset = resolveAsset(sourceAsset);
+  const dstAsset = resolveAsset(destinationAsset);
+
+  const raw = await withFallback(s =>
+    s.strictReceivePaths([srcAsset], dstAsset, String(destinationAmount)).call()
+  );
+  const page = validateHorizonResponse(PathPageSchema, raw, 'strictReceivePaths');
+
+  if (!page.records || page.records.length === 0) return null;
+
+  const best = page.records.reduce((a, b) =>
+    parseFloat(a.source_amount) <= parseFloat(b.source_amount) ? a : b
+  );
+
+  return { sourceAmount: best.source_amount, path: best.path };
+}
+
 async function sendPathPayment({
   senderPublicKey,
   encryptedSecretKey,
@@ -685,6 +707,62 @@ async function sendPathPayment({
   const rawResult = await withFallback(s => s.submitTransaction(transaction));
   const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(pathPayment)');
   const result = await withFallback(s => s.submitTransaction(transaction), 'submitTransaction');
+  return { transactionHash: result.hash, ledger: result.ledger };
+}
+
+/**
+ * Execute a pathPaymentStrictReceive — recipient gets exact destinationAmount,
+ * sender pays at most sourceMaxAmount.
+ */
+async function sendStrictReceivePathPayment({
+  senderPublicKey,
+  encryptedSecretKey,
+  recipientPublicKey,
+  sourceAsset,
+  sourceMaxAmount,
+  destinationAsset,
+  destinationAmount,
+  path = [],
+  memo,
+}) {
+  const srcAsset = resolveAsset(sourceAsset);
+  const dstAsset = resolveAsset(destinationAsset);
+
+  if (destinationAsset !== 'XLM') {
+    await checkTrustline(recipientPublicKey, dstAsset);
+  }
+
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey));
+
+  const sdkPath = path.map(p =>
+    p.asset_type === 'native'
+      ? StellarSdk.Asset.native()
+      : new StellarSdk.Asset(p.asset_code, p.asset_issuer)
+  );
+
+  const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
+    fee: await withFallback(s => s.fetchBaseFee()),
+    networkPassphrase,
+  })
+    .addOperation(StellarSdk.Operation.pathPaymentStrictReceive({
+      sendAsset: srcAsset,
+      sendMax: String(sourceMaxAmount),
+      destination: recipientPublicKey,
+      destAsset: dstAsset,
+      destAmount: String(destinationAmount),
+      path: sdkPath,
+    }))
+    .setTimeout(30);
+
+  if (memo) txBuilder.addMemo(StellarSdk.Memo.text(memo.slice(0, 28)));
+
+  const transaction = txBuilder.build();
+  transaction.sign(senderKeypair);
+
+  const rawResult = await withFallback(s => s.submitTransaction(transaction));
+  const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(strictReceive)');
   return { transactionHash: result.hash, ledger: result.ledger };
 }
 
@@ -901,6 +979,72 @@ async function clawbackAsset({ issuerPublicKey, encryptedIssuerSecretKey, fromPu
 }
 
 // ---------------------------------------------------------------------------
+// Account flags management (setOptions)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stellar account authorization flags.
+ * https://developers.stellar.org/docs/learn/glossary#flags
+ */
+const FLAG_DESCRIPTIONS = {
+  AUTH_REQUIRED: 'Requires the issuer to authorize trustlines before assets can be held.',
+  AUTH_REVOCABLE: 'Allows the issuer to revoke a trustline, freezing the asset.',
+  AUTH_IMMUTABLE: 'Prevents any further changes to authorization flags (irreversible).',
+  AUTH_CLAWBACK_ENABLED: 'Allows the issuer to clawback assets from any holder.',
+};
+
+/**
+ * Return the current authorization flags for an account.
+ */
+async function getAccountFlags(publicKey) {
+  const account = await withRetry(
+    () => withFallback(s => s.loadAccount(publicKey)),
+    { label: 'loadAccount(flags)' }
+  );
+  const flags = account.flags || {};
+  return {
+    auth_required: !!flags.auth_required,
+    auth_revocable: !!flags.auth_revocable,
+    auth_immutable: !!flags.auth_immutable,
+    auth_clawback_enabled: !!flags.auth_clawback_enabled,
+    descriptions: FLAG_DESCRIPTIONS,
+  };
+}
+
+/**
+ * Set or clear authorization flags on an account using setOptions.
+ * setFlags / clearFlags are bitmasks of StellarSdk.AuthRequiredFlag etc.
+ */
+async function setAccountFlags({ publicKey, encryptedSecretKey, setFlags, clearFlags }) {
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const keypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const account = await withRetry(
+    () => withFallback(s => s.loadAccount(publicKey)),
+    { label: 'loadAccount(setFlags)' }
+  );
+
+  const opts = {};
+  if (setFlags !== undefined) opts.setFlags = setFlags;
+  if (clearFlags !== undefined) opts.clearFlags = clearFlags;
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: await withRetry(() => withFallback(s => s.fetchBaseFee()), { label: 'fetchBaseFee' }),
+    networkPassphrase,
+  })
+    .addOperation(StellarSdk.Operation.setOptions(opts))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(keypair);
+  const rawResult = await withRetry(
+    () => withFallback(s => s.submitTransaction(tx)),
+    { label: 'submitTransaction(setFlags)' }
+  );
+  const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(setFlags)');
+  return { transactionHash: result.hash };
+}
+
+// ---------------------------------------------------------------------------
 // Account data entries (manageData)
 // ---------------------------------------------------------------------------
 
@@ -970,4 +1114,8 @@ module.exports = {
   clawbackAsset,
   setDataEntry,
   getDataEntries,
+  getAccountFlags,
+  setAccountFlags,
+  findReceivePath,
+  sendStrictReceivePathPayment,
 };

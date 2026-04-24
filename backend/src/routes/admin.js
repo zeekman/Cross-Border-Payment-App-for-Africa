@@ -4,6 +4,7 @@ const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const isAdmin = require('../middleware/isAdmin');
 const { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC } = require('../controllers/adminController');
+const { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC, setWalletFlags } = require('../controllers/adminController');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -76,5 +77,15 @@ router.post('/clawback',
 
 router.post('/kyc/:userId/approve', approveKYC);
 router.post('/kyc/:userId/revoke', revokeKYC);
+
+router.post(
+  '/wallet/:address/set-flags',
+  [
+    body('set_flags').optional().isInt({ min: 0, max: 15 }).withMessage('set_flags must be 0–15'),
+    body('clear_flags').optional().isInt({ min: 0, max: 15 }).withMessage('clear_flags must be 0–15'),
+  ],
+  validate,
+  setWalletFlags,
+);
 
 module.exports = router;

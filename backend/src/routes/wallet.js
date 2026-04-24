@@ -22,6 +22,7 @@ const {
   listDataEntries,
   setEntry,
   deleteEntry,
+  getWalletFlags,
 } = require('../controllers/walletController');
 const { getContacts, addContact, deleteContact } = require('../controllers/contactsController');
 const { getStatus } = require('../services/horizonRateLimit');
@@ -172,5 +173,8 @@ router.post('/data-entry',
   setEntry
 );
 router.delete('/data-entry/:key', deleteEntry);
+
+// Account authorization flags
+router.get('/flags', getWalletFlags);
 
 module.exports = router;

@@ -238,3 +238,61 @@ async function revokeKYC(req, res, next) {
 }
 
 module.exports = { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC };
+
+const { getAccountFlags, setAccountFlags } = require('../services/stellar');
+
+/**
+ * POST /api/admin/wallet/:address/set-flags
+ * Admin-only: set or clear Stellar authorization flags on any account.
+ * Body: { set_flags?: number, clear_flags?: number }
+ *
+ * Flag bitmask values (from StellarSdk):
+ *   AUTH_REQUIRED_FLAG       = 1
+ *   AUTH_REVOCABLE_FLAG      = 2
+ *   AUTH_IMMUTABLE_FLAG      = 4
+ *   AUTH_CLAWBACK_ENABLED_FLAG = 8
+ */
+async function setWalletFlags(req, res, next) {
+  try {
+    const { address } = req.params;
+    const { set_flags, clear_flags } = req.body;
+
+    if (set_flags === undefined && clear_flags === undefined) {
+      return res.status(400).json({ error: 'Provide set_flags and/or clear_flags' });
+    }
+
+    // The admin must have an issuer wallet configured to sign the setOptions tx
+    const issuerPublicKey = process.env.ISSUER_PUBLIC_KEY;
+    const encryptedIssuerSecretKey = process.env.ISSUER_ENCRYPTED_SECRET_KEY;
+
+    if (!issuerPublicKey || !encryptedIssuerSecretKey) {
+      return res.status(500).json({ error: 'Issuer credentials not configured' });
+    }
+
+    const { transactionHash } = await setAccountFlags({
+      publicKey: address,
+      encryptedSecretKey: encryptedIssuerSecretKey,
+      setFlags: set_flags,
+      clearFlags: clear_flags,
+    });
+
+    await audit.log(req.user.userId, 'admin_set_flags', req.ip, req.headers['user-agent'], {
+      address,
+      set_flags,
+      clear_flags,
+      transaction_hash: transactionHash,
+    });
+
+    const updatedFlags = await getAccountFlags(address);
+
+    res.json({
+      message: 'Account flags updated',
+      transaction_hash: transactionHash,
+      flags: updatedFlags,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC, setWalletFlags };

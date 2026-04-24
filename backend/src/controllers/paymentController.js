@@ -9,6 +9,8 @@ const {
   findPaymentPath,
   fetchFee,
   validateBatchRecipient,
+  findReceivePath,
+  sendStrictReceivePathPayment,
 } = require("../services/stellar");
 const webhook = require("../services/webhook");
 const cache = require("../utils/cache");
@@ -242,12 +244,17 @@ async function send(req, res, next) {
     const ledger_close_time = await fetchLedgerCloseTime(ledger);
 
     // Save to DB
-    const txStatus = type === "claimable_balance" ? "pending_claim" : "completed";
+    const txStatus = type === "claimable_balance" ? "pending_claim" : "confirming";
     await db.query(
       `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time],
     );
+
+    // Start async confirmation polling for non-claimable-balance transactions
+    if (type !== "claimable_balance") {
+      pollTransactionConfirmation(txId, transactionHash).catch(() => {});
+    }
 
     // Invalidate sender's cached balance — it changed after this payment
     await cache.del(`balance:${public_key}`);
@@ -766,9 +773,12 @@ async function sendPath(req, res, next) {
 
     await db.query(
       `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'completed',$8,$9,$10)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'confirming',$8,$9,$10)`,
       [txId, public_key, recipient_address, source_amount, source_asset, memoStr || null, transactionHash, req.requestId, is_encrypted, encrypted_memo],
     );
+
+    // Start async confirmation polling (non-blocking)
+    pollTransactionConfirmation(txId, transactionHash).catch(() => {});
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, sender: public_key, recipient: recipient_address };
     webhook.deliver("payment.sent", txData).catch(() => {});
@@ -793,6 +803,193 @@ async function sendPath(req, res, next) {
     }
     next(err);
   }
+}
+
+/**
+ * POST /api/payments/find-receive-path
+ * Body: { source_asset, destination_asset, destination_amount, recipient_address }
+ * Returns the best conversion path and estimated source amount needed.
+ */
+async function findReceivePathHandler(req, res, next) {
+  try {
+    const { source_asset, destination_asset, destination_amount, recipient_address } = req.body;
+    const result = await findReceivePath(source_asset, destination_asset, destination_amount, recipient_address);
+    if (!result) {
+      return res.status(404).json({ error: "No conversion path found between these assets" });
+    }
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/payments/send-strict-receive
+ * Executes a strict-receive path payment (recipient gets exact amount).
+ * Body: { recipient_address, source_asset, source_max_amount, destination_asset,
+ *         destination_amount, path, memo }
+ */
+async function sendStrictReceivePath(req, res, next) {
+  const txId = uuidv4();
+  let public_key, recipient_address, source_max_amount, source_asset;
+  try {
+    ({
+      recipient_address,
+      source_asset = "XLM",
+      source_max_amount,
+      destination_asset,
+      destination_amount,
+      path = [],
+      memo,
+      encrypt_memo = false,
+    } = req.body);
+
+    let memoStr = typeof memo === "string" ? memo.trim() : "";
+    let is_encrypted = false;
+    let encrypted_memo = null;
+
+    if (encrypt_memo && memoStr) {
+      const { encryptMemo } = require('../utils/encryption');
+      encrypted_memo = encryptMemo(memoStr, recipient_address);
+      memoStr = encrypted_memo;
+      is_encrypted = true;
+    }
+
+    const estimatedUSD = estimateUSDValue(source_max_amount, source_asset);
+    if (estimatedUSD >= PHONE_VERIFICATION_THRESHOLD_USD) {
+      const userResult = await db.query("SELECT kyc_status, phone_verified FROM users WHERE id = $1", [req.user.userId]);
+      const { kyc_status: kycStatus, phone_verified: phoneVerified } = userResult.rows[0] || {};
+      
+      if (!phoneVerified) {
+        return res.status(403).json({
+          error: `Phone verification required for transactions above $${PHONE_VERIFICATION_THRESHOLD_USD} USD equivalent.`,
+          phone_verified: false,
+          code: "PHONE_VERIFICATION_REQUIRED",
+        });
+      }
+
+      if (kycStatus !== "verified" && estimatedUSD >= KYC_THRESHOLD_USD) {
+        return res.status(403).json({
+          error: `KYC verification required for transactions above ${KYC_THRESHOLD_USD} USD equivalent.`,
+          kyc_status: kycStatus,
+          code: "KYC_REQUIRED",
+        });
+      }
+    }
+
+    const { wallet_id: sendWalletId } = req.body;
+    const walletQuery = sendWalletId
+      ? { text: "SELECT public_key, encrypted_secret_key FROM wallets WHERE id = $1 AND user_id = $2", values: [sendWalletId, req.user.userId] }
+      : { text: "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1", values: [req.user.userId] };
+    const walletResult = await db.query(walletQuery.text, walletQuery.values);
+    if (!walletResult.rows[0]) return res.status(404).json({ error: "Wallet not found" });
+
+    ({ public_key } = walletResult.rows[0]);
+    const { encrypted_secret_key } = walletResult.rows[0];
+
+    if (recipient_address === public_key) {
+      return res.status(400).json({ error: "Cannot send payment to your own wallet" });
+    }
+
+    const fraudCheck = await checkFraud(public_key, source_max_amount, source_asset);
+    if (fraudCheck.blocked) {
+      await logFraudBlock(public_key, fraudCheck.reason, source_max_amount, source_asset);
+      return res.status(429).json({ error: fraudCheck.reason });
+    }
+
+    const { transactionHash, ledger } = await sendStrictReceivePathPayment({
+      senderPublicKey: public_key,
+      encryptedSecretKey: encrypted_secret_key,
+      recipientPublicKey: recipient_address,
+      sourceAsset: source_asset,
+      sourceMaxAmount: source_max_amount,
+      destinationAsset: destination_asset,
+      destinationAmount: destination_amount,
+      path,
+      memo: memoStr,
+    });
+
+    // Insert with 'confirming' status initially
+    await db.query(
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'confirming',$8,$9,$10)`,
+      [txId, public_key, recipient_address, destination_amount, destination_asset, memoStr || null, transactionHash, req.requestId, is_encrypted, encrypted_memo],
+    );
+
+    // Start async confirmation polling (non-blocking)
+    pollTransactionConfirmation(txId, transactionHash).catch(() => {});
+
+    const txData = { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, sender: public_key, recipient: recipient_address };
+    webhook.deliver("payment.sent", txData).catch(() => {});
+    webhook.deliver("payment.received", txData).catch(() => {});
+
+    res.json({
+      message: "Strict receive path payment sent successfully",
+      transaction: { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, recipient: recipient_address, status: 'confirming' },
+    });
+  } catch (err) {
+    await db.query(
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'failed',$8,$9,$10)`,
+      [txId, public_key || "", recipient_address || "", "0", source_asset || "XLM", null, null, req.requestId, false, null],
+    ).catch(() => {});
+
+    if (err.status === 400 || err.status === 500) {
+      return res.status(err.status).json({ error: err.message });
+    }
+    if (err.response?.data) {
+      return res.status(400).json({ error: "Strict receive path payment failed", details: err.response.data?.extras });
+    }
+    next(err);
+  }
+}
+
+/**
+ * Poll Horizon for transaction confirmation and update DB when confirmed.
+ * Runs asynchronously in the background.
+ */
+async function pollTransactionConfirmation(txId, txHash) {
+  const StellarSdk = require('@stellar/stellar-sdk');
+  const server = new StellarSdk.Horizon.Server(process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org');
+  const maxAttempts = 10;
+  const pollInterval = 2000; // 2 seconds
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const tx = await server.transactions().transaction(txHash).call();
+      if (tx.successful) {
+        await db.query(
+          `UPDATE transactions SET status = 'completed', confirmed_at = NOW() WHERE id = $1`,
+          [txId]
+        );
+        return;
+      } else {
+        await db.query(
+          `UPDATE transactions SET status = 'failed', confirmed_at = NOW() WHERE id = $1`,
+          [txId]
+        );
+        return;
+      }
+    } catch (err) {
+      if (err.response?.status === 404) {
+        // Transaction not yet in ledger, wait and retry
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        continue;
+      }
+      // Other error — mark as failed
+      await db.query(
+        `UPDATE transactions SET status = 'failed', confirmed_at = NOW() WHERE id = $1`,
+        [txId]
+      );
+      return;
+    }
+  }
+
+  // Timeout — mark as failed
+  await db.query(
+    `UPDATE transactions SET status = 'failed', confirmed_at = NOW() WHERE id = $1`,
+    [txId]
+  );
 }
 
 async function exportCSV(req, res, next) {
@@ -857,4 +1054,4 @@ async function exportCSV(req, res, next) {
   }
 }
 
-module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee };
+module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee, findReceivePathHandler, sendStrictReceivePath };

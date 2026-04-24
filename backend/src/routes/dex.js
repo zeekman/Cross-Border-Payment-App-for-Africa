@@ -2,7 +2,7 @@ const router = require('express').Router();
 const { query, body, validationResult } = require('express-validator');
 const authMiddleware = require('../middleware/auth');
 const db = require('../db');
-const { getOrderbook, executeSwap } = require('../services/dex');
+const { getOrderbook, executeSwap, getTradeHistory } = require('../services/dex');
 
 const VALID_ASSETS = /^[A-Z0-9]{1,12}$/;
 
@@ -61,6 +61,57 @@ router.post('/swap',
       });
 
       res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// GET /api/dex/offers/history — filled and cancelled offers for the authenticated user
+router.get(
+  '/offers/history',
+  authMiddleware,
+  [
+    query('page').optional().isInt({ min: 1 }).withMessage('page must be a positive integer'),
+    query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('limit must be 1–100'),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const page = Math.max(1, parseInt(req.query.page) || 1);
+      const limit = Math.min(100, parseInt(req.query.limit) || 20);
+      const offset = (page - 1) * limit;
+
+      const walletResult = await db.query(
+        'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC LIMIT 1',
+        [req.user.userId]
+      );
+      if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
+
+      const { public_key } = walletResult.rows[0];
+
+      const [countResult, rowsResult] = await Promise.all([
+        db.query(
+          'SELECT COUNT(*) FROM offer_events WHERE wallet_address = $1',
+          [public_key]
+        ),
+        db.query(
+          `SELECT id, offer_id, event_type, base_asset, counter_asset,
+                  base_amount, counter_amount, price, ledger_close_time, created_at
+           FROM offer_events
+           WHERE wallet_address = $1
+           ORDER BY ledger_close_time DESC NULLS LAST
+           LIMIT $2 OFFSET $3`,
+          [public_key, limit, offset]
+        ),
+      ]);
+
+      res.json({
+        events: rowsResult.rows,
+        total: parseInt(countResult.rows[0].count, 10),
+        page,
+        limit,
+      });
     } catch (err) {
       next(err);
     }

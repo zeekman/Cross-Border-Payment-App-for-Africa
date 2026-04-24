@@ -13,6 +13,8 @@ const {
   estimateFee,
   findPath,
   sendPath,
+  findReceivePathHandler,
+  sendStrictReceivePath,
 } = require("../controllers/paymentController");
 const { resolveFederationAddress } = require("../services/stellar");
 const { isMemoRequired } = require("../services/memoRequired");
@@ -218,6 +220,43 @@ router.post(
   validate,
   idempotency,
   sendPath,
+);
+
+router.post(
+  '/find-receive-path',
+  [
+    body('source_asset').isIn(VALID_ASSETS).withMessage('Invalid source asset'),
+    body('destination_asset').isIn(VALID_ASSETS).withMessage('Invalid destination asset'),
+    body('destination_amount').isFloat({ gt: 0 }).withMessage('destination_amount must be greater than 0'),
+    body('recipient_address')
+      .notEmpty()
+      .custom((value) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) throw new Error('Invalid Stellar wallet address');
+        return true;
+      }),
+  ],
+  validate,
+  findReceivePathHandler,
+);
+
+router.post(
+  '/send-strict-receive',
+  [
+    body('recipient_address')
+      .notEmpty()
+      .custom((value) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) throw new Error('Invalid Stellar wallet address');
+        return true;
+      }),
+    body('source_asset').isIn(VALID_ASSETS).withMessage('Invalid source asset'),
+    body('source_max_amount').isFloat({ gt: 0 }).withMessage('source_max_amount must be greater than 0'),
+    body('destination_asset').isIn(VALID_ASSETS).withMessage('Invalid destination asset'),
+    body('destination_amount').isFloat({ gt: 0 }).withMessage('destination_amount must be greater than 0'),
+    body('path').optional().isArray(),
+  ],
+  validate,
+  idempotency,
+  sendStrictReceivePath,
 );
 
 module.exports = router;

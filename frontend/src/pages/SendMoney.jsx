@@ -42,6 +42,8 @@ export default function SendMoney() {
   const [pathResult, setPathResult] = useState(null);
   const [pathLoading, setPathLoading] = useState(false);
   const [memoRequired, setMemoRequired] = useState(false);
+  // 'send' = strict send (sender specifies exact amount), 'receive' = strict receive (recipient gets exact amount)
+  const [sendMode, setSendMode] = useState('send');
 
   const isCrossAsset = form.destination_asset && form.destination_asset !== form.asset;
 
@@ -168,19 +170,31 @@ export default function SendMoney() {
     }
     setPathLoading(true);
     try {
-      const res = await api.post('/payments/find-path', {
-        source_asset: form.asset,
-        source_amount: parseFloat(form.amount),
-        destination_asset: form.destination_asset,
-        recipient_address: form.recipient_address,
-      });
-      setPathResult(res.data);
+      if (sendMode === 'receive') {
+        // Strict receive: user specifies destination amount, we find source amount
+        const res = await api.post('/payments/find-receive-path', {
+          source_asset: form.asset,
+          destination_asset: form.destination_asset,
+          destination_amount: parseFloat(form.amount),
+          recipient_address: form.recipient_address,
+        });
+        setPathResult(res.data);
+      } else {
+        // Strict send: user specifies source amount, we find destination amount
+        const res = await api.post('/payments/find-path', {
+          source_asset: form.asset,
+          source_amount: parseFloat(form.amount),
+          destination_asset: form.destination_asset,
+          recipient_address: form.recipient_address,
+        });
+        setPathResult(res.data);
+      }
     } catch {
       setPathResult(null);
     } finally {
       setPathLoading(false);
     }
-  }, [form.amount, form.asset, form.destination_asset, form.recipient_address, isCrossAsset]);
+  }, [form.amount, form.asset, form.destination_asset, form.recipient_address, isCrossAsset, sendMode]);
 
   useEffect(() => {
     const timer = setTimeout(findPath, 600);
@@ -232,8 +246,21 @@ export default function SendMoney() {
     try {
       let res;
       if (isCrossAsset && pathResult) {
-        const res = await api.post('/payments/send-path', {
-        res = await api.post('/payments/send-path', {
+        if (sendMode === 'receive') {
+          // Strict receive: recipient gets exact destination_amount
+          const sourceMax = (parseFloat(pathResult.sourceAmount) * (1 + form.slippage / 100)).toFixed(7);
+          res = await api.post('/payments/send-strict-receive', {
+            recipient_address: form.recipient_address,
+            source_asset: form.asset,
+            source_max_amount: parseFloat(sourceMax),
+            destination_asset: form.destination_asset,
+            destination_amount: parseFloat(form.amount),
+            path: pathResult.path,
+            memo: form.memo || undefined,
+            wallet_id: selectedWallet?.id || undefined,
+          });
+        } else {
+          res = await api.post('/payments/send-path', {
           recipient_address: form.recipient_address,
           source_asset: form.asset,
           source_amount: parseFloat(form.amount),
@@ -243,6 +270,7 @@ export default function SendMoney() {
           memo: form.memo || undefined,
           wallet_id: selectedWallet?.id || undefined,
         });
+        }
         toast.success(t('send.success'));
         if (requestId) {
           await api.post(`/payment-requests/${requestId}/claim`, {
@@ -485,7 +513,9 @@ export default function SendMoney() {
 
         {/* Amount + Source Asset */}
         <div>
-          <label className="text-sm text-gray-400 mb-1 block">{t('send.amount')}</label>
+          <label className="text-sm text-gray-400 mb-1 block">
+            {isCrossAsset && sendMode === 'receive' ? `Recipient receives (${form.destination_asset || form.asset})` : t('send.amount')}
+          </label>
           <div className="flex gap-2">
             <input
               type="number"
@@ -536,12 +566,32 @@ export default function SendMoney() {
             <label className="text-sm text-gray-400 flex items-center gap-1">
               <ArrowRightLeft size={13} /> Recipient receives (optional)
             </label>
-            {form.destination_asset && (
-              <button type="button" onClick={() => { setForm({ ...form, destination_asset: '' }); setPathResult(null); }}
-                className="text-xs text-gray-500 hover:text-white transition-colors">
-                Clear
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              {form.destination_asset && (
+                <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => { setSendMode('send'); setPathResult(null); }}
+                    className={`text-xs px-2 py-1 rounded-md transition-colors ${sendMode === 'send' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    I send exact
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setSendMode('receive'); setPathResult(null); }}
+                    className={`text-xs px-2 py-1 rounded-md transition-colors ${sendMode === 'receive' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    They receive exact
+                  </button>
+                </div>
+              )}
+              {form.destination_asset && (
+                <button type="button" onClick={() => { setForm({ ...form, destination_asset: '' }); setPathResult(null); setSendMode('send'); }}
+                  className="text-xs text-gray-500 hover:text-white transition-colors">
+                  Clear
+                </button>
+              )}
+            </div>
           </div>
           <div className="relative">
             <select
@@ -561,7 +611,7 @@ export default function SendMoney() {
           {isCrossAsset && (
             <div className="mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm">
               {pathLoading && <p className="text-gray-400 animate-pulse">Finding best rate...</p>}
-              {!pathLoading && pathResult && (
+              {!pathLoading && pathResult && sendMode === 'send' && (
                 <div className="space-y-1">
                   <p className="text-green-400">
                     Recipient receives ≈ <span className="font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span>
@@ -584,6 +634,36 @@ export default function SendMoney() {
                     ))}
                   </div>
                   <p className="text-xs text-gray-500">Min received: {destMin} {form.destination_asset}</p>
+                </div>
+              )}
+              {!pathLoading && pathResult && sendMode === 'receive' && (
+                <div className="space-y-1">
+                  <p className="text-green-400">
+                    Recipient receives exactly <span className="font-semibold">{form.amount} {form.destination_asset}</span>
+                  </p>
+                  <p className="text-yellow-300 text-xs">
+                    You pay approximately <span className="font-semibold">{pathResult.sourceAmount} {form.asset}</span>
+                  </p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-gray-500">Max slippage:</span>
+                    {SLIPPAGE_OPTIONS.map(s => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setForm({ ...form, slippage: s })}
+                        className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${
+                          form.slippage === s
+                            ? 'border-primary-500 text-primary-400'
+                            : 'border-gray-600 text-gray-400 hover:border-gray-400'
+                        }`}
+                      >
+                        {s}%
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Max you pay: {(parseFloat(pathResult.sourceAmount) * (1 + form.slippage / 100)).toFixed(7)} {form.asset}
+                  </p>
                 </div>
               )}
               {!pathLoading && !pathResult && form.amount && form.recipient_address && (
@@ -655,8 +735,14 @@ export default function SendMoney() {
                   )}
                 </>
               )}
-              {isCrossAsset && pathResult && (
+              {isCrossAsset && pathResult && sendMode === 'send' && (
                 <p>Recipient receives ≈ <span className="text-white font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span> (min {destMin})</p>
+              )}
+              {isCrossAsset && pathResult && sendMode === 'receive' && (
+                <>
+                  <p>Recipient receives exactly <span className="text-white font-semibold">{form.amount} {form.destination_asset}</span></p>
+                  <p>You pay approximately <span className="text-white font-semibold">{pathResult.sourceAmount} {form.asset}</span></p>
+                </>
               )}
               {form.memo && <p>{t('send.confirm_memo')} {form.memo}</p>}
               {form.memo.trim() ? (
