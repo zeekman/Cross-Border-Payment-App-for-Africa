@@ -7,6 +7,7 @@ const cache = require("../utils/cache");
 const { checkFraud, logFraudBlock } = require("../services/fraudDetection");
 const { parseHistoryFrom, parseHistoryTo, normalizeAsset } = require("../utils/historyQuery");
 const { isMemoRequired } = require("../services/memoRequired");
+const { mintPoints } = require("../services/loyaltyToken");
 const { depositFee } = require("../services/feeDistributor");
 
 // Configurable KYC transaction threshold in USD equivalent
@@ -151,6 +152,9 @@ async function send(req, res, next) {
     // Invalidate sender's cached balance — it changed after this payment
     await cache.del(`balance:${public_key}`);
 
+    // Mint loyalty points: 1 point per 1 XLM (or XLM-equivalent) of volume
+    const loyaltyPoints = Math.max(1, Math.floor(parseFloat(amount)));
+    mintPoints({ recipientWallet: public_key, points: loyaltyPoints }).catch(() => {});
     // Deposit platform fee on-chain (fire-and-forget — never blocks the response)
     const FEE_BPS = parseInt(process.env.PLATFORM_FEE_BPS || "250", 10);
     if (asset === "USDC" && FEE_BPS > 0) {
