@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Send, ChevronDown, Users, Camera, ArrowRightLeft } from 'lucide-react';
+import { ArrowLeft, Send, ChevronDown, Users, Camera, ArrowRightLeft, Wallet } from 'lucide-react';
 import api from '../utils/api';
 import { useExchangeRates } from '../hooks/useExchangeRates';
 import toast from 'react-hot-toast';
@@ -44,6 +44,24 @@ export default function SendMoney() {
   const [memoRequired, setMemoRequired] = useState(false);
 
   const isCrossAsset = form.destination_asset && form.destination_asset !== form.asset;
+
+  // Multi-wallet state
+  const [wallets, setWallets] = useState([]);
+  const [selectedWalletId, setSelectedWalletId] = useState(searchParams.get('wallet_id') || null);
+  const [showWalletDropdown, setShowWalletDropdown] = useState(false);
+
+  const selectedWallet = wallets.find((w) => w.id === selectedWalletId) || wallets[0] || null;
+
+  useEffect(() => {
+    api.get('/wallet/list').then((r) => {
+      setWallets(r.data.wallets || []);
+      // If no wallet_id in URL, default to the user's default wallet
+      if (!selectedWalletId && r.data.wallets?.length) {
+        const def = r.data.wallets.find((w) => w.is_default) || r.data.wallets[0];
+        setSelectedWalletId(def.id);
+      }
+    }).catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     api.get('/wallet/contacts').then(r => setContacts(r.data.contacts || [])).catch(() => {});
@@ -211,6 +229,7 @@ export default function SendMoney() {
           destination_min_amount: parseFloat(destMin),
           path: pathResult.path,
           memo: form.memo || undefined,
+          wallet_id: selectedWallet?.id || undefined,
         });
       } else {
         const m = form.memo.trim();
@@ -226,6 +245,7 @@ export default function SendMoney() {
           recipient_address: recipientAddress,
           amount: parseFloat(form.amount),
           asset: form.asset,
+          wallet_id: selectedWallet?.id || undefined,
         };
         if (m) {
           payload.memo = m;
@@ -268,6 +288,70 @@ export default function SendMoney() {
       <h2 className="text-2xl font-bold text-white mb-6">{t('send.title')}</h2>
 
       <form onSubmit={handleSubmit} className="space-y-4 overflow-y-auto" style={{ maxHeight: keyboardOpen ? 'calc(100vh - 200px)' : 'auto' }}>
+        {/* Wallet selector */}
+        {wallets.length > 1 && (
+          <div>
+            <label className="text-sm text-gray-400 mb-1 block">Send from</label>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowWalletDropdown((v) => !v)}
+                className="w-full flex items-center justify-between bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white hover:border-primary-500 transition-colors"
+                aria-haspopup="listbox"
+                aria-expanded={showWalletDropdown}
+              >
+                <div className="flex items-center gap-2">
+                  <Wallet size={15} className="text-primary-400" />
+                  <span className="text-sm">{selectedWallet?.label || 'Select wallet'}</span>
+                  {selectedWallet && (
+                    <span className="text-xs text-gray-500 font-mono">
+                      ({selectedWallet.balances?.find((b) => b.asset === 'XLM')?.balance || '0'} XLM)
+                    </span>
+                  )}
+                </div>
+                <ChevronDown
+                  size={14}
+                  className={`text-gray-400 transition-transform ${showWalletDropdown ? 'rotate-180' : ''}`}
+                />
+              </button>
+
+              {showWalletDropdown && (
+                <div
+                  className="absolute z-20 mt-1 w-full bg-gray-800 border border-gray-700 rounded-xl shadow-xl overflow-hidden"
+                  role="listbox"
+                >
+                  {wallets.map((w) => {
+                    const xlm = w.balances?.find((b) => b.asset === 'XLM')?.balance || '0';
+                    return (
+                      <button
+                        key={w.id}
+                        type="button"
+                        role="option"
+                        aria-selected={w.id === selectedWalletId}
+                        onClick={() => {
+                          setSelectedWalletId(w.id);
+                          setShowWalletDropdown(false);
+                        }}
+                        className={`w-full flex items-center justify-between px-4 py-3 text-left transition-colors ${
+                          w.id === selectedWalletId
+                            ? 'bg-primary-500/20 text-primary-400'
+                            : 'hover:bg-gray-700 text-white'
+                        }`}
+                      >
+                        <div>
+                          <p className="text-sm font-medium">{w.label}</p>
+                          <p className="text-xs text-gray-500 font-mono">{w.public_key.slice(0, 16)}…</p>
+                        </div>
+                        <p className="text-sm font-semibold">{parseFloat(xlm).toLocaleString()} XLM</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Recipient */}
         <div>
           <div className="flex items-center justify-between mb-1">
