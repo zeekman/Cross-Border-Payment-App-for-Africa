@@ -182,6 +182,7 @@ export default function Dashboard() {
   };
 
   const xlmBalance = wallet?.balances?.find((b) => b.asset === 'XLM')?.balance || '0';
+  const xlmAvailable = wallet?.balances?.find((b) => b.asset === 'XLM')?.available_balance || null;
   const displayBalance =
     selectedCurrency === 'XLM' ? xlmBalance : convertFromXLM(xlmBalance, selectedCurrency);
 
@@ -372,6 +373,11 @@ export default function Dashboard() {
           </span>
           <span className="text-primary-200 mb-1">{selectedCurrency}</span>
         </div>
+        {xlmAvailable !== null && selectedCurrency === 'XLM' && (
+          <p className="text-primary-200 text-xs mb-3">
+            Available to send: {parseFloat(xlmAvailable).toLocaleString()} XLM
+          </p>
+        )}
 
         {/* Currency selector */}
         <div className="flex gap-2 flex-wrap mb-4">

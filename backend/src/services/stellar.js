@@ -128,15 +128,67 @@ async function getBalance(publicKey) {
   try {
     const raw = await withRetry(() => withFallback(s => s.loadAccount(publicKey)), { label: 'loadAccount' });
     const account = validateHorizonResponse(AccountResponseSchema, raw, 'loadAccount');
-    const account = await withRetry(() => withFallback(s => s.loadAccount(publicKey), 'loadAccount'), { label: 'loadAccount' });
-    return account.balances.map(b => ({
-      asset: b.asset_type === 'native' ? 'XLM' : b.asset_code,
-      balance: b.balance
-    }));
+
+    // Stellar minimum balance: (2 + num_subentries) * base_reserve (0.5 XLM)
+    const BASE_RESERVE = 0.5;
+    const numSubentries = account.subentry_count || 0;
+    const minBalance = (2 + numSubentries) * BASE_RESERVE;
+
+    return account.balances.map(b => {
+      if (b.asset_type === 'native') {
+        const total = parseFloat(b.balance);
+        const available = Math.max(0, total - minBalance);
+        return {
+          asset: 'XLM',
+          balance: b.balance,
+          available_balance: available.toFixed(7),
+          min_balance: minBalance.toFixed(7),
+        };
+      }
+      return { asset: b.asset_code, balance: b.balance };
+    });
   } catch (e) {
     if (e.response?.status === 404) return [];
     throw e;
   }
+}
+
+/**
+ * Return the signers and thresholds for an account directly from Horizon.
+ */
+async function getAccountSigners(publicKey) {
+  const raw = await withRetry(() => withFallback(s => s.loadAccount(publicKey)), { label: 'loadAccount(signers)' });
+  const account = validateHorizonResponse(AccountResponseSchema, raw, 'loadAccount(signers)');
+  return {
+    signers: account.signers.map(s => ({
+      key: s.key,
+      weight: s.weight,
+      type: s.type,
+    })),
+    thresholds: account.thresholds,
+    inflation_destination: account.inflation_destination || null,
+  };
+}
+
+/**
+ * Clear the inflation destination on an account (legacy Protocol <12 setting).
+ */
+async function clearInflationDestination({ publicKey, encryptedSecretKey }) {
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const keypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const account = await withRetry(() => withFallback(s => s.loadAccount(publicKey)), { label: 'loadAccount(clearInflation)' });
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: await withRetry(() => withFallback(s => s.fetchBaseFee()), { label: 'fetchBaseFee' }),
+    networkPassphrase,
+  })
+    .addOperation(StellarSdk.Operation.setOptions({ inflationDest: null }))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(keypair);
+  const result = await withRetry(() => withFallback(s => s.submitTransaction(tx)), { label: 'submitTransaction(clearInflation)' });
+  return { transactionHash: result.hash };
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,6 +1091,8 @@ async function getDataEntries(publicKey) {
 module.exports = {
   createWallet,
   getBalance,
+  getAccountSigners,
+  clearInflationDestination,
   sendPayment,
   sendBatchPayment,
   getTransactions,

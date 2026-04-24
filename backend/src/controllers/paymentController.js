@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require("uuid");
 const { stringify } = require("csv-stringify/sync");
 const db = require("../db");
+const StellarSdk = require("@stellar/stellar-sdk");
 const {
   sendPayment,
   sendBatchPayment,
@@ -31,6 +32,24 @@ const DAILY_SEND_LIMIT = parseFloat(process.env.DAILY_SEND_LIMIT || "50000");
 
 // Threshold for phone verification check
 const PHONE_VERIFICATION_THRESHOLD_USD = parseFloat(process.env.PHONE_VERIFICATION_THRESHOLD_USD || "100");
+
+const horizonUrl = process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org";
+const horizonServer = new StellarSdk.Horizon.Server(horizonUrl);
+
+/**
+ * Fetch the authoritative ledger close time from Horizon for a given ledger sequence.
+ * Returns an ISO string or null if unavailable.
+ */
+async function fetchLedgerCloseTime(ledgerSequence) {
+  if (!ledgerSequence) return null;
+  try {
+    const ledger = await horizonServer.ledgers().ledger(ledgerSequence).call();
+    return ledger.closed_at || null;
+  } catch {
+    return null;
+  }
+}
+
 
 function estimateUSDValue(amount, asset) {
   if (asset === "USD" || asset === "USDC") return parseFloat(amount);
@@ -95,11 +114,12 @@ async function insertTransactionRecord({
   memo_type = null,
   tx_hash = null,
   status,
+  ledger_close_time = null,
 }) {
   await db.query(
-    `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status],
+    `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, ledger_close_time)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, ledger_close_time],
   );
 
   return id;
@@ -220,12 +240,15 @@ async function send(req, res, next) {
       memoType: memo ? memo_type : undefined,
     }, req.logger);
 
+    // Fetch authoritative ledger close time from Horizon (issue #139)
+    const ledger_close_time = await fetchLedgerCloseTime(ledger);
+
     // Save to DB
     const txStatus = type === "claimable_balance" ? "pending_claim" : "confirming";
     await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo],
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time],
     );
 
     // Start async confirmation polling for non-claimable-balance transactions
@@ -608,7 +631,7 @@ async function history(req, res, next) {
     const whereClause = conditions.join(" AND ");
 
     const countSql = `SELECT COUNT(*)::text AS count FROM transactions WHERE ${whereClause}`;
-    const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at
+    const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at, ledger_close_time
          FROM transactions
          WHERE ${whereClause}
          ORDER BY created_at DESC LIMIT $${baseParams.length + 1} OFFSET $${baseParams.length + 2}`;

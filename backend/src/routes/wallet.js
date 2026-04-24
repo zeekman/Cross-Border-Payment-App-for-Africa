@@ -13,6 +13,8 @@ const {
   addSigner,
   removeSigner,
   listSigners,
+  getSignersFromHorizon,
+  clearInflationDestinationHandler,
   listTrustlines,
   addTrustlineHandler,
   removeTrustlineHandler,
@@ -130,6 +132,8 @@ router.post(
 // Multisig / business account routes
 router.post('/upgrade-business', upgradeToBusinessAccount);
 router.get('/signers', listSigners);
+router.get('/signers/horizon', getSignersFromHorizon);
+router.post('/clear-inflation-destination', clearInflationDestinationHandler);
 router.post(
   '/signers',
   [

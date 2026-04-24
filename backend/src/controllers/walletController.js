@@ -3,6 +3,8 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const {
   getBalance,
+  getAccountSigners,
+  clearInflationDestination,
   getTransactions,
   decryptPrivateKey,
   addAccountSigner,
@@ -17,10 +19,10 @@ const {
   getAccountFlags,
   setAccountFlags,
 } = require('../services/stellar');
-const { getBalance, getTransactions, decryptPrivateKey, addAccountSigner, removeAccountSigner, addTrustline, removeTrustline, getTrustlines, mergeAccount, setDataEntry, getDataEntries } = require('../services/stellar');
 const QRCode = require('qrcode');
 const cache = require('../utils/cache');
 const audit = require('../services/audit');
+
 
 const MAX_WALLETS_PER_USER = 5;
 
@@ -473,6 +475,46 @@ async function mergeWallet(req, res, next) {
   }
 }
 
+/**
+ * GET /api/wallet/signers — returns signers and thresholds directly from Horizon.
+ * Issue #142: display live signer data including weight and type.
+ */
+async function getSignersFromHorizon(req, res, next) {
+  try {
+    const wallet = await resolveWallet(req.user.userId, req.query.wallet_id || null);
+    if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
+    const data = await getAccountSigners(wallet.public_key);
+    res.json(data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/wallet/clear-inflation-destination — clears legacy inflation_destination.
+ * Issue #141: detect and clear legacy Stellar inflation destinations.
+ */
+async function clearInflationDestinationHandler(req, res, next) {
+  try {
+    const wallet = await resolveWallet(req.user.userId, req.query.wallet_id || null);
+    if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
+
+    const { transactionHash } = await clearInflationDestination({
+      publicKey: wallet.public_key,
+      encryptedSecretKey: wallet.encrypted_secret_key,
+    });
+
+    audit.log(req.user.userId, 'clear_inflation_destination', req.ip, req.headers['user-agent'], {
+      wallet_id: wallet.id,
+      transaction_hash: transactionHash,
+    });
+
+    res.json({ message: 'Inflation destination cleared', transaction_hash: transactionHash });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getWallet,
   listWallets,
@@ -484,6 +526,8 @@ module.exports = {
   addSigner,
   removeSigner,
   listSigners,
+  getSignersFromHorizon,
+  clearInflationDestinationHandler,
   listTrustlines,
   addTrustlineHandler,
   removeTrustlineHandler,

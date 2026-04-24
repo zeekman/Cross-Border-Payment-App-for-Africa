@@ -374,13 +374,20 @@ export default function TransactionHistory() {
                         ) : tx.status}
                       </span>
                       <div className="flex items-center gap-2">
-                        <span className="text-xs text-gray-600">
-                          {new Date(tx.created_at).toLocaleDateString('en-GB', {
-                            day: 'numeric',
-                            month: 'short',
-                            year: 'numeric',
-                          })}
-                        </span>
+                        <div className="text-right">
+                          <span className="text-xs text-gray-500 block">
+                            {new Date(tx.ledger_close_time || tx.created_at).toLocaleDateString('en-GB', {
+                              day: 'numeric',
+                              month: 'short',
+                              year: 'numeric',
+                            })}
+                          </span>
+                          {tx.ledger_close_time && tx.created_at && (
+                            <span className="text-xs text-gray-700 block" title={`Submitted: ${new Date(tx.created_at).toLocaleString()}`}>
+                              Ledger: {new Date(tx.ledger_close_time).toLocaleTimeString()}
+                            </span>
+                          )}
+                        </div>
                         {tx.tx_hash && (
                           <a
                             href={`https://stellar.expert/explorer/testnet/tx/${tx.tx_hash}`}

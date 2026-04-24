@@ -54,6 +54,17 @@ export default function SendMoney() {
 
   const selectedWallet = wallets.find((w) => w.id === selectedWalletId) || wallets[0] || null;
 
+  // Available XLM balance for the selected wallet (after minimum reserve)
+  const selectedWalletXlmEntry = selectedWallet?.balances?.find((b) => b.asset === 'XLM');
+  const availableXlm = selectedWalletXlmEntry?.available_balance
+    ? parseFloat(selectedWalletXlmEntry.available_balance)
+    : null;
+  const belowMinBalance =
+    form.asset === 'XLM' &&
+    availableXlm !== null &&
+    form.amount &&
+    parseFloat(form.amount) > availableXlm;
+
   useEffect(() => {
     api.get('/wallet/list').then((r) => {
       setWallets(r.data.wallets || []);
@@ -535,6 +546,16 @@ export default function SendMoney() {
               {usingApproximateRates && (
                 <p className="text-xs text-amber-500/90">{t('common.rates_disclaimer')}</p>
               )}
+            </div>
+          )}
+          {availableXlm !== null && form.asset === 'XLM' && (
+            <p className="text-xs text-gray-500 mt-1">
+              Available to send: {availableXlm.toLocaleString()} XLM
+            </p>
+          )}
+          {belowMinBalance && (
+            <div className="mt-2 bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-3 text-red-400 text-sm">
+              ⚠️ This amount exceeds your available balance ({availableXlm.toLocaleString()} XLM). Sending it would drop your account below the Stellar minimum reserve.
             </div>
           )}
         </div>
