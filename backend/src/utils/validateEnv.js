@@ -48,6 +48,10 @@ function validateEnv() {
     console.error(
       `\x1b[31m[CONFIG ERROR] STELLAR_HORIZON_URL does not match STELLAR_NETWORK="${network}". Expected "${expectedHorizon}".\x1b[0m`
     );
+    console.error(
+      `\x1b[31m[CONFIG ERROR] Network passphrase mismatch risk: a ${network === 'mainnet' ? 'testnet' : 'mainnet'}-signed ` +
+      `transaction submitted to ${network} Horizon will be rejected or cause fund loss.\x1b[0m`
+    );
     process.exit(1);
     return;
   }

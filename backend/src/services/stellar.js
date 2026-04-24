@@ -18,6 +18,29 @@ const networkPassphrase = isTestnet
   ? StellarSdk.Networks.TESTNET
   : StellarSdk.Networks.PUBLIC;
 
+/**
+ * Validate that a transaction's network passphrase matches the configured network.
+ * Throws if there is a mismatch — prevents testnet-signed XDRs from being
+ * broadcast against mainnet Horizon and vice-versa.
+ *
+ * @param {string} txPassphrase - The passphrase embedded in the transaction XDR
+ */
+function validateNetworkPassphrase(txPassphrase) {
+  if (txPassphrase && txPassphrase !== networkPassphrase) {
+    const err = new Error(
+      `Network passphrase mismatch. Transaction was signed for "${txPassphrase}" ` +
+      `but server is configured for "${networkPassphrase}". ` +
+      `Check STELLAR_NETWORK environment variable.`
+    );
+    err.status = 400;
+    logger.error('Network passphrase mismatch detected', {
+      expected: networkPassphrase,
+      received: txPassphrase,
+    });
+    throw err;
+  }
+}
+
 const primaryUrl = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
 const fallbackUrl = process.env.STELLAR_HORIZON_FALLBACK_URL || null;
 
@@ -379,6 +402,9 @@ async function _sendPaymentOnce({
   memo,
   memoType = 'text'
 }, logger) {
+  // Guard against testnet/mainnet mixup
+  validateNetworkPassphrase(networkPassphrase);
+
   const assetObj = resolveAsset(asset);
 
   if (asset !== 'XLM') {
@@ -1118,4 +1144,5 @@ module.exports = {
   setAccountFlags,
   findReceivePath,
   sendStrictReceivePathPayment,
+  validateNetworkPassphrase,
 };
