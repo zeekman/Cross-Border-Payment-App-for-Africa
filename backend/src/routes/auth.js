@@ -6,6 +6,7 @@ const {
   refresh,
   logout,
   verifyEmail,
+  verifyPhone,
   getMe,
   updateProfile,
   getActivity,
@@ -18,6 +19,7 @@ const {
   resetPassword,
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
+const geoRestriction = require('../middleware/geoRestriction');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -27,6 +29,7 @@ const validate = (req, res, next) => {
 
 router.post(
   '/register',
+  geoRestriction,
   [
     body('full_name').trim().notEmpty().withMessage('Full name is required'),
     body('email').isEmail().normalizeEmail(),
@@ -38,6 +41,7 @@ router.post(
 
 router.post(
   '/login',
+  geoRestriction,
   [body('email').isEmail().normalizeEmail(), body('password').notEmpty()],
   validate,
   login
@@ -61,6 +65,13 @@ router.post(
 );
 
 router.get('/verify-email', verifyEmail);
+router.post(
+  '/verify-phone',
+  authMiddleware,
+  [body('otp').matches(/^\d{6}$/).withMessage('OTP must be 6 digits')],
+  validate,
+  verifyPhone
+);
 router.get('/me', authMiddleware, getMe);
 router.patch('/me', authMiddleware, updateProfile);
 router.get('/activity', authMiddleware, getActivity);
