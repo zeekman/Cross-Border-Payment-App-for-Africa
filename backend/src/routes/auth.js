@@ -6,6 +6,7 @@ const {
   refresh,
   logout,
   verifyEmail,
+  verifyPhone,
   getMe,
   updateProfile,
   getActivity,
@@ -64,6 +65,13 @@ router.post(
 );
 
 router.get('/verify-email', verifyEmail);
+router.post(
+  '/verify-phone',
+  authMiddleware,
+  [body('otp').matches(/^\d{6}$/).withMessage('OTP must be 6 digits')],
+  validate,
+  verifyPhone
+);
 router.get('/me', authMiddleware, getMe);
 router.patch('/me', authMiddleware, updateProfile);
 router.get('/activity', authMiddleware, getActivity);
