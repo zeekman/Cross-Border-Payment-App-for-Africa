@@ -304,6 +304,7 @@ async function createClaimableBalance({
 // ---------------------------------------------------------------------------
 
 const MAX_SEQ_RETRIES = 3;
+const MAX_BATCH_OPERATIONS = 100;
 
 function isBadSeq(err) {
   return err.response?.data?.extras?.result_codes?.transaction === 'tx_bad_seq';
@@ -311,6 +312,10 @@ function isBadSeq(err) {
 
 async function sendPayment(params, logger = require('../utils/logger')) {
   return enqueue(params.senderPublicKey, () => _sendPaymentOnce(params, logger));
+}
+
+async function sendBatchPayment(params) {
+  return enqueue(params.senderPublicKey, () => _sendBatchPaymentOnce(params));
 }
 
 async function _sendPaymentOnce({
@@ -385,6 +390,117 @@ async function _sendPaymentOnce({
           senderPublicKey, encryptedSecretKey, recipientPublicKey, amount, asset, memo, memoType, logger
         });
         return { ...result, type: 'claimable_balance' };
+      }
+
+      throw err;
+    }
+  }
+
+  throw lastErr;
+}
+
+async function validateBatchRecipient({
+  recipientPublicKey,
+  asset = 'XLM'
+}) {
+  let recipientAccount;
+  try {
+    recipientAccount = await withRetry(
+      () => withFallback(s => s.loadAccount(recipientPublicKey)),
+      { label: 'loadAccount(batchRecipient)' }
+    );
+  } catch (e) {
+    if (e.response?.status === 404) {
+      const err = new Error('Recipient account does not exist on the Stellar network.');
+      err.status = 400;
+      throw err;
+    }
+    throw e;
+  }
+
+  if (asset !== 'XLM') {
+    const assetObj = resolveAsset(asset);
+    const hasTrustline = recipientAccount.balances.some(
+      b => b.asset_code === assetObj.code && b.asset_issuer === assetObj.issuer
+    );
+
+    if (!hasTrustline) {
+      const err = new Error(
+        `Recipient has no ${assetObj.code} trustline. They must add a trustline before receiving ${assetObj.code}.`
+      );
+      err.status = 400;
+      throw err;
+    }
+  }
+
+  return { recipientPublicKey };
+}
+
+async function _sendBatchPaymentOnce({
+  senderPublicKey,
+  encryptedSecretKey,
+  recipients,
+  asset = 'XLM',
+  memo,
+  memoType = 'text'
+}) {
+  if (!Array.isArray(recipients) || recipients.length === 0) {
+    const err = new Error('At least one recipient is required.');
+    err.status = 400;
+    throw err;
+  }
+
+  if (recipients.length > MAX_BATCH_OPERATIONS) {
+    const err = new Error(`Batch payments support up to ${MAX_BATCH_OPERATIONS} recipients per transaction.`);
+    err.status = 400;
+    throw err;
+  }
+
+  const assetObj = resolveAsset(asset);
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+
+  let lastErr;
+  for (let attempt = 0; attempt < MAX_SEQ_RETRIES; attempt++) {
+    try {
+      const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey));
+
+      const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
+        fee: await withFallback(s => s.fetchBaseFee()),
+        networkPassphrase
+      });
+
+      recipients.forEach(({ recipientPublicKey, amount }) => {
+        txBuilder.addOperation(StellarSdk.Operation.payment({
+          destination: recipientPublicKey,
+          asset: assetObj,
+          amount: String(amount)
+        }));
+      });
+
+      const memoObj = memo ? buildStellarMemo(memo, memoType) : null;
+      if (memoObj) txBuilder.addMemo(memoObj);
+
+      const transaction = txBuilder
+        .setTimeout(30)
+        .build();
+
+      transaction.sign(senderKeypair);
+
+      const result = await withFallback(s => s.submitTransaction(transaction));
+      return {
+        transactionHash: result.hash,
+        ledger: result.ledger,
+        operationCount: recipients.length
+      };
+    } catch (err) {
+      if (isBadSeq(err) && attempt < MAX_SEQ_RETRIES - 1) {
+        logger.warn('tx_bad_seq detected for batch payment, retrying with fresh sequence number', {
+          attempt: attempt + 1,
+          senderPublicKey
+        });
+        lastErr = err;
+        continue;
       }
 
       throw err;
@@ -780,6 +896,7 @@ module.exports = {
   createWallet,
   getBalance,
   sendPayment,
+  sendBatchPayment,
   getTransactions,
   encryptPrivateKey,
   decryptPrivateKey,
@@ -787,6 +904,7 @@ module.exports = {
   checkHorizonHealth,
   findPaymentPath,
   sendPathPayment,
+  validateBatchRecipient,
   resolveFederationAddress,
   createClaimableBalance,
   addTrustline,

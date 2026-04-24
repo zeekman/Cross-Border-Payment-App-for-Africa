@@ -1,7 +1,14 @@
 const { v4: uuidv4 } = require("uuid");
 const { stringify } = require("csv-stringify/sync");
 const db = require("../db");
-const { sendPayment, sendPathPayment, findPaymentPath, fetchFee } = require("../services/stellar");
+const {
+  sendPayment,
+  sendBatchPayment,
+  sendPathPayment,
+  findPaymentPath,
+  fetchFee,
+  validateBatchRecipient,
+} = require("../services/stellar");
 const webhook = require("../services/webhook");
 const cache = require("../utils/cache");
 const { checkFraud, logFraudBlock } = require("../services/fraudDetection");
@@ -47,6 +54,55 @@ async function dailyLimitExceeded(walletAddress, amount) {
   return totalToday + parseFloat(amount) > DAILY_SEND_LIMIT;
 }
 
+async function ensureKycIfNeeded(userId, amount, asset) {
+  const estimatedUSD = estimateUSDValue(amount, asset);
+  if (estimatedUSD < KYC_THRESHOLD_USD) {
+    return null;
+  }
+
+  const kycResult = await db.query("SELECT kyc_status FROM users WHERE id = $1", [userId]);
+  const kycStatus = kycResult.rows[0]?.kyc_status || "unverified";
+  if (kycStatus !== "verified") {
+    const err = new Error(
+      `KYC verification required for transactions above $${KYC_THRESHOLD_USD} USD equivalent.`,
+    );
+    err.status = 403;
+    err.payload = { kyc_status: kycStatus, code: "KYC_REQUIRED" };
+    throw err;
+  }
+
+  return kycStatus;
+}
+
+async function getWalletForUser(userId) {
+  const walletResult = await db.query(
+    "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+    [userId],
+  );
+
+  return walletResult.rows[0] || null;
+}
+
+async function insertTransactionRecord({
+  id = uuidv4(),
+  sender_wallet,
+  recipient_wallet,
+  amount,
+  asset,
+  memo = null,
+  memo_type = null,
+  tx_hash = null,
+  status,
+}) {
+  await db.query(
+    `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status],
+  );
+
+  return id;
+}
+
 async function estimateFee(req, res, next) {
   try {
     const fee = await fetchFee();
@@ -65,6 +121,11 @@ async function send(req, res, next) {
     let memo = typeof rawMemo === "string" ? rawMemo.trim() : "";
     const memo_type = memo ? (rawMemoType || "text") : null;
 
+    await ensureKycIfNeeded(req.user.userId, amount, asset);
+
+    // Get sender wallet
+    const wallet = await getWalletForUser(req.user.userId);
+    if (!wallet) return res.status(404).json({ error: "Wallet not found" });
     let is_encrypted = false;
     let encrypted_memo = null;
 
@@ -114,8 +175,8 @@ async function send(req, res, next) {
     const walletResult = await db.query(walletQuery.text, walletQuery.values);
     if (!walletResult.rows[0]) return res.status(404).json({ error: "Wallet not found" });
 
-    ({ public_key } = walletResult.rows[0]);
-    const { encrypted_secret_key } = walletResult.rows[0];
+    ({ public_key } = wallet);
+    const { encrypted_secret_key } = wallet;
 
     // Prevent self-payment
     if (recipient_address === public_key) {
@@ -240,14 +301,248 @@ async function send(req, res, next) {
       },
     });
   } catch (err) {
-    if (err.status === 400 || err.status === 500) {
+    if (err.status) {
       webhook.deliver("payment.failed", { error: err.message }).catch(() => {});
-      return res.status(err.status).json({ error: err.message });
+      return res.status(err.status).json({ error: err.message, ...(err.payload || {}) });
     }
     if (err.response?.data) {
       const extras = err.response.data?.extras;
       webhook.deliver("payment.failed", { error: "Transaction failed", details: extras }).catch(() => {});
       return res.status(400).json({ error: "Transaction failed", details: extras });
+    }
+    next(err);
+  }
+}
+
+async function sendBatch(req, res, next) {
+  let public_key;
+  let memo;
+  let memo_type;
+  let asset;
+
+  try {
+    const { recipients = [], memo: rawMemo, memo_type: rawMemoType } = req.body;
+    asset = req.body.asset || "XLM";
+    memo = typeof rawMemo === "string" ? rawMemo.trim() : "";
+    memo_type = memo ? (rawMemoType || "text") : null;
+
+    const totalAmount = recipients.reduce((sum, recipient) => sum + parseFloat(recipient.amount), 0);
+
+    await ensureKycIfNeeded(req.user.userId, totalAmount, asset);
+
+    const wallet = await getWalletForUser(req.user.userId);
+    if (!wallet) return res.status(404).json({ error: "Wallet not found" });
+
+    ({ public_key } = wallet);
+    const { encrypted_secret_key } = wallet;
+
+    const overLimit = await dailyLimitExceeded(public_key, totalAmount);
+    if (overLimit) {
+      return res.status(400).json({
+        error: `Daily send limit of ${DAILY_SEND_LIMIT} reached. Try again tomorrow.`,
+        code: "DAILY_LIMIT_EXCEEDED",
+      });
+    }
+
+    const fraudCheck = await checkFraud(public_key, totalAmount, asset);
+    if (fraudCheck.blocked) {
+      await logFraudBlock(public_key, fraudCheck.reason, totalAmount, asset);
+      return res.status(429).json({ error: fraudCheck.reason });
+    }
+
+    const results = [];
+    const validRecipients = [];
+
+    for (let index = 0; index < recipients.length; index += 1) {
+      const recipient = recipients[index];
+      const recipientAddress = recipient.recipient_address;
+      const amount = recipient.amount;
+
+      if (recipientAddress === public_key) {
+        results.push({
+          index,
+          recipient_address: recipientAddress,
+          amount,
+          status: "failed",
+          error: "Cannot send payment to your own wallet",
+        });
+        continue;
+      }
+
+      if (await isMemoRequired(recipientAddress) && !memo) {
+        results.push({
+          index,
+          recipient_address: recipientAddress,
+          amount,
+          status: "failed",
+          error: "This address requires a memo to route your payment correctly. Please include a memo.",
+          code: "MEMO_REQUIRED",
+        });
+        continue;
+      }
+
+      try {
+        await validateBatchRecipient({
+          recipientPublicKey: recipientAddress,
+          asset,
+        });
+        results.push({
+          index,
+          recipient_address: recipientAddress,
+          amount,
+          status: "pending",
+        });
+        validRecipients.push({
+          index,
+          recipientPublicKey: recipientAddress,
+          amount,
+        });
+      } catch (err) {
+        results.push({
+          index,
+          recipient_address: recipientAddress,
+          amount,
+          status: "failed",
+          error: err.message,
+        });
+      }
+    }
+
+    if (validRecipients.length === 0) {
+      await Promise.all(results.map((result) => insertTransactionRecord({
+        sender_wallet: public_key,
+        recipient_wallet: result.recipient_address,
+        amount: result.amount,
+        asset,
+        memo: memo || null,
+        memo_type,
+        status: "failed",
+      })));
+
+      return res.status(400).json({
+        message: "No valid recipients were submitted",
+        summary: {
+          total: recipients.length,
+          submitted: 0,
+          successful: 0,
+          failed: results.length,
+        },
+        results,
+      });
+    }
+
+    try {
+      const { transactionHash, ledger, operationCount } = await sendBatchPayment({
+        senderPublicKey: public_key,
+        encryptedSecretKey: encrypted_secret_key,
+        recipients: validRecipients,
+        asset,
+        memo: memo || undefined,
+        memoType: memo ? memo_type : undefined,
+      });
+
+      await Promise.all(results.map(async (result) => {
+        const isSubmitted = result.status === "pending";
+        const finalResult = isSubmitted
+          ? {
+              ...result,
+              status: "success",
+              tx_hash: transactionHash,
+              ledger,
+            }
+          : result;
+
+        Object.assign(result, finalResult);
+
+        const txId = await insertTransactionRecord({
+          sender_wallet: public_key,
+          recipient_wallet: result.recipient_address,
+          amount: result.amount,
+          asset,
+          memo: memo || null,
+          memo_type,
+          tx_hash: result.tx_hash || null,
+          status: result.status === "success" ? "completed" : "failed",
+        });
+
+        result.id = txId;
+
+        if (result.status === "success") {
+          const txData = {
+            id: txId,
+            tx_hash: transactionHash,
+            ledger,
+            amount: result.amount,
+            asset,
+            sender: public_key,
+            recipient: result.recipient_address,
+            type: "payment",
+          };
+          webhook.deliver("payment.sent", txData).catch(() => {});
+          webhook.deliver("payment.received", txData).catch(() => {});
+        }
+      }));
+
+      await cache.del(`balance:${public_key}`);
+
+      return res.json({
+        message: "Batch payment submitted successfully",
+        transaction: {
+          tx_hash: transactionHash,
+          ledger,
+          asset,
+          operation_count: operationCount,
+        },
+        summary: {
+          total: recipients.length,
+          submitted: validRecipients.length,
+          successful: validRecipients.length,
+          failed: results.length - validRecipients.length,
+        },
+        results,
+      });
+    } catch (err) {
+      await Promise.all(results.map(async (result) => {
+        const isSubmitted = result.status === "pending";
+        if (isSubmitted) {
+          result.status = "failed";
+          result.error = err.response?.data ? "Transaction failed" : err.message;
+          if (err.response?.data?.extras) {
+            result.details = err.response.data.extras;
+          }
+        }
+
+        const txId = await insertTransactionRecord({
+          sender_wallet: public_key,
+          recipient_wallet: result.recipient_address,
+          amount: result.amount,
+          asset,
+          memo: memo || null,
+          memo_type,
+          status: "failed",
+        });
+        result.id = txId;
+      }));
+
+      const statusCode = err.status || (err.response?.data ? 400 : 500);
+      return res.status(statusCode).json({
+        error: err.response?.data ? "Batch transaction failed" : err.message,
+        details: err.response?.data?.extras,
+        summary: {
+          total: recipients.length,
+          submitted: validRecipients.length,
+          successful: 0,
+          failed: results.length,
+        },
+        results,
+      });
+    }
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({
+        error: err.message,
+        ...(err.payload || {}),
+      });
     }
     next(err);
   }
@@ -539,4 +834,4 @@ async function exportCSV(req, res, next) {
   }
 }
 
-module.exports = { send, history, findPath, sendPath, exportCSV, estimateFee };
+module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee };

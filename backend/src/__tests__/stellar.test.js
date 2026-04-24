@@ -631,3 +631,57 @@ describe('sendPayment tx_bad_seq retry', () => {
     expect(mockServer.submitTransaction).toHaveBeenCalledTimes(3); // MAX_SEQ_RETRIES
   });
 });
+
+// ============================================================
+// sendBatchPayment
+// ============================================================
+describe('sendBatchPayment', () => {
+  let senderKeypair;
+  let encryptedSecretKey;
+  let recipientOne;
+  let recipientTwo;
+
+  beforeEach(() => {
+    setEnv();
+    senderKeypair = StellarSdk.Keypair.random();
+    recipientOne = StellarSdk.Keypair.random().publicKey();
+    recipientTwo = StellarSdk.Keypair.random().publicKey();
+    encryptedSecretKey = encryptAndReturn(senderKeypair.secret());
+
+    mockServer.loadAccount.mockResolvedValue(buildMockStellarAccount(senderKeypair.publicKey()));
+    mockServer.fetchBaseFee.mockResolvedValue(100);
+    mockServer.submitTransaction.mockResolvedValue({ hash: 'batch_hash_123', ledger: 77 });
+  });
+
+  test('submits a single transaction containing multiple payment operations', async () => {
+    const result = await stellar.sendBatchPayment({
+      senderPublicKey: senderKeypair.publicKey(),
+      encryptedSecretKey,
+      asset: 'XLM',
+      recipients: [
+        { recipientPublicKey: recipientOne, amount: '10.5' },
+        { recipientPublicKey: recipientTwo, amount: '20.25' },
+      ],
+      memo: 'Payroll',
+      memoType: 'text',
+    });
+
+    expect(result).toEqual({
+      transactionHash: 'batch_hash_123',
+      ledger: 77,
+      operationCount: 2,
+    });
+
+    const submittedTx = mockServer.submitTransaction.mock.calls[0][0];
+    const operations = submittedTx.operations;
+
+    expect(mockServer.submitTransaction).toHaveBeenCalledTimes(1);
+    expect(operations).toHaveLength(2);
+    expect(operations[0].type).toBe('payment');
+    expect(operations[0].destination).toBe(recipientOne);
+    expect(operations[0].amount).toBe('10.5000000');
+    expect(operations[1].destination).toBe(recipientTwo);
+    expect(operations[1].amount).toBe('20.2500000');
+    expect(submittedTx.memo.value().toString()).toBe('Payroll');
+  });
+});

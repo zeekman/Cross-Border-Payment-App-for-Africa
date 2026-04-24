@@ -221,6 +221,7 @@ export default function SendMoney() {
     try {
       let res;
       if (isCrossAsset && pathResult) {
+        const res = await api.post('/payments/send-path', {
         res = await api.post('/payments/send-path', {
           recipient_address: form.recipient_address,
           source_asset: form.asset,
@@ -231,7 +232,34 @@ export default function SendMoney() {
           memo: form.memo || undefined,
           wallet_id: selectedWallet?.id || undefined,
         });
+        toast.success(t('send.success'));
+        if (requestId) {
+          await api.post(`/payment-requests/${requestId}/claim`, {
+            txHash: res.data.transaction.tx_hash
+          }).catch(() => {});
+        }
+        navigate('/dashboard');
       } else {
+        const payload = {
+          recipient_address: form.recipient_address,
+          amount: parseFloat(form.amount),
+          asset: form.asset,
+        };
+        if (form.memo.trim()) {
+          payload.memo = form.memo.trim();
+          payload.memo_type = form.memo_type;
+        }
+        const res = await api.post('/payments/send', payload);
+
+        if (requestId) {
+          await api.post(`/payment-requests/${requestId}/claim`, {
+            txHash: res.data.transaction.tx_hash
+          }).catch(() => {});
+        }
+
+        toast.success(t('send.success'));
+        navigate('/dashboard');
+      }
         const m = form.memo.trim();
         let recipientAddress = form.recipient_address;
 
@@ -501,7 +529,7 @@ export default function SendMoney() {
               className="appearance-none w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
             >
               <option value="">Same as sent ({form.asset})</option>
-              {CURRENCIES.filter(c => c.code !== form.asset).map(c => (
+              {currencies.filter(c => c.code !== form.asset).map(c => (
                 <option key={c.code} value={c.code}>{c.flag} {c.code}</option>
               ))}
             </select>
