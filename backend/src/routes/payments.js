@@ -16,6 +16,7 @@ const {
   findReceivePathHandler,
   sendStrictReceivePath,
 } = require("../controllers/paymentController");
+const { buildTransaction, submitSigned } = require("../controllers/ledgerController");
 const { resolveFederationAddress } = require("../services/stellar");
 const { isMemoRequired } = require("../services/memoRequired");
 const { ALLOWED_HISTORY_ASSETS } = require("../utils/historyQuery");
@@ -257,6 +258,32 @@ router.post(
   validate,
   idempotency,
   sendStrictReceivePath,
+);
+
+// Ledger hardware wallet: build unsigned XDR
+router.post(
+  '/build-transaction',
+  [
+    body('recipient_address')
+      .notEmpty()
+      .custom((v) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(v)) throw new Error('Invalid Stellar address');
+        return true;
+      }),
+    body('amount').isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
+    body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES']),
+  ],
+  validate,
+  buildTransaction
+);
+
+// Ledger hardware wallet: submit signed XDR
+router.post(
+  '/submit-signed',
+  [body('xdr').notEmpty().withMessage('Signed XDR is required')],
+  validate,
+  idempotency,
+  submitSigned
 );
 
 module.exports = router;
