@@ -18,6 +18,9 @@ const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
 // Daily send limit per user
 const DAILY_SEND_LIMIT = parseFloat(process.env.DAILY_SEND_LIMIT || "50000");
 
+// Threshold for phone verification check
+const PHONE_VERIFICATION_THRESHOLD_USD = parseFloat(process.env.PHONE_VERIFICATION_THRESHOLD_USD || "100");
+
 function estimateUSDValue(amount, asset) {
   if (asset === "USD" || asset === "USDC") return parseFloat(amount);
   if (asset === "XLM") return parseFloat(amount) * XLM_USD_RATE;
@@ -60,14 +63,22 @@ async function send(req, res, next) {
     const memo = typeof rawMemo === "string" ? rawMemo.trim() : "";
     const memo_type = memo ? (rawMemoType || "text") : null;
 
-    // KYC check for high-value transactions
-    const estimatedUSD = estimateUSDValue(amount, asset);
-    if (estimatedUSD >= KYC_THRESHOLD_USD) {
-      const kycResult = await db.query("SELECT kyc_status FROM users WHERE id = $1", [
+    // Phone verification check for high-value transactions
+    if (estimatedUSD >= PHONE_VERIFICATION_THRESHOLD_USD) {
+      const userResult = await db.query("SELECT kyc_status, phone_verified FROM users WHERE id = $1", [
         req.user.userId,
       ]);
-      const kycStatus = kycResult.rows[0]?.kyc_status || "unverified";
-      if (kycStatus !== "verified") {
+      const { kyc_status: kycStatus, phone_verified: phoneVerified } = userResult.rows[0] || {};
+      
+      if (!phoneVerified) {
+        return res.status(403).json({
+          error: "Phone verification required for transactions above $" + PHONE_VERIFICATION_THRESHOLD_USD + " USD equivalent.",
+          phone_verified: false,
+          code: "PHONE_VERIFICATION_REQUIRED",
+        });
+      }
+
+      if (kycStatus !== "verified" && estimatedUSD >= KYC_THRESHOLD_USD) {
         return res.status(403).json({
           error:
             "KYC verification required for transactions above $" +
@@ -305,12 +316,20 @@ async function sendPath(req, res, next) {
       memo,
     } = req.body);
 
-    // KYC check
-    const estimatedUSD = estimateUSDValue(source_amount, source_asset);
-    if (estimatedUSD >= KYC_THRESHOLD_USD) {
-      const kycResult = await db.query("SELECT kyc_status FROM users WHERE id = $1", [req.user.userId]);
-      const kycStatus = kycResult.rows[0]?.kyc_status || "unverified";
-      if (kycStatus !== "verified") {
+    // Phone verification check
+    if (estimatedUSD >= PHONE_VERIFICATION_THRESHOLD_USD) {
+      const userResult = await db.query("SELECT kyc_status, phone_verified FROM users WHERE id = $1", [req.user.userId]);
+      const { kyc_status: kycStatus, phone_verified: phoneVerified } = userResult.rows[0] || {};
+      
+      if (!phoneVerified) {
+        return res.status(403).json({
+          error: `Phone verification required for transactions above $${PHONE_VERIFICATION_THRESHOLD_USD} USD equivalent.`,
+          phone_verified: false,
+          code: "PHONE_VERIFICATION_REQUIRED",
+        });
+      }
+
+      if (kycStatus !== "verified" && estimatedUSD >= KYC_THRESHOLD_USD) {
         return res.status(403).json({
           error: `KYC verification required for transactions above $${KYC_THRESHOLD_USD} USD equivalent.`,
           kyc_status: kycStatus,
