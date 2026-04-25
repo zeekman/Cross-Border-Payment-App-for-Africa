@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 const https = require('https');
 const db = require('../db');
+const logger = require('../utils/logger');
+
+const MAX_ATTEMPTS = 3;
 
 function sign(secret, payload) {
   return crypto.createHmac('sha256', secret).update(payload).digest('hex');
@@ -36,11 +39,25 @@ async function deliverWithRetry(url, secret, payload, attempt = 0) {
   try {
     await httpsPost(url, body, signature);
   } catch (err) {
-    if (attempt < 3) {
+    if (attempt < MAX_ATTEMPTS - 1) {
       const delay = Math.pow(2, attempt) * 1000;
+      logger.warn('Webhook delivery failed, retrying', {
+        url,
+        attempt: attempt + 1,
+        maxAttempts: MAX_ATTEMPTS,
+        delay,
+        error: err.message,
+      });
       await new Promise((r) => setTimeout(r, delay));
       return deliverWithRetry(url, secret, payload, attempt + 1);
     }
+    // All attempts exhausted — log a persistent error so operators can investigate
+    logger.error('Webhook delivery permanently failed after max retries', {
+      url,
+      event: payload.event,
+      attempts: MAX_ATTEMPTS,
+      error: err.message,
+    });
   }
 }
 
@@ -53,4 +70,4 @@ async function deliver(event, data) {
   await Promise.all(rows.map((wh) => deliverWithRetry(wh.url, wh.secret, payload)));
 }
 
-module.exports = { deliver, sign };
+module.exports = { deliver, sign, MAX_ATTEMPTS };
