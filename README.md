@@ -126,7 +126,22 @@ Examples:
 
 ---
 
-## Stellar Integration
+## Stellar Protocol Compatibility
+
+AfriPay targets **Stellar Protocol 19+**. Note that the inflation operation was removed in **Protocol 12 (2019)** and is not used anywhere in this codebase. No `setOptions` calls set an `inflationDest`. Any SDK examples referencing inflation are outdated and should be ignored.
+
+---
+
+## Compliance — Asset Clawback
+
+For regulatory compliance (fraud investigations, court orders), AfriPay supports the Stellar **clawback** operation on USDC assets. This allows the asset issuer to reclaim tokens from a user's account when legally required.
+
+- Endpoint: `POST /api/admin/clawback` (admin-only)
+- Requires the issuer account to have `AUTH_CLAWBACK_ENABLED_FLAG` set on-chain
+- All clawback operations are recorded in the audit log with reason, amount, and transaction hash
+- Configure `ISSUER_PUBLIC_KEY` and `ISSUER_ENCRYPTED_SECRET_KEY` in your `.env`
+
+---
 
 ### Wallet Generation
 
@@ -152,12 +167,7 @@ Sender → [approve USDC transfer] → Backend → [sign with keypair]
 
 ---
 
-## Setup
 
-### Prerequisites
-
-- Node.js 18+
-- PostgreSQL 14+
 - A Stellar testnet account (auto-created on registration)
 
 ### 1. Database
@@ -178,19 +188,21 @@ npm run dev
 # Server starts on http://localhost:5000
 ```
 
-### 3. Frontend
+### 2. Docker Compose (Recommended)
 
-```bash
-cd frontend
-npm install
-cp .env.example .env
-npm start
-# App starts on http://localhost:3000
-```
+1. Copy `.env.example` to `.env` and customize:
+   ```
+   cp .env.example .env
+   ```
 
----
+2. Start full stack:
+   ```
+   docker compose up -d --build
+   ```
 
-## Database Migrations
+3. Access:
+   - Frontend: http://localhost:3000
+   - Backend API: http://localhost
 
 AfriPay uses [node-pg-migrate](https://github.com/salsita/node-pg-migrate) for schema version control. All schema changes must be made as numbered migration files inside `database/migrations/` — never by editing `schema.sql` directly.
 
@@ -242,6 +254,10 @@ node-pg-migrate tracks applied migrations in a `pgmigrations` table that it crea
 | DELETE | /api/wallet/contacts/:id  | Yes  | Remove a contact                   |
 | POST   | /api/payments/send        | Yes  | Broadcast payment to Stellar       |
 | GET    | /api/payments/history     | Yes  | Full transaction history           |
+| POST   | /api/wallet/merge         | Yes  | Merge (close) account into another |
+| POST   | /api/support/tickets      | Yes  | Create a support/dispute ticket    |
+| GET    | /api/support/tickets      | Yes  | List user's support tickets        |
+| POST   | /api/admin/clawback       | Admin| Clawback asset for compliance      |
 
 ---
 
@@ -357,6 +373,11 @@ Contributions are welcome. Please ensure:
 - [Stellar Expert Explorer](https://stellar.expert)
 - [Stellar Discord](https://discord.gg/stellar)
 - [Soroban Smart Contracts](https://soroban.stellar.org)
+
+## Docs
+
+- [Horizon Self-Hosting Guide](docs/horizon-self-hosting.md) — run your own Horizon node in production
+- [Wallet Backup & Recovery](docs/wallet-backup-recovery.md)
 
 ---
 

@@ -1,0 +1,76 @@
+# Horizon self-hosted node stack
+# Usage: docker compose -f docker-compose.horizon.yml up -d
+# See docs/horizon-self-hosting.md for full setup instructions.
+
+version: '3.8'
+
+services:
+  horizon-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: horizon
+      POSTGRES_USER: horizon
+      POSTGRES_PASSWORD: ${HORIZON_DB_PASSWORD:?Set HORIZON_DB_PASSWORD in .env}
+    volumes:
+      - horizon_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U horizon -d horizon"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Tune PostgreSQL for Horizon's write-heavy workload
+    command: >
+      postgres
+        -c shared_buffers=4GB
+        -c effective_cache_size=12GB
+        -c maintenance_work_mem=1GB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=64MB
+        -c max_connections=200
+
+  horizon:
+    # Pin to a specific release tag in production — check:
+    # https://github.com/stellar/stellar-horizon/releases
+    image: stellar/stellar-horizon:latest
+    restart: unless-stopped
+    depends_on:
+      horizon-db:
+        condition: service_healthy
+    ports:
+      - "${HORIZON_PORT:-8000}:8000"
+    environment:
+      # Network: "testnet" or "pubnet"
+      NETWORK: ${HORIZON_NETWORK:-testnet}
+
+      # Database
+      DATABASE_URL: postgres://horizon:${HORIZON_DB_PASSWORD}@horizon-db:5432/horizon?sslmode=disable
+
+      # Ingestion
+      INGEST: ${HORIZON_INGEST:-true}
+
+      # History retention: number of ledgers to keep (~518400 = 30 days on pubnet)
+      HISTORY_RETENTION_COUNT: ${HORIZON_HISTORY_RETENTION_COUNT:-518400}
+
+      # Captive Core archive URLs (set automatically by the image for testnet/pubnet)
+      # Override only if you mirror archives yourself:
+      # HISTORY_ARCHIVE_URLS: "https://history.stellar.org/prd/core-live/core_live_001"
+
+      # HTTP server
+      PORT: "8000"
+
+      # Log level: debug | info | warn | error
+      LOG_LEVEL: info
+    volumes:
+      # Captive Core writes its bucket files here — needs fast local storage
+      - horizon_core_data:/tmp/captive-core
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  horizon_db_data:
+  horizon_core_data:

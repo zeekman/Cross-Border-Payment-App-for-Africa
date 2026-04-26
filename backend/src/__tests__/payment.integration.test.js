@@ -50,11 +50,12 @@ process.env.KYC_THRESHOLD_USD = '100';
 process.env.XLM_USD_RATE      = '0.11';
 
 const express      = require('express');
-const StellarSdk   = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const idempotency  = require('../middleware/idempotency');
 const { send, history } = require('../controllers/paymentController');
-const { body, query: qv, validationResult } = require('express-validator');
+const { query: qv, validationResult } = require('express-validator');
+const paymentSendValidators = require('../validators/paymentSendValidators');
+const { ALLOWED_HISTORY_ASSETS } = require('../utils/historyQuery');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -68,18 +69,7 @@ app.use(express.json());
 app.post(
   '/api/payments/send',
   authMiddleware,
-  [
-    body('recipient_address')
-      .notEmpty().withMessage('Recipient address is required')
-      .custom((value) => {
-        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
-          throw new Error('Invalid Stellar wallet address');
-        }
-        return true;
-      }),
-    body('amount').isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
-    body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES'])
-  ],
+  paymentSendValidators,
   validate,
   idempotency,
   send
@@ -90,7 +80,10 @@ app.get(
   authMiddleware,
   [
     qv('page').optional().isInt({ min: 1 }),
-    qv('limit').optional().isInt({ min: 1, max: 100 })
+    qv('limit').optional().isInt({ min: 1, max: 100 }),
+    qv('from').optional({ values: 'falsy' }).trim().isISO8601(),
+    qv('to').optional({ values: 'falsy' }).trim().isISO8601(),
+    qv('asset').optional({ values: 'falsy' }).trim().isIn(ALLOWED_HISTORY_ASSETS),
   ],
   validate,
   history
@@ -175,6 +168,7 @@ function makeTxRow(overrides = {}) {
     amount:           '10.0000000',
     asset:            'XLM',
     memo:             null,
+    memo_type:        null,
     tx_hash:          FAKE_TX_HASH,
     status:           'completed',
     created_at:       new Date().toISOString(),
@@ -267,6 +261,46 @@ describe('POST /api/payments/send — input validation', () => {
       .post('/api/payments/send')
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ recipient_address: RECIPIENT_KEY, amount: '10', asset: 'BTC' });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when memo_type is id but memo is missing', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: RECIPIENT_KEY, amount: '10', memo_type: 'id' });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when memo_type is id but memo is not numeric', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        recipient_address: RECIPIENT_KEY,
+        amount: '10',
+        memo: 'not-a-number',
+        memo_type: 'id'
+      });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when memo_type is hash but memo is not 64 hex chars', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        recipient_address: RECIPIENT_KEY,
+        amount: '10',
+        memo: 'deadbeef',
+        memo_type: 'hash'
+      });
 
     expect(res.status).toBe(400);
     expect(sendPayment).not.toHaveBeenCalled();
@@ -378,7 +412,28 @@ describe('POST /api/payments/send — success', () => {
       recipientPublicKey: RECIPIENT_KEY,
       amount:             '5',
       asset:              'XLM',
-      memo:               'school fees'
+      memo:               'school fees',
+      memoType:           'text'
+    }));
+  });
+
+  test('calls sendPayment with memoType id for exchange-style memos', async () => {
+    mockSendHappyPath();
+
+    await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        recipient_address: RECIPIENT_KEY,
+        amount: '1',
+        asset: 'XLM',
+        memo: '987654321',
+        memo_type: 'id'
+      });
+
+    expect(sendPayment).toHaveBeenCalledWith(expect.objectContaining({
+      memo: '987654321',
+      memoType: 'id'
     }));
   });
 
@@ -395,12 +450,12 @@ describe('POST /api/payments/send — success', () => {
     );
     expect(insertCall).toBeDefined();
     const params = insertCall[1];
-    // [txId, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash]
+    // [txId, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash]
     expect(params[1]).toBe(SENDER_KEY);
     expect(params[2]).toBe(RECIPIENT_KEY);
     expect(params[3]).toBe('10');
     expect(params[4]).toBe('XLM');
-    expect(params[6]).toBe(FAKE_TX_HASH);
+    expect(params[7]).toBe(FAKE_TX_HASH);
   });
 
   test('stores null memo when memo is not provided', async () => {
@@ -416,6 +471,7 @@ describe('POST /api/payments/send — success', () => {
     );
     expect(insertCall).toBeDefined();
     expect(insertCall[1][5]).toBeNull();
+    expect(insertCall[1][6]).toBeNull();
   });
 });
 
@@ -706,6 +762,93 @@ describe('GET /api/payments/history — validation', () => {
       .get('/api/payments/history?limit=101')
       .set('Authorization', `Bearer ${makeToken()}`);
     expect(res.status).toBe(400);
+  });
+
+  test('returns 400 when from is after to', async () => {
+    const res = await request(app)
+      .get('/api/payments/history?from=2024-06-10&to=2024-01-01')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/from must be before/i);
+  });
+
+  test('returns 400 for invalid asset filter', async () => {
+    const res = await request(app)
+      .get('/api/payments/history?asset=BTC')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(400);
+  });
+
+  test('returns 400 for non-ISO from date', async () => {
+    const res = await request(app)
+      .get('/api/payments/history?from=not-a-date')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(400);
+  });
+});
+
+// ===========================================================================
+// GET /api/payments/history — date & asset filters (server-side)
+// ===========================================================================
+describe('GET /api/payments/history — filters', () => {
+  test('applies from, to, and asset in SQL when all query params set', async () => {
+    const txRow = makeTxRow({ asset: 'USDC', tx_hash: 'usdc' + FAKE_TX_HASH.slice(4) });
+    db.query
+      .mockResolvedValueOnce({ rows: [{ public_key: SENDER_KEY }] })
+      .mockResolvedValueOnce({ rows: [{ count: '1' }] })
+      .mockResolvedValueOnce({ rows: [txRow] });
+
+    const res = await request(app)
+      .get('/api/payments/history?from=2024-01-01&to=2024-12-31&asset=USDC&page=1&limit=20')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(1);
+    expect(res.body.transactions[0].asset).toBe('USDC');
+
+    const dataCall = db.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('SELECT id') && c[0].includes('FROM transactions'),
+    );
+    expect(dataCall[0]).toMatch(/created_at >=/);
+    expect(dataCall[0]).toMatch(/created_at <=/);
+    expect(dataCall[0]).toMatch(/asset =/);
+    expect(dataCall[1]).toEqual(
+      expect.arrayContaining([SENDER_KEY, expect.any(Date), expect.any(Date), 'USDC', 20, 0]),
+    );
+  });
+
+  test('returns 200 with only from bound (open-ended range to now)', async () => {
+    mockHistoryHappyPath([]);
+
+    const res = await request(app)
+      .get('/api/payments/history?from=2020-01-01')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    const dataCall = db.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('SELECT id') && c[0].includes('FROM transactions'),
+    );
+    expect(dataCall[0]).toMatch(/created_at >=/);
+    expect(dataCall[0]).not.toMatch(/created_at <=/);
+  });
+
+  test('returns 200 with only asset filter', async () => {
+    const rows = [makeTxRow({ asset: 'XLM', tx_hash: 'onlyxlm' + FAKE_TX_HASH.slice(5) })];
+    db.query
+      .mockResolvedValueOnce({ rows: [{ public_key: SENDER_KEY }] })
+      .mockResolvedValueOnce({ rows: [{ count: '1' }] })
+      .mockResolvedValueOnce({ rows });
+
+    const res = await request(app)
+      .get('/api/payments/history?asset=XLM')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.transactions[0].asset).toBe('XLM');
+    const dataCall = db.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('SELECT id') && c[0].includes('FROM transactions'),
+    );
+    expect(dataCall[1]).toEqual(expect.arrayContaining([SENDER_KEY, 'XLM', 20, 0]));
   });
 });
 

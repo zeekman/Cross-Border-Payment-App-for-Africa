@@ -116,10 +116,10 @@ describe('AuthContext', () => {
     expect(localStorage.getItem('token')).toBeNull();
   });
 
-  test('register updates user and localStorage', async () => {
-    const mockUser = { email: 'new@test.com' };
-    const mockToken = 'token456';
-    api.post.mockResolvedValueOnce({ data: { user: mockUser, token: mockToken } });
+  test('register does not set user or token until email is verified', async () => {
+    api.post.mockResolvedValueOnce({
+      data: { message: 'Account created. Please verify your email before logging in.' },
+    });
 
     render(
       <AuthProvider>
@@ -133,8 +133,8 @@ describe('AuthContext', () => {
       screen.getByText('Register').click();
     });
 
-    expect(screen.getByTestId('user')).toHaveTextContent(mockUser.email);
-    expect(localStorage.getItem('token')).toBe(mockToken);
+    expect(screen.getByTestId('user')).toHaveTextContent('guest');
+    expect(localStorage.getItem('token')).toBeNull();
   });
 
   test('register failure does not update user', async () => {
@@ -160,6 +160,7 @@ describe('AuthContext', () => {
     const mockUser = { email: 'persisted@test.com' };
     localStorage.setItem('token', 'fake-token');
     api.get.mockResolvedValueOnce({ data: mockUser });
+    api.post.mockResolvedValueOnce({ data: { message: 'Logged out successfully' } });
 
     render(
       <AuthProvider>
@@ -169,10 +170,11 @@ describe('AuthContext', () => {
 
     await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent(mockUser.email));
 
-    act(() => {
+    await act(async () => {
       screen.getByText('Logout').click();
     });
 
+    expect(api.post).toHaveBeenCalledWith('/auth/logout');
     expect(screen.getByTestId('user')).toHaveTextContent('guest');
     expect(localStorage.getItem('token')).toBeNull();
   });

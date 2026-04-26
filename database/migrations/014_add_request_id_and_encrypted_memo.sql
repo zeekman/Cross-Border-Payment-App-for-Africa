@@ -1,0 +1,11 @@
+ALTER TABLE transactions
+  ADD COLUMN IF NOT EXISTS request_id VARCHAR(36);
+
+ALTER TABLE transactions
+  ADD COLUMN IF NOT EXISTS is_encrypted BOOLEAN DEFAULT FALSE;
+
+ALTER TABLE transactions
+  ADD COLUMN IF NOT EXISTS encrypted_memo TEXT;
+
+ALTER TABLE transactions
+  ALTER COLUMN memo TYPE TEXT;

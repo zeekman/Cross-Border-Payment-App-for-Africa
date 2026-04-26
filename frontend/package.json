@@ -4,8 +4,11 @@
   "private": true,
   "dependencies": {
     "@headlessui/react": "^1.7.17",
+    "@ledgerhq/hw-app-str": "^7.7.1",
+    "@ledgerhq/hw-transport-webusb": "^6.34.1",
     "axios": "^1.6.2",
     "i18next": "^25.10.5",
+    "idb": "^8.0.3",
     "lucide-react": "^0.294.0",
     "qrcode.react": "^3.1.0",
     "react": "^18.2.0",
@@ -14,9 +17,13 @@
     "react-i18next": "^16.6.2",
     "react-qr-reader": "^3.0.0-beta-1",
     "react-router-dom": "^6.20.1",
-    "react-scripts": "5.0.1"
+    "react-scripts": "5.0.1",
+    "recharts": "^2.10.3",
+    "socket.io-client": "^4.8.3",
+    "workbox-window": "^7.4.0"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
@@ -27,7 +34,11 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
-    "test": "react-scripts test"
+    "test": "react-scripts test",
+    "lint": "eslint src/**/*.{js,jsx}",
+    "lint:fix": "eslint src/**/*.{js,jsx} --fix",
+    "format": "prettier --write \"**/*.{js,jsx,json,md,html,css}\"",
+    "format:check": "prettier --check \"**/*.{js,jsx,json,md,html,css}\""
   },
   "browserslist": {
     "production": [

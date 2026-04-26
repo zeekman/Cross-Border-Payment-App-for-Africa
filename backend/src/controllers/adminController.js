@@ -5,6 +5,8 @@ const { getStellarStats } = require('../services/stellar');
 let stellarStatsCache = null;
 let stellarStatsCacheTime = 0;
 const CACHE_DURATION = 10000; // 10 seconds
+const { clawbackAsset } = require('../services/stellar');
+const audit = require('../services/audit');
 
 async function getStats(req, res, next) {
   try {
@@ -112,7 +114,210 @@ async function getStellarNetworkStats(req, res, next) {
     stellarStatsCacheTime = now;
 
     res.json(stats);
+module.exports = { getStats, getUsers, getTransactions, clawback };
+
+/**
+ * POST /api/admin/clawback
+ * Admin-only: clawback an asset from a user's account for regulatory compliance.
+ * Requires ISSUER_PUBLIC_KEY and ISSUER_ENCRYPTED_SECRET_KEY env vars.
+ * All clawback operations are logged in the audit log.
+ */
+async function clawback(req, res, next) {
+  try {
+    const { from, asset, amount, reason } = req.body;
+
+    const issuerPublicKey = process.env.ISSUER_PUBLIC_KEY;
+    const encryptedIssuerSecretKey = process.env.ISSUER_ENCRYPTED_SECRET_KEY;
+
+    if (!issuerPublicKey || !encryptedIssuerSecretKey) {
+      return res.status(500).json({ error: 'Issuer credentials not configured' });
+    }
+
+    const { transactionHash, ledger } = await clawbackAsset({
+      issuerPublicKey,
+      encryptedIssuerSecretKey,
+      fromPublicKey: from,
+      asset,
+      amount,
+    });
+
+    await audit.log(req.user.userId, 'admin_clawback', req.ip, req.headers['user-agent'], {
+      from,
+      asset,
+      amount,
+      reason: reason || null,
+      transaction_hash: transactionHash,
+    });
+
+    res.json({
+      message: 'Clawback executed successfully',
+      transaction_hash: transactionHash,
+      ledger,
+    });
   } catch (err) {
     next(err);
   }
 }
+
+const { attestKyc, revokeKyc } = require('../services/kycAttestation');
+
+/**
+ * POST /api/admin/kyc/:userId/approve
+ * Marks user as verified in DB and pushes on-chain attestation.
+ */
+async function approveKYC(req, res, next) {
+  try {
+    const { userId } = req.params;
+
+    const userResult = await db.query(
+      `SELECT u.id, u.kyc_status, u.kyc_data, w.public_key
+       FROM users u JOIN wallets w ON w.user_id = u.id
+       WHERE u.id = $1`,
+      [userId]
+    );
+    if (!userResult.rows[0]) return res.status(404).json({ error: "User not found" });
+
+    const user = userResult.rows[0];
+    if (user.kyc_status === "verified") {
+      return res.status(409).json({ error: "User is already verified" });
+    }
+    if (user.kyc_status !== "pending") {
+      return res.status(400).json({ error: "User has no pending KYC submission" });
+    }
+
+    const adminWallet = await db.query(
+      "SELECT public_key FROM wallets WHERE user_id = $1",
+      [req.user.userId]
+    );
+    const adminPublicKey = adminWallet.rows[0]?.public_key;
+
+    const idType = user.kyc_data?.id_type || "unknown";
+    let txHash = null;
+
+    // Best-effort on-chain attestation — DB update proceeds regardless
+    try {
+      txHash = await attestKyc(adminPublicKey, user.public_key, userId, idType);
+    } catch (attestErr) {
+      // Log but don't block the approval
+      console.error("On-chain attestation failed:", attestErr.message);
+    }
+
+    await db.query(
+      `UPDATE users SET kyc_status = 'verified', updated_at = NOW() WHERE id = $1`,
+      [userId]
+    );
+
+    await audit.log(req.user.userId, "kyc_approved", { target_user: userId, tx_hash: txHash });
+
+    res.json({ message: "KYC approved", tx_hash: txHash });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/admin/kyc/:userId/revoke
+ * Revokes KYC in DB and on-chain.
+ */
+async function revokeKYC(req, res, next) {
+  try {
+    const { userId } = req.params;
+
+    const userResult = await db.query(
+      `SELECT u.id, u.kyc_status, w.public_key
+       FROM users u JOIN wallets w ON w.user_id = u.id
+       WHERE u.id = $1`,
+      [userId]
+    );
+    if (!userResult.rows[0]) return res.status(404).json({ error: "User not found" });
+
+    const user = userResult.rows[0];
+    if (user.kyc_status !== "verified") {
+      return res.status(400).json({ error: "User is not currently verified" });
+    }
+
+    const adminWallet = await db.query(
+      "SELECT public_key FROM wallets WHERE user_id = $1",
+      [req.user.userId]
+    );
+    const adminPublicKey = adminWallet.rows[0]?.public_key;
+
+    let txHash = null;
+    try {
+      txHash = await revokeKyc(adminPublicKey, user.public_key);
+    } catch (revokeErr) {
+      console.error("On-chain revocation failed:", revokeErr.message);
+    }
+
+    await db.query(
+      `UPDATE users SET kyc_status = 'unverified', updated_at = NOW() WHERE id = $1`,
+      [userId]
+    );
+
+    await audit.log(req.user.userId, "kyc_revoked", { target_user: userId, tx_hash: txHash });
+
+    res.json({ message: "KYC revoked", tx_hash: txHash });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC };
+
+const { getAccountFlags, setAccountFlags } = require('../services/stellar');
+
+/**
+ * POST /api/admin/wallet/:address/set-flags
+ * Admin-only: set or clear Stellar authorization flags on any account.
+ * Body: { set_flags?: number, clear_flags?: number }
+ *
+ * Flag bitmask values (from StellarSdk):
+ *   AUTH_REQUIRED_FLAG       = 1
+ *   AUTH_REVOCABLE_FLAG      = 2
+ *   AUTH_IMMUTABLE_FLAG      = 4
+ *   AUTH_CLAWBACK_ENABLED_FLAG = 8
+ */
+async function setWalletFlags(req, res, next) {
+  try {
+    const { address } = req.params;
+    const { set_flags, clear_flags } = req.body;
+
+    if (set_flags === undefined && clear_flags === undefined) {
+      return res.status(400).json({ error: 'Provide set_flags and/or clear_flags' });
+    }
+
+    // The admin must have an issuer wallet configured to sign the setOptions tx
+    const issuerPublicKey = process.env.ISSUER_PUBLIC_KEY;
+    const encryptedIssuerSecretKey = process.env.ISSUER_ENCRYPTED_SECRET_KEY;
+
+    if (!issuerPublicKey || !encryptedIssuerSecretKey) {
+      return res.status(500).json({ error: 'Issuer credentials not configured' });
+    }
+
+    const { transactionHash } = await setAccountFlags({
+      publicKey: address,
+      encryptedSecretKey: encryptedIssuerSecretKey,
+      setFlags: set_flags,
+      clearFlags: clear_flags,
+    });
+
+    await audit.log(req.user.userId, 'admin_set_flags', req.ip, req.headers['user-agent'], {
+      address,
+      set_flags,
+      clear_flags,
+      transaction_hash: transactionHash,
+    });
+
+    const updatedFlags = await getAccountFlags(address);
+
+    res.json({
+      message: 'Account flags updated',
+      transaction_hash: transactionHash,
+      flags: updatedFlags,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC, setWalletFlags };

@@ -1,37 +1,38 @@
 import React, { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
-import { Eye, EyeOff, ArrowLeft } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeft, ChevronDown, ChevronUp } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import PINSetupModal from '../components/PINSetupModal';
-
 export default function Register() {
   const { register } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { t } = useTranslation();
   const [form, setForm] = useState({ full_name: '', email: '', password: '', phone: '' });
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showPINSetup, setShowPINSetup] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [secretKey, setSecretKey] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
     try {
-      await register(form);
+      const payload = { ...form };
+      if (showImport && secretKey) payload.secret_key = secretKey;
+      const refCode = searchParams.get('ref');
+      if (refCode) payload.referral_code = refCode;
+      await register(payload);
       toast.success(t('register.success'));
-      // Show PIN setup modal instead of immediately navigating
       setShowPINSetup(true);
+      navigate('/login');
     } catch (err) {
       toast.error(err.response?.data?.error || t('register.error'));
     } finally {
       setLoading(false);
     }
-  };
-
-  const handlePINSetupComplete = () => {
-    navigate('/dashboard');
   };
 
   return (
@@ -103,6 +104,32 @@ export default function Register() {
           >
             {loading ? t('register.submitting') : t('register.submit')}
           </button>
+
+          {/* Import existing wallet */}
+          <div className="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
+            <button
+              type="button"
+              onClick={() => { setShowImport(v => !v); setSecretKey(''); }}
+              className="w-full flex items-center justify-between px-4 py-3 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+            >
+              <span>Already have a Stellar wallet? Import it</span>
+              {showImport ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            </button>
+            {showImport && (
+              <div className="px-4 pb-4 space-y-2 bg-gray-50 dark:bg-gray-800/50">
+                <p className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/30 rounded-lg p-2">
+                  ⚠ Your secret key will be encrypted and stored securely. Never share it with anyone.
+                </p>
+                <input
+                  type="password"
+                  placeholder="Stellar secret key (starts with S…)"
+                  value={secretKey}
+                  onChange={e => setSecretKey(e.target.value)}
+                  className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-white placeholder-gray-400 font-mono text-sm focus:outline-none focus:border-primary-500 transition-colors"
+                />
+              </div>
+            )}
+          </div>
         </form>
 
         <p className="text-center text-gray-500 mt-6 text-sm">
@@ -110,13 +137,6 @@ export default function Register() {
           <Link to="/login" className="text-primary-500 hover:underline">{t('register.sign_in')}</Link>
         </p>
       </div>
-
-      {/* PIN Setup Modal */}
-      <PINSetupModal
-        isOpen={showPINSetup}
-        onClose={() => setShowPINSetup(false)}
-        onSuccess={handlePINSetupComplete}
-      />
     </div>
   );
 }
