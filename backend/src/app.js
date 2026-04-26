@@ -11,6 +11,8 @@ const paymentRoutes = require('./routes/payments');
 const kycRoutes = require('./routes/ kyc');
 const adminRoutes = require('./routes/admin');
 const webhookRoutes = require('./routes/webhooks');
+const toolsRoutes = require('./routes/tools');
+const assetsRoutes = require('./routes/assets');
 
 const logger = require('./utils/logger');
 
@@ -54,6 +56,8 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/dev', toolsRoutes);
+app.use('/api/assets', assetsRoutes);
 
 app.get('/health', (req, res) =>
   res.json({ status: 'ok', network: process.env.STELLAR_NETWORK || 'testnet' })

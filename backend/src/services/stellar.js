@@ -160,4 +160,99 @@ async function getTransactions(publicKey, limit = 20) {
   }
 }
 
-module.exports = { createWallet, getBalance, sendPayment, getTransactions, decryptPrivateKey };
+// Issue AFRI asset to a recipient
+async function issueAsset(recipientPublicKey, amount) {
+  const issuerSecret = decryptPrivateKey(process.env.AFRI_ISSUER_SECRET);
+  const distributionSecret = decryptPrivateKey(process.env.AFRI_DISTRIBUTION_SECRET);
+  
+  const distributionKeypair = StellarSdk.Keypair.fromSecret(distributionSecret);
+  const distributionAccount = await server.loadAccount(distributionKeypair.publicKey());
+
+  const afriAsset = new StellarSdk.Asset('AFRI', process.env.AFRI_ISSUER_PUBLIC);
+
+  const transaction = new StellarSdk.TransactionBuilder(distributionAccount, {
+    fee: await server.fetchBaseFee(),
+    networkPassphrase
+  })
+    .addOperation(StellarSdk.Operation.payment({
+      destination: recipientPublicKey,
+      asset: afriAsset,
+      amount: String(amount)
+    }))
+    .setTimeout(30)
+    .build();
+
+  transaction.sign(distributionKeypair);
+
+  const result = await server.submitTransaction(transaction);
+  return {
+    transactionHash: result.hash,
+    ledger: result.ledger
+  };
+}
+
+// Get AFRI asset information
+async function getAssetInfo() {
+  try {
+    const issuerPublicKey = process.env.AFRI_ISSUER_PUBLIC;
+    const issuerAccount = await server.loadAccount(issuerPublicKey);
+    
+    // Get asset holders and supply from Horizon
+    const assetResponse = await server.assets()
+      .forCode('AFRI')
+      .forIssuer(issuerPublicKey)
+      .call();
+
+    const asset = assetResponse.records[0] || {};
+
+    return {
+      code: 'AFRI',
+      issuer: issuerPublicKey,
+      supply: asset.amount || '0',
+      holders: asset.num_accounts || 0,
+      description: 'AfriPay Token - Loyalty rewards and governance token for the AfriPay platform',
+      decimals: 7
+    };
+  } catch (err) {
+    logger.error('Error fetching AFRI asset info', { error: err.message });
+    return {
+      code: 'AFRI',
+      issuer: process.env.AFRI_ISSUER_PUBLIC,
+      supply: '0',
+      holders: 0,
+      description: 'AfriPay Token - Loyalty rewards and governance token for the AfriPay platform',
+      decimals: 7
+    };
+  }
+}
+
+// Get Stellar network statistics
+async function getStellarStats() {
+  try {
+    const ledgerResponse = await server.ledgers().order('desc').limit(1).call();
+    const ledger = ledgerResponse.records[0];
+
+    return {
+      latestLedger: ledger.sequence,
+      baseFee: ledger.base_fee_in_stroops,
+      maxFee: ledger.max_tx_set_size,
+      transactionCount: ledger.successful_transaction_count,
+      operationCount: ledger.operation_count,
+      closedAt: ledger.closed_at
+    };
+  } catch (err) {
+    logger.error('Error fetching Stellar stats', { error: err.message });
+    throw err;
+  }
+}
+
+module.exports = { 
+  createWallet, 
+  getBalance, 
+  sendPayment, 
+  getTransactions, 
+  decryptPrivateKey,
+  issueAsset,
+  getAssetInfo,
+  getStellarStats
+};

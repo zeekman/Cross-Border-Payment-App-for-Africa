@@ -52,10 +52,14 @@ app.use((err, req, res, next) => {
 require('dotenv').config();
 const validateEnv = require('./utils/validateEnv');
 const logger = require('./utils/logger');
+const { startScheduler } = require('./jobs/scheduler');
 
 validateEnv();
 
 const app = require('./app');
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => logger.info(`Server running on port ${PORT}`, { port: PORT }));
+app.listen(PORT, () => {
+  logger.info(`Server running on port ${PORT}`, { port: PORT });
+  startScheduler();
+});

@@ -1,0 +1,11 @@
+NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
+ACCOUNTS=["AFRI_ISSUER_PUBLIC_KEY_PLACEHOLDER"]
+
+[[CURRENCIES]]
+code="AFRI"
+issuer="AFRI_ISSUER_PUBLIC_KEY_PLACEHOLDER"
+display_decimals=7
+name="AfriPay Token"
+desc="AfriPay Token (AFRI) is the native loyalty rewards and governance token for the AfriPay cross-border payment platform. Used for rewards, governance, and as a stablecoin backed by local African currencies."
+conditions="AfriPay tokens are issued by AfriPay and can be used for platform rewards, governance voting, and as a medium of exchange within the AfriPay ecosystem."
+image="https://afripay.com/assets/afri-token-logo.png"
