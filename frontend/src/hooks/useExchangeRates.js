@@ -5,19 +5,18 @@ import {
   convertFromXLM as convertFromXLMUtil,
 } from '../utils/currency';
 
-const COINGECKO_URL =
-  'https://api.coingecko.com/api/v3/simple/price?ids=stellar&vs_currencies=usd,ngn,ghs,kes';
+const PRICES_URL = '/api/prices/xlm';
 const TTL_MS = 60_000;
 const LS_KEY = 'afripay_xlm_fiat_rates_v1';
 
-function mapCoingeckoPayload(data) {
-  const s = data?.stellar;
-  if (!s || typeof s.usd !== 'number') return null;
+function mapPricesPayload(data) {
+  const r = data?.rates;
+  if (!r || typeof r.USD !== 'number') return null;
   return {
-    USD: s.usd,
-    NGN: typeof s.ngn === 'number' ? s.ngn : FALLBACK_XLM_FIAT_RATES.NGN,
-    GHS: typeof s.ghs === 'number' ? s.ghs : FALLBACK_XLM_FIAT_RATES.GHS,
-    KES: typeof s.kes === 'number' ? s.kes : FALLBACK_XLM_FIAT_RATES.KES,
+    USD: r.USD,
+    NGN: typeof r.NGN === 'number' ? r.NGN : FALLBACK_XLM_FIAT_RATES.NGN,
+    GHS: typeof r.GHS === 'number' ? r.GHS : FALLBACK_XLM_FIAT_RATES.GHS,
+    KES: typeof r.KES === 'number' ? r.KES : FALLBACK_XLM_FIAT_RATES.KES,
   };
 }
 
@@ -26,13 +25,13 @@ function readStoredRates() {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return null;
     const { rates: r, updatedAt } = JSON.parse(raw);
-    if (!r || typeof r.usd !== 'number') return null;
+    if (!r || typeof r.USD !== 'number') return null;
     return {
       rates: {
-        USD: r.usd,
-        NGN: r.ngn ?? FALLBACK_XLM_FIAT_RATES.NGN,
-        GHS: r.ghs ?? FALLBACK_XLM_FIAT_RATES.GHS,
-        KES: r.kes ?? FALLBACK_XLM_FIAT_RATES.KES,
+        USD: r.USD,
+        NGN: r.NGN ?? FALLBACK_XLM_FIAT_RATES.NGN,
+        GHS: r.GHS ?? FALLBACK_XLM_FIAT_RATES.GHS,
+        KES: r.KES ?? FALLBACK_XLM_FIAT_RATES.KES,
       },
       updatedAt: typeof updatedAt === 'number' ? updatedAt : 0,
     };
@@ -45,15 +44,7 @@ function persistRates(rates) {
   try {
     localStorage.setItem(
       LS_KEY,
-      JSON.stringify({
-        rates: {
-          usd: rates.USD,
-          ngn: rates.NGN,
-          ghs: rates.GHS,
-          kes: rates.KES,
-        },
-        updatedAt: Date.now(),
-      })
+      JSON.stringify({ rates, updatedAt: Date.now() })
     );
   } catch {
     /* ignore quota / private mode */
@@ -90,10 +81,10 @@ export function useExchangeRates() {
     }
 
     try {
-      const res = await fetch(COINGECKO_URL);
+      const res = await fetch(PRICES_URL);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const mapped = mapCoingeckoPayload(data);
+      const mapped = mapPricesPayload(data);
       if (!mapped) throw new Error('Invalid price payload');
 
       lastGoodRef.current = mapped;
