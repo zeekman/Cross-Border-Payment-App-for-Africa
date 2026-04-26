@@ -515,6 +515,25 @@ async function clearInflationDestinationHandler(req, res, next) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// POST /wallet/import-history
+// Fetches complete payment history from Horizon and stores it idempotently.
+// ---------------------------------------------------------------------------
+const { importWalletHistory } = require('../services/horizonService');
+
+async function importTransactionHistory(req, res, next) {
+  try {
+    const walletId = req.body.wallet_id || null;
+    const wallet = await resolveWallet(req.user.userId, walletId);
+    if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
+
+    const imported = await importWalletHistory(wallet.id, wallet.public_key);
+    res.json({ message: 'Import complete', imported });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getWallet,
   listWallets,
@@ -536,4 +555,5 @@ module.exports = {
   setEntry,
   deleteEntry,
   getWalletFlags,
+  importTransactionHistory,
 };

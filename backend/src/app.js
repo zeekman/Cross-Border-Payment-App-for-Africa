@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
+const Sentry = require('@sentry/node');
 
 const requestId = require('./middleware/requestId');
 const metricsMiddleware = require('./middleware/metricsMiddleware');
@@ -41,6 +42,7 @@ const { runHealthChecks } = require('./services/health');
 
 const app = express();
 
+app.use(Sentry.Handlers.requestHandler());
 app.use(requestId);
 app.use((req, res, next) => {
   req.logger = logger.child({ requestId: req.requestId });
@@ -184,6 +186,8 @@ app.get('/metrics', async (req, res) => {
   res.set('Content-Type', registry.contentType);
   res.end(await registry.metrics());
 });
+
+app.use(Sentry.Handlers.errorHandler());
 
 app.use((err, req, res, next) => {
   req.logger.error(err.message, { stack: err.stack, status: err.status });

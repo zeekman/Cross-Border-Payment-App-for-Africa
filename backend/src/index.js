@@ -1,5 +1,27 @@
 require('dotenv').config();
 
+const Sentry = require('@sentry/node');
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV,
+  enabled: !!process.env.SENTRY_DSN,
+  beforeSend(event) {
+    // Scrub sensitive fields from request body
+    if (event.request?.data) {
+      const scrubFields = ['password', 'secret', 'privateKey', 'token', 'pin', 'encryptedSecretKey'];
+      scrubFields.forEach((f) => {
+        if (event.request.data[f]) event.request.data[f] = '[Filtered]';
+      });
+    }
+    // Remove authorization header
+    if (event.request?.headers?.authorization) {
+      event.request.headers.authorization = '[Filtered]';
+    }
+    return event;
+  },
+});
+
 const validateEnv = require('./utils/validateEnv');
 const logger = require('./utils/logger');
 
@@ -103,5 +125,12 @@ async function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+process.on('unhandledRejection', (reason) => {
+  Sentry.captureException(reason);
+});
+process.on('uncaughtException', (error) => {
+  Sentry.captureException(error);
+});
 
 module.exports = { app, server, shutdown };

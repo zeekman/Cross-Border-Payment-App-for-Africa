@@ -40,6 +40,21 @@ export default function Profile() {
   const [closePassword, setClosePassword] = useState('');
   const [closeLoading, setCloseLoading] = useState(false);
 
+  // Horizon history import state (issue #130)
+  const [importingHistory, setImportingHistory] = useState(false);
+
+  const handleImportHistory = async () => {
+    setImportingHistory(true);
+    try {
+      const res = await api.post('/wallet/import-history');
+      toast.success(`Import complete — ${res.data.imported} new transactions added`);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Import failed');
+    } finally {
+      setImportingHistory(false);
+    }
+  };
+
   // Security section state (issues #141, #142)
   const [signers, setSigners] = useState(null);
   const [signersLoading, setSignersLoading] = useState(false);
@@ -682,6 +697,23 @@ export default function Profile() {
         {signers === null && !signersLoading && (
           <p className="text-gray-600 text-xs text-center py-2">Click "Load" to fetch live signer data from Horizon.</p>
         )}
+      </div>
+
+      {/* Import Horizon History */}
+      <div className="bg-gray-900 rounded-2xl p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-semibold text-white">Import Transaction History</h3>
+            <p className="text-xs text-gray-400 mt-0.5">Fetch your complete Stellar history from Horizon</p>
+          </div>
+          <button
+            onClick={handleImportHistory}
+            disabled={importingHistory}
+            className="text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg transition-colors"
+          >
+            {importingHistory ? 'Importing…' : 'Import History'}
+          </button>
+        </div>
       </div>
 
       {/* Close Account */}

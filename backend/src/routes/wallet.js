@@ -23,6 +23,7 @@ const {
   setEntry,
   deleteEntry,
   getWalletFlags,
+  importTransactionHistory,
 } = require('../controllers/walletController');
 const { getContacts, addContact, deleteContact } = require('../controllers/contactsController');
 const { getStatus } = require('../services/horizonRateLimit');
@@ -176,5 +177,13 @@ router.delete('/data-entry/:key', deleteEntry);
 
 // Account authorization flags
 router.get('/flags', getWalletFlags);
+
+// Horizon history import
+router.post(
+  '/import-history',
+  [body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID')],
+  validate,
+  importTransactionHistory,
+);
 
 module.exports = router;
