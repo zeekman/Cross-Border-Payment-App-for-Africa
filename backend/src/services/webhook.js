@@ -1,9 +1,47 @@
 const crypto = require('crypto');
 const https = require('https');
+const dns = require('dns').promises;
 const db = require('../db');
 const logger = require('../utils/logger');
 
 const MAX_ATTEMPTS = 3;
+
+// Reuse the same private-IP check as the controller
+const BLOCKED_CIDRS = [
+  [0x0a000000, 0xff000000],
+  [0xac100000, 0xfff00000],
+  [0xc0a80000, 0xffff0000],
+  [0x7f000000, 0xff000000],
+  [0xa9fe0000, 0xffff0000],
+  [0x64400000, 0xffc00000],
+  [0x00000000, 0xff000000],
+  [0xe0000000, 0xf0000000],
+  [0xf0000000, 0xf0000000],
+];
+
+function ipToInt(ip) {
+  return ip.split('.').reduce((acc, o) => (acc << 8) + parseInt(o, 10), 0) >>> 0;
+}
+
+function isPrivateIp(ip) {
+  if (ip === '::1' || ip.startsWith('fe80') || ip.startsWith('fc') || ip.startsWith('fd')) return true;
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return false;
+  const n = ipToInt(ip);
+  return BLOCKED_CIDRS.some(([net, mask]) => (n & mask) === (net & mask));
+}
+
+async function isPublicHttpsUrl(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  const hostname = parsed.hostname;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) && isPrivateIp(hostname)) return false;
+  try {
+    const { address } = await dns.lookup(hostname);
+    if (isPrivateIp(address)) return false;
+  } catch { return false; }
+  return true;
+}
 
 function sign(secret, payload) {
   return crypto.createHmac('sha256', secret).update(payload).digest('hex');
@@ -34,6 +72,11 @@ function httpsPost(url, body, signature) {
 }
 
 async function deliverWithRetry(url, secret, payload, attempt = 0) {
+  // Re-validate URL before each delivery to catch DNS rebinding / stale records
+  if (!await isPublicHttpsUrl(url)) {
+    logger.error('Webhook delivery blocked: URL failed SSRF validation', { url });
+    return;
+  }
   const body = JSON.stringify(payload);
   const signature = sign(secret, body);
   try {
