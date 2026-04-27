@@ -15,6 +15,7 @@ const {
 } = require("../services/stellar");
 const webhook = require("../services/webhook");
 const cache = require("../utils/cache");
+const { checkVelocity, checkDailyLimit } = require("../services/fraudDetection");
 const { checkFraud, logFraudBlock } = require("../services/fraudDetection");
 const { parseHistoryFrom, parseHistoryTo, normalizeAsset } = require("../utils/historyQuery");
 const { isMemoRequired } = require("../services/memoRequired");
@@ -242,6 +243,15 @@ async function send(req, res, next) {
       });
     }
 
+    // Fraud protection — velocity and daily limit (single authoritative check)
+    const [isSuspicious, limitExceeded] = await Promise.all([
+      checkVelocity(public_key),
+      checkDailyLimit(public_key, amount, asset),
+    ]);
+    if (isSuspicious) {
+      return res
+        .status(429)
+        .json({ error: "Transaction limit reached. Please wait before sending again." });
     // Fraud protection
     const fraudCheck = await checkFraud(public_key, amount, asset);
     if (fraudCheck.blocked) {
@@ -255,6 +265,11 @@ async function send(req, res, next) {
         error: "This address requires a memo to route your payment correctly. Please include a memo.",
         code: "MEMO_REQUIRED",
       });
+    }
+    if (limitExceeded) {
+      return res
+        .status(429)
+        .json({ error: "Daily send limit reached. Try again later.", code: "DAILY_LIMIT_EXCEEDED" });
     }
 
     // Broadcast to Stellar
@@ -273,19 +288,16 @@ async function send(req, res, next) {
     const ledger_close_time = await fetchLedgerCloseTime(ledger);
 
     // Save to DB
-<<<<<<< fix/admin-stats-fee-amount
     const feeAmount = calculateFee(amount);
     await db.query(
       `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fee_amount)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'completed',$8)`,
       [txId, public_key, recipient_address, amount, asset, memo || null, transactionHash, feeAmount],
-=======
     const txStatus = type === "claimable_balance" ? "pending_claim" : "confirming";
     await db.query(
       `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time],
->>>>>>> main
     );
 
     // Start async confirmation polling for non-claimable-balance transactions
