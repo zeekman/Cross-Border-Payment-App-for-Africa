@@ -32,6 +32,7 @@ const loyaltyRoutes = require('./routes/loyalty');
 const disputeRoutes = require('./routes/disputes');
 const pricesRoutes = require('./routes/prices');
 const channelsRoutes = require('./routes/channels');
+const contractsRoutes = require('./routes/contracts');
 const ipAllowlist = require('./middleware/ipAllowlist');
 
 const swaggerJsdoc = require('swagger-jsdoc');
@@ -98,6 +99,7 @@ app.use('/api/kyc', kycRoutes);
 app.use('/api/admin', ipAllowlist, adminRoutes);
 app.use('/api/prices', pricesRoutes);
 app.use('/api/channels', channelsRoutes);
+app.use('/api/contracts', contractsRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/.well-known/stellar', sep10Routes);

@@ -1020,6 +1020,14 @@ async function exportCSV(req, res, next) {
 
     const { public_key } = walletResult.rows[0];
 
+    // Validate status parameter against allowed enum values
+    const ALLOWED_STATUSES = ['pending', 'completed', 'cancelled', 'failed'];
+    if (req.query.status && !ALLOWED_STATUSES.includes(req.query.status)) {
+      return res.status(400).json({ 
+        error: `Invalid status value. Must be one of: ${ALLOWED_STATUSES.join(', ')}` 
+      });
+    }
+
     const params = [public_key];
     let filters = "";
     if (req.query.from) {
@@ -1034,6 +1042,8 @@ async function exportCSV(req, res, next) {
       params.push(req.query.status);
       filters += ` AND status = $${params.length}`;
     }
+    // Direction filter: uses the public_key ($1) parameter to filter sender_wallet or recipient_wallet.
+    // This maintains the existing parameterization without reusing or conflicting with other $N parameters.
     if (req.query.direction === "sent") {
       filters += " AND sender_wallet = $1";
     } else if (req.query.direction === "received") {

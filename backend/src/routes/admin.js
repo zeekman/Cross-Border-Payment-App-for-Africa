@@ -3,8 +3,20 @@ const { body, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const isAdmin = require('../middleware/isAdmin');
-const { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC } = require('../controllers/adminController');
-const { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC, setWalletFlags } = require('../controllers/adminController');
+const {
+  getStats,
+  getUsers,
+  getTransactions,
+  clawback,
+  approveKYC,
+  revokeKYC,
+  setWalletFlags,
+  announceContractUpgrade,
+  executeContractUpgrade,
+  getContractUpgradeStatus,
+  getContractEventsEndpoint,
+  indexContractEventsEndpoint
+} = require('../controllers/adminController');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -86,6 +98,48 @@ router.post(
   ],
   validate,
   setWalletFlags,
+);
+
+/**
+ * Contract Upgrade Routes (Issues #148)
+ */
+router.post(
+  '/contracts/:contractId/upgrade',
+  [
+    body('wasmHash')
+      .notEmpty().withMessage('wasmHash is required')
+      .matches(/^[a-f0-9]{64}$/).withMessage('Invalid WASM hash format (must be valid SHA256)'),
+    body('description').optional().trim().isLength({ max: 1000 }),
+  ],
+  validate,
+  announceContractUpgrade
+);
+
+router.post(
+  '/contracts/:contractId/upgrade/execute',
+  [
+    body('wasmHash')
+      .notEmpty().withMessage('wasmHash is required')
+      .matches(/^[a-f0-9]{64}$/).withMessage('Invalid WASM hash format'),
+  ],
+  validate,
+  executeContractUpgrade
+);
+
+router.get('/contracts/:contractId/upgrade/status', getContractUpgradeStatus);
+
+/**
+ * Contract Events Routes (Issue #147)
+ */
+router.get('/contracts/:contractId/events', getContractEventsEndpoint);
+
+router.post(
+  '/contracts/:contractId/events/index',
+  [
+    body('contractName').optional().trim().isLength({ max: 100 }),
+  ],
+  validate,
+  indexContractEventsEndpoint
 );
 
 module.exports = router;
