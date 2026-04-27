@@ -167,17 +167,33 @@ const specs = swaggerJsdoc(swaggerOptions);
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs));
 
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     summary: Public liveness probe
+ *     description: Returns only the overall status. Use /api/admin/health for full diagnostics.
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   enum: [ok, degraded]
+ *       503:
+ *         description: Service is degraded
+ */
 app.get('/health', async (req, res) => {
   try {
-    const body = await runHealthChecks();
-    res.status(body.status === 'ok' ? 200 : 503).json(body);
+    const { status } = await runHealthChecks();
+    res.status(status === 'ok' ? 200 : 503).json({ status });
   } catch {
-    res.status(503).json({
-      status: 'degraded',
-      db: 'down',
-      stellar: 'down',
-      network: process.env.STELLAR_NETWORK || 'testnet',
-    });
+    res.status(503).json({ status: 'degraded' });
   }
 });
 
