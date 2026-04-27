@@ -807,11 +807,13 @@ async function sendPath(req, res, next) {
       transaction: { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, recipient: recipient_address },
     });
   } catch (err) {
-    await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'failed',$8,$9,$10)`,
-      [txId, public_key || "", recipient_address || "", source_amount || "0", source_asset || "XLM", null, null, req.requestId, false, null],
-    ).catch(() => {});
+    if (public_key) {
+      await db.query(
+        `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'failed',$8,$9,$10)`,
+        [txId, public_key, recipient_address || "", source_amount || "0", source_asset || "XLM", null, null, req.requestId, false, null],
+      ).catch(() => {});
+    }
 
     if (err.status === 400 || err.status === 500) {
       return res.status(err.status).json({ error: err.message });
@@ -946,11 +948,13 @@ async function sendStrictReceivePath(req, res, next) {
       transaction: { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, recipient: recipient_address, status: 'confirming' },
     });
   } catch (err) {
-    await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'failed',$8,$9,$10)`,
-      [txId, public_key || "", recipient_address || "", "0", source_asset || "XLM", null, null, req.requestId, false, null],
-    ).catch(() => {});
+    if (public_key) {
+      await db.query(
+        `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'failed',$8,$9,$10)`,
+        [txId, public_key, recipient_address || "", "0", source_asset || "XLM", null, null, req.requestId, false, null],
+      ).catch(() => {});
+    }
 
     if (err.status === 400 || err.status === 500) {
       return res.status(err.status).json({ error: err.message });
