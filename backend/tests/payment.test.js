@@ -34,10 +34,11 @@ test('returns 400 when recipient_address matches sender public_key', async () =>
 test('does not block payment when recipient differs from sender', async () => {
   const { sendPayment } = require('../src/services/stellar');
   sendPayment.mockResolvedValue({ transactionHash: 'abc123', ledger: 1 });
-  // second db.query call (fraudCheck) returns count 0; third call (INSERT) resolves
+  // wallet → velocity (count=0) → daily-limit (total=0) → INSERT
   db.query
     .mockResolvedValueOnce({ rows: [{ public_key: WALLET, encrypted_secret_key: 'enc' }] })
     .mockResolvedValueOnce({ rows: [{ count: '0' }] })
+    .mockResolvedValueOnce({ rows: [{ total: '0' }] })
     .mockResolvedValueOnce({ rows: [] });
 
   const req = {

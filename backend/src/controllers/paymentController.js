@@ -3,6 +3,7 @@ const db = require("../db");
 const { sendPayment } = require("../services/stellar");
 const webhook = require("../services/webhook");
 const cache = require("../utils/cache");
+const { checkVelocity, checkDailyLimit } = require("../services/fraudDetection");
 
 // Configurable KYC transaction threshold in USD equivalent
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
@@ -21,16 +22,6 @@ function estimateUSDValue(amount, asset) {
   if (asset === "USD" || asset === "USDC") return parseFloat(amount);
   if (asset === "XLM") return parseFloat(amount) * XLM_USD_RATE;
   return 0; // unknown assets default to 0 — do not block
-}
-
-// Basic fraud check: block if >5 transactions in last 10 minutes
-async function fraudCheck(walletAddress) {
-  const result = await db.query(
-    `SELECT COUNT(*) FROM transactions
-     WHERE sender_wallet = $1 AND created_at > NOW() - INTERVAL '10 minutes'`,
-    [walletAddress],
-  );
-  return parseInt(result.rows[0].count) >= 5;
 }
 
 async function send(req, res, next) {
@@ -74,12 +65,20 @@ async function send(req, res, next) {
       return res.status(400).json({ error: 'Cannot send payment to your own wallet' });
     }
 
-    // Fraud protection
-    const isSuspicious = await fraudCheck(public_key);
+    // Fraud protection — velocity and daily limit (single authoritative check)
+    const [isSuspicious, limitExceeded] = await Promise.all([
+      checkVelocity(public_key),
+      checkDailyLimit(public_key, amount, asset),
+    ]);
     if (isSuspicious) {
       return res
         .status(429)
         .json({ error: "Transaction limit reached. Please wait before sending again." });
+    }
+    if (limitExceeded) {
+      return res
+        .status(429)
+        .json({ error: "Daily send limit reached. Try again later.", code: "DAILY_LIMIT_EXCEEDED" });
     }
 
     // Broadcast to Stellar
