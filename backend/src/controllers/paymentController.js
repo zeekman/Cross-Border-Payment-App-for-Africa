@@ -7,6 +7,13 @@ const cache = require("../utils/cache");
 // Configurable KYC transaction threshold in USD equivalent
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
 
+// Platform fee in basis points (e.g. 50 = 0.5%)
+const FEE_BPS = parseInt(process.env.FEE_BPS || "50", 10);
+
+function calculateFee(amount) {
+  return parseFloat((parseFloat(amount) * FEE_BPS / 10000).toFixed(7));
+}
+
 // Approximate XLM/USD rate — in production replace with a live price feed
 const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
 
@@ -86,10 +93,11 @@ async function send(req, res, next) {
     });
 
     // Save to DB
+    const feeAmount = calculateFee(amount);
     await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'completed')`,
-      [txId, public_key, recipient_address, amount, asset, memo || null, transactionHash],
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fee_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'completed',$8)`,
+      [txId, public_key, recipient_address, amount, asset, memo || null, transactionHash, feeAmount],
     );
 
     // Invalidate sender's cached balance — it changed after this payment
