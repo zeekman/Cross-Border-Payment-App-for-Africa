@@ -202,6 +202,7 @@ export default function Dashboard() {
 
   const xlmBalance = wallet?.balances?.find((b) => b.asset === 'XLM')?.balance || '0';
   const xlmAvailable = wallet?.balances?.find((b) => b.asset === 'XLM')?.available_balance || null;
+  const accountExists = wallet?.account_exists !== false; // treat undefined (cached) as true
   const displayBalance =
     selectedCurrency === 'XLM' ? xlmBalance : convertFromXLM(xlmBalance, selectedCurrency);
 
@@ -236,13 +237,28 @@ export default function Dashboard() {
             <FlaskConical size={15} />
             <span>Testnet mode — funds have no real value</span>
           </div>
-          <button
-            onClick={fundWallet}
-            disabled={funding}
-            className="text-xs bg-yellow-500 hover:bg-yellow-600 disabled:opacity-50 text-black font-semibold px-3 py-1.5 rounded-lg transition-colors"
-          >
-            {funding ? 'Funding…' : 'Fund wallet'}
-          </button>
+          {!accountExists && (
+            <button
+              onClick={fundWallet}
+              disabled={funding}
+              className="text-xs bg-yellow-500 hover:bg-yellow-600 disabled:opacity-50 text-black font-semibold px-3 py-1.5 rounded-lg transition-colors"
+            >
+              {funding ? 'Funding…' : 'Fund wallet'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Unfunded account prompt */}
+      {!accountExists && (
+        <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/30 rounded-xl px-4 py-3">
+          <Download size={18} className="text-blue-400 shrink-0" />
+          <div className="flex-1">
+            <p className="text-blue-300 text-sm font-medium">Fund your wallet to get started</p>
+            <p className="text-blue-400/70 text-xs mt-0.5">
+              This account doesn't exist on-chain yet. Send XLM to activate it.
+            </p>
+          </div>
         </div>
       )}
 

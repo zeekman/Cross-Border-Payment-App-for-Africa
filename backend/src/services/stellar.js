@@ -157,21 +157,24 @@ async function getBalance(publicKey) {
     const numSubentries = account.subentry_count || 0;
     const minBalance = (2 + numSubentries) * BASE_RESERVE;
 
-    return account.balances.map(b => {
-      if (b.asset_type === 'native') {
-        const total = parseFloat(b.balance);
-        const available = Math.max(0, total - minBalance);
-        return {
-          asset: 'XLM',
-          balance: b.balance,
-          available_balance: available.toFixed(7),
-          min_balance: minBalance.toFixed(7),
-        };
-      }
-      return { asset: b.asset_code, balance: b.balance };
-    });
+    return {
+      account_exists: true,
+      balances: account.balances.map(b => {
+        if (b.asset_type === 'native') {
+          const total = parseFloat(b.balance);
+          const available = Math.max(0, total - minBalance);
+          return {
+            asset: 'XLM',
+            balance: b.balance,
+            available_balance: available.toFixed(7),
+            min_balance: minBalance.toFixed(7),
+          };
+        }
+        return { asset: b.asset_code, balance: b.balance };
+      }),
+    };
   } catch (e) {
-    if (e.response?.status === 404) return [];
+    if (e.response?.status === 404) return { account_exists: false, balances: [] };
     throw e;
   }
 }
