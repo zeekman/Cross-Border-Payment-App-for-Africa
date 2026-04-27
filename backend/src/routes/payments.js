@@ -131,35 +131,72 @@ router.post('/send',
   send,
 );
 
+/**
+ * @swagger
+ * /api/payments/history:
+ *   get:
+ *     summary: Get transaction history
+ *     tags: [Payments]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: direction
+ *         schema:
+ *           type: string
+ *           enum: [sent, received, all]
+ *           default: all
+ *         description: Filter by transaction direction. Translated to a SQL WHERE clause on sender_wallet or recipient_wallet.
+ *       - in: query
+ *         name: from
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Start date (ISO 8601)
+ *       - in: query
+ *         name: to
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: End date (ISO 8601)
+ *       - in: query
+ *         name: asset
+ *         schema:
+ *           type: string
+ *           enum: [XLM, USDC, NGN, GHS, KES]
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *       - in: query
+ *         name: cursor
+ *         schema:
+ *           type: integer
+ *         description: Pagination cursor (last transaction id)
+ *     responses:
+ *       200:
+ *         description: List of transactions
+ *       400:
+ *         description: Invalid query parameters
+ */
 router.get(
   "/history",
   [
-    query("page").optional().isInt({ min: 1 }).withMessage("page must be a positive integer"),
-    query("limit")
-      .optional()
-      .isInt({ min: 1, max: 100 })
-      .withMessage("limit must be between 1 and 100"),
-    query("from")
-      .optional({ values: "falsy" })
-      .trim()
-      .isISO8601()
-      .withMessage("from must be a valid ISO 8601 date"),
-    query("to")
-      .optional({ values: "falsy" })
-      .trim()
-      .isISO8601()
-      .withMessage("to must be a valid ISO 8601 date"),
+    query("limit").optional().isInt({ min: 1, max: 100 }).withMessage("limit must be between 1 and 100"),
+    query("from").optional({ values: "falsy" }).trim().isISO8601().withMessage("from must be a valid ISO 8601 date"),
+    query("to").optional({ values: "falsy" }).trim().isISO8601().withMessage("to must be a valid ISO 8601 date"),
     query("asset")
       .optional({ values: "falsy" })
-    query('page').optional().isInt({ min: 1 }).withMessage('page must be a positive integer'),
-    query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('limit must be between 1 and 100'),
-    query('from').optional({ values: 'falsy' }).trim().isISO8601().withMessage('from must be a valid ISO 8601 date'),
-    query('to').optional({ values: 'falsy' }).trim().isISO8601().withMessage('to must be a valid ISO 8601 date'),
-    query('asset')
-      .optional({ values: 'falsy' })
       .trim()
       .isIn(ALLOWED_HISTORY_ASSETS)
       .withMessage(`asset must be one of: ${ALLOWED_HISTORY_ASSETS.join(", ")}`),
+    query("direction")
+      .optional({ values: "falsy" })
+      .isIn(["sent", "received", "all"])
+      .withMessage("direction must be sent, received, or all"),
   ],
   validate,
   history,

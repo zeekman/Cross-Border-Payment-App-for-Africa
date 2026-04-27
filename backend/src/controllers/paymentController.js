@@ -663,7 +663,17 @@ async function history(req, res, next) {
 
     const { public_key } = walletResult.rows[0];
 
-    const conditions = ["(sender_wallet = $1 OR recipient_wallet = $1)"];
+    const direction = req.query.direction || "all";
+    let directionCondition;
+    if (direction === "sent") {
+      directionCondition = "sender_wallet = $1";
+    } else if (direction === "received") {
+      directionCondition = "recipient_wallet = $1";
+    } else {
+      directionCondition = "(sender_wallet = $1 OR recipient_wallet = $1)";
+    }
+
+    const conditions = [directionCondition];
     const baseParams = [public_key];
 
     if (cursor) {
