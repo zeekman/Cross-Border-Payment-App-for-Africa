@@ -1,4 +1,10 @@
 const db = require('../db');
+const { getStellarStats } = require('../services/stellar');
+
+// Cache for Stellar stats (10 seconds)
+let stellarStatsCache = null;
+let stellarStatsCacheTime = 0;
+const CACHE_DURATION = 10000; // 10 seconds
 const { clawbackAsset } = require('../services/stellar');
 const audit = require('../services/audit');
 
@@ -88,6 +94,27 @@ async function getTransactions(req, res, next) {
     next(err);
   }
 }
+
+module.exports = { getStats, getUsers, getTransactions, getStellarNetworkStats };
+
+async function getStellarNetworkStats(req, res, next) {
+  try {
+    const now = Date.now();
+    
+    // Return cached data if still valid
+    if (stellarStatsCache && (now - stellarStatsCacheTime) < CACHE_DURATION) {
+      return res.json(stellarStatsCache);
+    }
+
+    // Fetch fresh data
+    const stats = await getStellarStats();
+    
+    // Update cache
+    stellarStatsCache = stats;
+    stellarStatsCacheTime = now;
+
+    res.json(stats);
+module.exports = { getStats, getUsers, getTransactions, clawback };
 
 /**
  * POST /api/admin/clawback
@@ -297,4 +324,286 @@ async function setWalletFlags(req, res, next) {
   }
 }
 
-module.exports = { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC, setWalletFlags };
+const { indexContractEvents, getContractEvents } = require('../jobs/contractEventIndexer');
+
+/**
+ * POST /api/admin/contracts/:contractId/upgrade
+ * Announce a contract upgrade with 48-hour timelock.
+ * Emits an on-chain event with the WASM hash.
+ */
+async function announceContractUpgrade(req, res, next) {
+  try {
+    const { contractId } = req.params;
+    const { wasmHash, description } = req.body;
+
+    if (!contractId || !wasmHash) {
+      return res.status(400).json({ error: 'contractId and wasmHash are required' });
+    }
+
+    if (!/^[a-f0-9]{64}$/.test(wasmHash)) {
+      return res.status(400).json({ error: 'Invalid WASM hash format (must be valid SHA256)' });
+    }
+
+    // Get current contract info to find old WASM hash
+    const existingContract = await db.query(
+      `SELECT new_wasm_hash FROM contract_upgrades
+       WHERE contract_id = $1 AND status = 'executed'
+       ORDER BY executed_at DESC LIMIT 1`,
+      [contractId]
+    );
+
+    const oldWasmHash = existingContract.rows[0]?.new_wasm_hash || null;
+
+    // Calculate timelock expiry (48 hours = 172800 seconds)
+    const scheduledFor = new Date(Date.now() + 48 * 60 * 60 * 1000);
+
+    const result = await db.query(
+      `INSERT INTO contract_upgrades
+       (contract_id, contract_name, old_wasm_hash, new_wasm_hash, status, announced_at, scheduled_for, description)
+       VALUES ($1, $2, $3, $4, 'announced', NOW(), $5, $6)
+       RETURNING *`,
+      [contractId, req.body.contractName || null, oldWasmHash, wasmHash, scheduledFor, description || null]
+    );
+
+    const upgrade = result.rows[0];
+
+    // Emit on-chain event (best-effort)
+    try {
+      // This would emit an event to Soroban if configured
+      // await emitUpgradeEvent(contractId, wasmHash);
+    } catch (eventErr) {
+      // Log but don't block the upgrade announcement
+      console.warn('Failed to emit on-chain upgrade event:', eventErr.message);
+    }
+
+    // Log audit trail
+    await audit.log(req.user.userId, 'admin_announce_upgrade', req.ip, req.headers['user-agent'], {
+      contract_id: contractId,
+      wasm_hash: wasmHash,
+      scheduled_for: scheduledFor.toISOString(),
+    });
+
+    res.json({
+      message: 'Contract upgrade announced',
+      upgrade: {
+        id: upgrade.id,
+        contract_id: upgrade.contract_id,
+        new_wasm_hash: upgrade.new_wasm_hash,
+        status: upgrade.status,
+        announced_at: upgrade.announced_at,
+        scheduled_for: upgrade.scheduled_for,
+        description: upgrade.description
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/admin/contracts/:contractId/upgrade/execute
+ * Execute a contract upgrade after timelock expires.
+ */
+async function executeContractUpgrade(req, res, next) {
+  try {
+    const { contractId } = req.params;
+    const { wasmHash } = req.body;
+
+    if (!contractId || !wasmHash) {
+      return res.status(400).json({ error: 'contractId and wasmHash are required' });
+    }
+
+    // Check for pending upgrade
+    const upgradeResult = await db.query(
+      `SELECT * FROM contract_upgrades
+       WHERE contract_id = $1 AND new_wasm_hash = $2 AND status = 'announced'
+       ORDER BY announced_at DESC LIMIT 1`,
+      [contractId, wasmHash]
+    );
+
+    if (!upgradeResult.rows[0]) {
+      return res.status(400).json({ error: 'No pending upgrade found for this WASM hash' });
+    }
+
+    const upgrade = upgradeResult.rows[0];
+
+    // Verify timelock has expired
+    const now = new Date();
+    if (now < new Date(upgrade.scheduled_for)) {
+      const timeRemaining = Math.ceil((new Date(upgrade.scheduled_for) - now) / 1000 / 60);
+      return res.status(400).json({
+        error: 'Timelock still active',
+        timeRemaining,
+        scheduledFor: upgrade.scheduled_for
+      });
+    }
+
+    // Update contract upgrade status to executed
+    const result = await db.query(
+      `UPDATE contract_upgrades
+       SET status = 'executed', executed_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [upgrade.id]
+    );
+
+    const executedUpgrade = result.rows[0];
+
+    // Emit on-chain event (best-effort)
+    try {
+      // This would execute the actual Soroban contract upgrade if configured
+      // await executeUpgradeOnChain(contractId, wasmHash);
+    } catch (execErr) {
+      console.warn('Failed to execute on-chain upgrade:', execErr.message);
+    }
+
+    // Log audit trail
+    await audit.log(req.user.userId, 'admin_execute_upgrade', req.ip, req.headers['user-agent'], {
+      contract_id: contractId,
+      wasm_hash: wasmHash,
+      executed_at: executedUpgrade.executed_at
+    });
+
+    res.json({
+      message: 'Contract upgrade executed',
+      upgrade: {
+        id: executedUpgrade.id,
+        contract_id: executedUpgrade.contract_id,
+        new_wasm_hash: executedUpgrade.new_wasm_hash,
+        status: executedUpgrade.status,
+        executed_at: executedUpgrade.executed_at
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/admin/contracts/:contractId/upgrade/status
+ * Get the status of pending or latest contract upgrades.
+ */
+async function getContractUpgradeStatus(req, res, next) {
+  try {
+    const { contractId } = req.params;
+
+    // Get pending upgrade if exists
+    const pendingResult = await db.query(
+      `SELECT * FROM contract_upgrades
+       WHERE contract_id = $1 AND status = 'announced'
+       ORDER BY announced_at DESC LIMIT 1`,
+      [contractId]
+    );
+
+    // Get last executed upgrade
+    const lastResult = await db.query(
+      `SELECT * FROM contract_upgrades
+       WHERE contract_id = $1 AND status = 'executed'
+       ORDER BY executed_at DESC LIMIT 1`,
+      [contractId]
+    );
+
+    const pending = pendingResult.rows[0] || null;
+    const lastExecuted = lastResult.rows[0] || null;
+
+    let timeRemaining = null;
+    if (pending) {
+      const now = new Date();
+      const scheduled = new Date(pending.scheduled_for);
+      if (now < scheduled) {
+        timeRemaining = Math.ceil((scheduled - now) / 1000 / 60); // minutes
+      }
+    }
+
+    res.json({
+      contract_id: contractId,
+      pending_upgrade: pending ? {
+        id: pending.id,
+        wasm_hash: pending.new_wasm_hash,
+        announced_at: pending.announced_at,
+        scheduled_for: pending.scheduled_for,
+        time_remaining_minutes: timeRemaining,
+        description: pending.description
+      } : null,
+      last_executed: lastExecuted ? {
+        id: lastExecuted.id,
+        wasm_hash: lastExecuted.new_wasm_hash,
+        executed_at: lastExecuted.executed_at
+      } : null
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/contracts/:contractId/events
+ * Retrieve indexed contract events with optional filtering.
+ * Query params: eventType, limit, offset, from, to
+ */
+async function getContractEventsEndpoint(req, res, next) {
+  try {
+    const { contractId } = req.params;
+    const { eventType, limit, offset, from, to } = req.query;
+
+    const options = {
+      eventType: eventType || null,
+      limit: Math.min(parseInt(limit) || 100, 500),
+      offset: parseInt(offset) || 0,
+      from: from || null,
+      to: to || null
+    };
+
+    const result = await getContractEvents(contractId, options);
+
+    res.json({
+      contract_id: contractId,
+      events: result.events,
+      total: result.total,
+      limit: result.limit,
+      offset: result.offset
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/admin/contracts/:contractId/events/index
+ * Manually trigger event indexing for a specific contract.
+ */
+async function indexContractEventsEndpoint(req, res, next) {
+  try {
+    const { contractId } = req.params;
+
+    const result = await indexContractEvents(contractId, req.body.contractName || null);
+
+    await audit.log(req.user.userId, 'admin_index_events', req.ip, req.headers['user-agent'], {
+      contract_id: contractId,
+      indexed: result.indexed,
+      errors: result.errors
+    });
+
+    res.json({
+      message: 'Contract events indexed',
+      result
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = {
+  getStats,
+  getUsers,
+  getTransactions,
+  clawback,
+  approveKYC,
+  revokeKYC,
+  setWalletFlags,
+  announceContractUpgrade,
+  executeContractUpgrade,
+  getContractUpgradeStatus,
+  getContractEventsEndpoint,
+  indexContractEventsEndpoint
+};

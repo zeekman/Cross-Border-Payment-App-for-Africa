@@ -385,6 +385,54 @@ function isBadSeq(err) {
   return err.response?.data?.extras?.result_codes?.transaction === 'tx_bad_seq';
 }
 
+/**
+ * Issue a bumpSequence operation to resync an account whose on-chain sequence
+ * number has drifted ahead of what the local SDK has loaded.
+ *
+ * Fetches the current on-chain sequence, then submits a bumpSequence targeting
+ * that same value so the next transaction built with a freshly loaded account
+ * will use sequence + 1 and succeed.
+ */
+async function recoverSequence(publicKey, keypair) {
+  logger.warn('issuing bumpSequence for account', { publicKey });
+  const account = await withFallback(s => s.loadAccount(publicKey), 'loadAccount(bumpSeq)');
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: await withFallback(s => s.fetchBaseFee(), 'fetchBaseFee(bumpSeq)'),
+    networkPassphrase,
+  })
+    .addOperation(StellarSdk.Operation.bumpSequence({
+      bumpTo: account.sequenceNumber(),
+    }))
+    .setTimeout(30)
+    .build();
+  tx.sign(keypair);
+  const result = await withFallback(s => s.submitTransaction(tx), 'submitTransaction(bumpSeq)');
+  return result;
+}
+
+/**
+ * Wrap an async function `fn` with automatic bumpSequence recovery.
+ *
+ * Calls fn(). If it throws a tx_bad_seq error, issues a bumpSequence to resync
+ * the account and retries fn() once. All other errors pass through unchanged.
+ * If recoverSequence itself fails, the error is propagated with a log message.
+ */
+async function withSequenceRecovery(fn, publicKey, keypair) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isBadSeq(err)) throw err;
+    logger.warn('tx_bad_seq detected, attempting bumpSequence recovery', { publicKey });
+    try {
+      await recoverSequence(publicKey, keypair);
+    } catch (recoveryErr) {
+      logger.error('bumpSequence recovery failed', { publicKey, error: recoveryErr.message });
+      throw recoveryErr;
+    }
+    return await fn();
+  }
+}
+
 async function sendPayment(params, logger = require('../utils/logger')) {
   return enqueue(params.senderPublicKey, () => _sendPaymentOnce(params, logger));
 }
@@ -464,6 +512,30 @@ async function _sendPaymentOnce({
 
       throw err;
     }
+  }
+
+  // All reload-and-retry attempts exhausted — escalate to bumpSequence recovery
+  if (isBadSeq(lastErr)) {
+    logger.warn('tx_bad_seq persists after MAX_SEQ_RETRIES, escalating to bumpSequence', { senderPublicKey });
+    await recoverSequence(senderPublicKey, senderKeypair);
+    // One final attempt after sequence resync
+    const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey), 'loadAccount(postBump)');
+    const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
+      fee: await feeForPriority(feePriority),
+      networkPassphrase,
+    })
+      .addOperation(StellarSdk.Operation.payment({
+        destination: recipientPublicKey,
+        asset: assetObj,
+        amount: String(amount),
+      }))
+      .setTimeout(30);
+    const memoObj = memo ? buildStellarMemo(memo, memoType) : null;
+    if (memoObj) txBuilder.addMemo(memoObj);
+    const transaction = txBuilder.build();
+    transaction.sign(senderKeypair);
+    const result = await withFallback(s => s.submitTransaction(transaction), 'submitTransaction(postBump)');
+    return { transactionHash: result.hash, ledger: result.ledger, type: 'payment' };
   }
 
   throw lastErr;
@@ -602,6 +674,24 @@ async function getTransactions(publicKey, limit = 20) {
   }
 }
 
+// Issue AFRI asset to a recipient
+async function issueAsset(recipientPublicKey, amount) {
+  const issuerSecret = decryptPrivateKey(process.env.AFRI_ISSUER_SECRET);
+  const distributionSecret = decryptPrivateKey(process.env.AFRI_DISTRIBUTION_SECRET);
+  
+  const distributionKeypair = StellarSdk.Keypair.fromSecret(distributionSecret);
+  const distributionAccount = await server.loadAccount(distributionKeypair.publicKey());
+
+  const afriAsset = new StellarSdk.Asset('AFRI', process.env.AFRI_ISSUER_PUBLIC);
+
+  const transaction = new StellarSdk.TransactionBuilder(distributionAccount, {
+    fee: await server.fetchBaseFee(),
+    networkPassphrase
+  })
+    .addOperation(StellarSdk.Operation.payment({
+      destination: recipientPublicKey,
+      asset: afriAsset,
+      amount: String(amount)
 // ---------------------------------------------------------------------------
 // Fee estimate
 // ---------------------------------------------------------------------------
@@ -718,13 +808,6 @@ async function sendPathPayment({
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey), logger);
-  const senderAccount = validateHorizonResponse(
-    AccountResponseSchema,
-    await withFallback(s => s.loadAccount(senderPublicKey)),
-    'loadAccount(sender)'
-  );
-  const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey), 'loadAccount');
 
   const sdkPath = path.map(p =>
     p.asset_type === 'native'
@@ -732,31 +815,31 @@ async function sendPathPayment({
       : new StellarSdk.Asset(p.asset_code, p.asset_issuer)
   );
 
-  const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
-    fee: await withFallback(s => s.fetchBaseFee(), logger),
-    fee: await withFallback(s => s.fetchBaseFee(), 'fetchBaseFee'),
-    networkPassphrase
-  })
-    .addOperation(StellarSdk.Operation.pathPaymentStrictSend({
-      sendAsset: srcAsset,
-      sendAmount: String(sourceAmount),
-      destination: recipientPublicKey,
-      destAsset: dstAsset,
-      destMin: String(destinationMinAmount),
-      path: sdkPath
-    }))
-    .setTimeout(30);
+  return withSequenceRecovery(async () => {
+    const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey), 'loadAccount');
 
-  if (memo) txBuilder.addMemo(StellarSdk.Memo.text(memo.slice(0, 28)));
+    const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
+      fee: await withFallback(s => s.fetchBaseFee(), 'fetchBaseFee'),
+      networkPassphrase,
+    })
+      .addOperation(StellarSdk.Operation.pathPaymentStrictSend({
+        sendAsset: srcAsset,
+        sendAmount: String(sourceAmount),
+        destination: recipientPublicKey,
+        destAsset: dstAsset,
+        destMin: String(destinationMinAmount),
+        path: sdkPath,
+      }))
+      .setTimeout(30);
 
-  const transaction = txBuilder.build();
-  transaction.sign(senderKeypair);
+    if (memo) txBuilder.addMemo(StellarSdk.Memo.text(memo.slice(0, 28)));
 
-  const result = await withFallback(s => s.submitTransaction(transaction), logger);
-  const rawResult = await withFallback(s => s.submitTransaction(transaction));
-  const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(pathPayment)');
-  const result = await withFallback(s => s.submitTransaction(transaction), 'submitTransaction');
-  return { transactionHash: result.hash, ledger: result.ledger };
+    const transaction = txBuilder.build();
+    transaction.sign(senderKeypair);
+
+    const result = await withFallback(s => s.submitTransaction(transaction), 'submitTransaction');
+    return { transactionHash: result.hash, ledger: result.ledger };
+  }, senderPublicKey, senderKeypair);
 }
 
 /**
@@ -827,29 +910,32 @@ async function addTrustline({ publicKey, encryptedSecretKey, asset, limit }) {
   const assetObj = resolveAsset(asset);
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const keypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const account = validateHorizonResponse(
-    AccountResponseSchema,
-    await withRetry(() => server.loadAccount(publicKey), { label: 'loadAccount(trustline)' }),
-    'loadAccount(trustline)'
-  );
 
-  const op = StellarSdk.Operation.changeTrust({
-    asset: assetObj,
-    ...(limit !== undefined ? { limit: String(limit) } : {}),
-  });
+  return withSequenceRecovery(async () => {
+    const account = validateHorizonResponse(
+      AccountResponseSchema,
+      await withRetry(() => server.loadAccount(publicKey), { label: 'loadAccount(trustline)' }),
+      'loadAccount(trustline)'
+    );
 
-  const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: await withRetry(() => server.fetchBaseFee(), { label: 'fetchBaseFee' }),
-    networkPassphrase,
-  })
-    .addOperation(op)
-    .setTimeout(30)
-    .build();
+    const op = StellarSdk.Operation.changeTrust({
+      asset: assetObj,
+      ...(limit !== undefined ? { limit: String(limit) } : {}),
+    });
 
-  tx.sign(keypair);
-  const rawResult = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addTrustline)' });
-  const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(addTrustline)');
-  return { transactionHash: result.hash };
+    const tx = new StellarSdk.TransactionBuilder(account, {
+      fee: await withRetry(() => server.fetchBaseFee(), { label: 'fetchBaseFee' }),
+      networkPassphrase,
+    })
+      .addOperation(op)
+      .setTimeout(30)
+      .build();
+
+    tx.sign(keypair);
+    const rawResult = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addTrustline)' });
+    const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(addTrustline)');
+    return { transactionHash: result.hash };
+  }, publicKey, keypair);
 }
 
 /**
@@ -906,6 +992,79 @@ async function addAccountSigner({ ownerPublicKey, encryptedSecretKey, signerPubl
     .setTimeout(30)
     .build();
 
+  transaction.sign(distributionKeypair);
+
+  const result = await server.submitTransaction(transaction);
+  return {
+    transactionHash: result.hash,
+    ledger: result.ledger
+  };
+}
+
+// Get AFRI asset information
+async function getAssetInfo() {
+  try {
+    const issuerPublicKey = process.env.AFRI_ISSUER_PUBLIC;
+    const issuerAccount = await server.loadAccount(issuerPublicKey);
+    
+    // Get asset holders and supply from Horizon
+    const assetResponse = await server.assets()
+      .forCode('AFRI')
+      .forIssuer(issuerPublicKey)
+      .call();
+
+    const asset = assetResponse.records[0] || {};
+
+    return {
+      code: 'AFRI',
+      issuer: issuerPublicKey,
+      supply: asset.amount || '0',
+      holders: asset.num_accounts || 0,
+      description: 'AfriPay Token - Loyalty rewards and governance token for the AfriPay platform',
+      decimals: 7
+    };
+  } catch (err) {
+    logger.error('Error fetching AFRI asset info', { error: err.message });
+    return {
+      code: 'AFRI',
+      issuer: process.env.AFRI_ISSUER_PUBLIC,
+      supply: '0',
+      holders: 0,
+      description: 'AfriPay Token - Loyalty rewards and governance token for the AfriPay platform',
+      decimals: 7
+    };
+  }
+}
+
+// Get Stellar network statistics
+async function getStellarStats() {
+  try {
+    const ledgerResponse = await server.ledgers().order('desc').limit(1).call();
+    const ledger = ledgerResponse.records[0];
+
+    return {
+      latestLedger: ledger.sequence,
+      baseFee: ledger.base_fee_in_stroops,
+      maxFee: ledger.max_tx_set_size,
+      transactionCount: ledger.successful_transaction_count,
+      operationCount: ledger.operation_count,
+      closedAt: ledger.closed_at
+    };
+  } catch (err) {
+    logger.error('Error fetching Stellar stats', { error: err.message });
+    throw err;
+  }
+}
+
+module.exports = { 
+  createWallet, 
+  getBalance, 
+  sendPayment, 
+  getTransactions, 
+  decryptPrivateKey,
+  issueAsset,
+  getAssetInfo,
+  getStellarStats
   tx.sign(ownerKeypair);
   const rawResult = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addSigner)' });
   const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(addSigner)');
@@ -1220,5 +1379,11 @@ module.exports = {
   setAccountFlags,
   findReceivePath,
   sendStrictReceivePathPayment,
+<<<<<<< feat/bump-sequence-recovery
+  isBadSeq,
+  recoverSequence,
+  withSequenceRecovery,
+=======
   validateNetworkPassphrase,
+>>>>>>> main
 };

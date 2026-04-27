@@ -1,7 +1,8 @@
 const router = require('express').Router();
 const authMiddleware = require('../middleware/auth');
 const db = require('../db');
-const { detectTestnetReset, refundTestnetWallets } = require('../services/stellar');
+const { detectTestnetReset, refundTestnetWallets, recoverSequence, decryptPrivateKey } = require('../services/stellar');
+const StellarSdk = require('@stellar/stellar-sdk');
 const logger = require('../utils/logger');
 
 // Block entirely outside development
@@ -64,6 +65,32 @@ router.post('/handle-testnet-reset', async (req, res, next) => {
       message: 'Testnet reset handled: wallets re-funded and stale transactions cleared.',
       wallets: fundResults,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/dev/fix-sequence
+ * Issue a bumpSequence operation for the authenticated user's wallet to recover
+ * from a persistent tx_bad_seq desync. Only available in development mode.
+ */
+router.post('/fix-sequence', authMiddleware, async (req, res, next) => {
+  try {
+    const result = await db.query(
+      'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
+      [req.user.userId]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
+
+    const { public_key, encrypted_secret_key } = result.rows[0];
+    const secretKey = decryptPrivateKey(encrypted_secret_key);
+    const keypair = StellarSdk.Keypair.fromSecret(secretKey);
+
+    const txResult = await recoverSequence(public_key, keypair);
+
+    logger.info('Sequence recovered via dev endpoint', { publicKey: public_key });
+    res.json({ message: 'Sequence recovered', transactionHash: txResult.hash });
   } catch (err) {
     next(err);
   }

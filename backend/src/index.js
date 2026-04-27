@@ -100,12 +100,21 @@ io.on('connection', async (socket) => {
     logger.info('Socket disconnected', { userId: socket.userId });
   });
 });
+require('dotenv').config();
+const validateEnv = require('./utils/validateEnv');
+const logger = require('./utils/logger');
+const { startScheduler } = require('./jobs/scheduler');
 
 ledgerListener.setSocketIO(io);
 
 async function shutdown(signal) {
   logger.info(`${signal} received — shutting down gracefully`);
 
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  logger.info(`Server running on port ${PORT}`, { port: PORT });
+  startScheduler();
+});
   const forceExit = setTimeout(() => {
     logger.error('Shutdown timeout exceeded — forcing exit');
     process.exit(1);

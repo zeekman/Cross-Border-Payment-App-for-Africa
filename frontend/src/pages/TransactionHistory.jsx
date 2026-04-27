@@ -15,6 +15,13 @@ const STATUS_COLORS = {
   failed: 'text-red-400 bg-red-500/10',
 };
 
+// Calculate days until expiry for claimable balances
+function getDaysUntilExpiry(createdAt) {
+  const created = new Date(createdAt).getTime();
+  const expiresAt = created + (30 * 24 * 60 * 60 * 1000); // 30 days
+  const now = Date.now();
+  const daysLeft = Math.ceil((expiresAt - now) / (24 * 60 * 60 * 1000));
+  return daysLeft;
 const ASSET_OPTIONS = ['XLM', 'USDC', 'NGN', 'GHS', 'KES'];
 
 function buildHistoryParams(cursor, dateFrom, dateTo, asset) {
@@ -343,6 +350,32 @@ export default function TransactionHistory() {
                   >
                     {tx.direction === 'sent' ? <Send size={16} /> : <Download size={16} />}
                   </div>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {tx.direction === 'sent'
+                      ? `${t('history.to')} ${truncateAddress(tx.recipient_wallet)}`
+                      : `${t('history.from')} ${truncateAddress(tx.sender_wallet)}`}
+                  </p>
+                  {tx.memo && <p className="text-xs text-gray-600 mt-0.5">"{tx.memo}"</p>}
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLORS[tx.status] || STATUS_COLORS.pending}`}>
+                        {tx.status}
+                      </span>
+                      {tx.type === 'claimable_balance' && tx.status === 'pending' && (() => {
+                        const daysLeft = getDaysUntilExpiry(tx.created_at);
+                        if (daysLeft > 0 && daysLeft <= 7) {
+                          return (
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400">
+                              ⏰ Expires in {daysLeft}d
+                            </span>
+                          );
+                        }
+                        return null;
+                      })()}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-gray-600">
+                        {new Date(tx.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-sm font-medium text-white capitalize">{tx.direction}</p>
