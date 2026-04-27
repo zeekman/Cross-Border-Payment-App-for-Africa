@@ -17,7 +17,6 @@ const {
 } = require('../utils/tokens');
 const { sendOTP } = require('../services/sms');
 const { recordSession } = require('./sessionController');
-const { recordSession } = require('./sessionController');
 
 const TOKEN_TTL_MS = 96 * 60 * 60 * 1000;
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
@@ -38,6 +37,24 @@ function generatePhoneOTP() {
   const raw = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
   const hashed = crypto.createHash('sha256').update(raw).digest('hex');
   return { raw, hashed };
+}
+
+const TRUSTLINE_RETRY_DELAYS_MS = [30_000, 120_000, 300_000]; // 30s, 2m, 5m
+
+function scheduleTrustlineRetry({ publicKey, encryptedSecretKey, userId }, attempt = 0) {
+  if (attempt >= TRUSTLINE_RETRY_DELAYS_MS.length) {
+    logger.warn('USDC trustline retry exhausted', { userId });
+    return;
+  }
+  setTimeout(async () => {
+    try {
+      await addTrustline({ publicKey, encryptedSecretKey, asset: 'USDC' });
+      logger.info('USDC trustline retry succeeded', { userId, attempt });
+    } catch (e) {
+      logger.warn('USDC trustline retry failed', { userId, attempt, error: e.message });
+      scheduleTrustlineRetry({ publicKey, encryptedSecretKey, userId }, attempt + 1);
+    }
+  }, TRUSTLINE_RETRY_DELAYS_MS[attempt]);
 }
 
 async function register(req, res, next) {
@@ -97,10 +114,16 @@ async function register(req, res, next) {
     await db.query('COMMIT');
 
     // Auto-add USDC trustline so new accounts can receive USDC immediately
+    let trustline_status = 'skipped';
     if (process.env.USDC_ISSUER) {
-      addTrustline({ publicKey, encryptedSecretKey, asset: 'USDC' }).catch(e =>
-        logger.warn('Auto USDC trustline failed', { error: e.message })
-      );
+      try {
+        await addTrustline({ publicKey, encryptedSecretKey, asset: 'USDC' });
+        trustline_status = 'active';
+      } catch (e) {
+        trustline_status = 'pending';
+        logger.warn('Auto USDC trustline failed', { userId, error: e.message });
+        scheduleTrustlineRetry({ publicKey, encryptedSecretKey, userId });
+      }
     }
 
     await sendVerificationEmail(email, raw);
@@ -109,6 +132,7 @@ async function register(req, res, next) {
     }
     res.status(201).json({
       message: 'Account created. Please verify your email and phone number.',
+      trustline_status,
     });
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
