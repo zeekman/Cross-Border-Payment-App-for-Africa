@@ -17,7 +17,6 @@ const {
 } = require('../utils/tokens');
 const { sendOTP } = require('../services/sms');
 const { recordSession } = require('./sessionController');
-const { recordSession } = require('./sessionController');
 
 const TOKEN_TTL_MS = 96 * 60 * 60 * 1000;
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
@@ -83,9 +82,6 @@ async function register(req, res, next) {
 
     await db.query('BEGIN');
     await db.query(
-      `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, referral_code, referred_by)
-       VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,$9)`,
-      [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, myReferralCode, validReferredBy]
       `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at)
        VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9)`,
       [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, otpHashed, otpExpiresAt]
@@ -498,25 +494,28 @@ async function forgotPassword(req, res, next) {
   try {
     const email = req.body.email;
     const found = await db.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (found.rows.length === 0) {
-      return res.status(200).json(FORGOT_PASSWORD_MESSAGE);
-    }
+
+    // Respond immediately regardless of whether the email exists.
+    // All DB writes and email sending happen asynchronously after the response,
+    // so both code paths return at the same time (no timing-based enumeration).
+    res.status(200).json(FORGOT_PASSWORD_MESSAGE);
+
+    if (found.rows.length === 0) return;
 
     const userId = found.rows[0].id;
     const raw = crypto.randomBytes(32).toString('hex');
     const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
     const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
 
-    await db.query('DELETE FROM password_reset_tokens WHERE user_id = $1 AND used_at IS NULL', [
-      userId,
-    ]);
-    await db.query(
-      `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-      [userId, tokenHash, expiresAt]
-    );
-
-    await sendPasswordResetEmail(email, raw);
-    return res.status(200).json(FORGOT_PASSWORD_MESSAGE);
+    // Fire-and-forget: errors are swallowed to avoid leaking info via error responses
+    Promise.resolve()
+      .then(() => db.query('DELETE FROM password_reset_tokens WHERE user_id = $1 AND used_at IS NULL', [userId]))
+      .then(() => db.query(
+        `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+        [userId, tokenHash, expiresAt]
+      ))
+      .then(() => sendPasswordResetEmail(email, raw))
+      .catch((err) => logger.warn('forgotPassword background task failed', { error: err.message }));
   } catch (err) {
     next(err);
   }
