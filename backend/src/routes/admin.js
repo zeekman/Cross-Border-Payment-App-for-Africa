@@ -66,10 +66,10 @@ router.post('/clawback',
         return true;
       }),
     body('asset').trim().notEmpty().withMessage('asset is required')
-      .isAlphanumeric().isLength({ max: 12 }).withMessage('Invalid asset code'),
+      .isIn(['USDC', 'XLM']).withMessage('asset must be USDC or XLM'),
     body('amount').notEmpty().withMessage('amount is required')
-      .isFloat({ gt: 0 }).withMessage('amount must be greater than 0'),
-    body('reason').optional().trim().isLength({ max: 500 }),
+      .isFloat({ gt: 0.0000001 }).withMessage('amount must be greater than 0.0000001'),
+    body('reason').optional().trim().isLength({ max: 500 }).withMessage('reason must be 500 characters or fewer'),
   ],
   validate,
   clawback
