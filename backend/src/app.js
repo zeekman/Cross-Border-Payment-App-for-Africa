@@ -108,7 +108,9 @@ app.use('/api/assets', assetsRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/.well-known/stellar', sep10Routes);
 app.use('/api/sep31', sep31Routes);
-app.use('/api/dev', devRoutes);
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/dev', devRoutes);
+}
 app.use('/', stellarTomlRoutes);
 
 // Swagger API Documentation
