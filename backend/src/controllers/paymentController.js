@@ -25,6 +25,13 @@ const { depositFee } = require("../services/feeDistributor");
 // Configurable KYC transaction threshold in USD equivalent
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
 
+// Platform fee in basis points (e.g. 50 = 0.5%)
+const FEE_BPS = parseInt(process.env.FEE_BPS || "50", 10);
+
+function calculateFee(amount) {
+  return parseFloat((parseFloat(amount) * FEE_BPS / 10000).toFixed(7));
+}
+
 // Approximate XLM/USD rate — in production replace with a live price feed
 const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
 
@@ -266,11 +273,19 @@ async function send(req, res, next) {
     const ledger_close_time = await fetchLedgerCloseTime(ledger);
 
     // Save to DB
+<<<<<<< fix/admin-stats-fee-amount
+    const feeAmount = calculateFee(amount);
+    await db.query(
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fee_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'completed',$8)`,
+      [txId, public_key, recipient_address, amount, asset, memo || null, transactionHash, feeAmount],
+=======
     const txStatus = type === "claimable_balance" ? "pending_claim" : "confirming";
     await db.query(
       `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time],
+>>>>>>> main
     );
 
     // Start async confirmation polling for non-claimable-balance transactions
