@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { generateChallenge, verifyChallenge } = require('../services/sep10');
+const { networkPassphrase } = require('../services/stellar');
 const db = require('../db');
 
 async function getChallenge(req, res, next) {
@@ -18,9 +19,13 @@ async function getChallenge(req, res, next) {
 
 async function postChallenge(req, res, next) {
   try {
-    const { transaction } = req.body;
+    const { transaction, network_passphrase } = req.body;
     if (!transaction) {
       return res.status(400).json({ error: 'transaction required' });
+    }
+
+    if (network_passphrase !== networkPassphrase) {
+      return res.status(400).json({ error: 'Invalid network passphrase' });
     }
 
     // Extract account from transaction
