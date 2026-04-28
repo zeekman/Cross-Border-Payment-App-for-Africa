@@ -1,9 +1,9 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, IntoVal,
+    Address, BytesN, Env,
 };
 
 use crate::{EscrowContract, EscrowContractClient, EscrowStatus};
@@ -19,9 +19,8 @@ fn setup() -> (Env, EscrowContractClient<'static>, Address, Address) {
     (env, client, admin, usdc_id)
 }
 
-fn mint_usdc(env: &Env, usdc_id: &Address, admin: &Address, to: &Address, amount: i128) {
+fn mint_usdc(env: &Env, usdc_id: &Address, _admin: &Address, to: &Address, amount: i128) {
     StellarAssetClient::new(env, usdc_id).mint(to, &amount);
-    let _ = admin; // admin used as issuer implicitly via register_stellar_asset_contract_v2
 }
 
 #[test]
@@ -81,8 +80,68 @@ fn test_create_multiple_escrows() {
     assert_eq!(client.get_escrow(&id2).sender, sender2);
 }
 
+// --- #352: fee boundary and minimum amount tests ---
+
 #[test]
-#[should_panic(expected = "Amount must be positive")]
+#[should_panic(expected = "Amount below minimum (100 stroops)")]
+fn test_amount_below_minimum() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &sender, 99);
+    client.create_escrow(&sender, &recipient, &agent, &1, &250);
+}
+
+#[test]
+#[should_panic(expected = "Fee cannot be 100%")]
+fn test_fee_exactly_10000_rejected() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
+    client.create_escrow(&sender, &recipient, &agent, &1_000_0000000, &10000);
+}
+
+#[test]
+#[should_panic(expected = "Fee exceeds maximum of 5000 bps (50%)")]
+fn test_fee_9999_rejected() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
+    client.create_escrow(&sender, &recipient, &agent, &1_000_0000000, &9999);
+}
+
+#[test]
+fn test_fee_at_max_5000_accepted() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &5000);
+    assert_eq!(client.get_escrow(&escrow_id).release_fee_bps, 5000);
+}
+
+// --- #354: upgrade access control test ---
+
+#[test]
+#[should_panic(expected = "Only admin can upgrade the contract")]
+fn test_non_admin_cannot_upgrade() {
+    let (env, client, _, _) = setup();
+    let non_admin = Address::generate(&env);
+    let fake_hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.upgrade(&non_admin, &fake_hash);
+}
+
+// --- existing tests ---
+
+#[test]
+#[should_panic(expected = "Amount below minimum (100 stroops)")]
 fn test_invalid_amount() {
     let (env, client, _, _) = setup();
     let sender = Address::generate(&env);
@@ -92,7 +151,7 @@ fn test_invalid_amount() {
 }
 
 #[test]
-#[should_panic(expected = "Fee percentage cannot exceed 100%")]
+#[should_panic(expected = "Fee exceeds maximum of 5000 bps (50%)")]
 fn test_invalid_fee() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -284,7 +343,6 @@ fn test_deposit_into_expired_escrow_is_rejected() {
 
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
 
-    // Advance ledger past the 30-day expiry window
     env.ledger().with_mut(|li| {
         li.timestamp += 30 * 24 * 60 * 60 + 1;
     });

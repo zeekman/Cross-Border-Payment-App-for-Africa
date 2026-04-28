@@ -28,6 +28,10 @@ const rpcUrl =
 
 const CONTRACT_ID = process.env.AGENT_ESCROW_CONTRACT_ID;
 
+const CONFIRMATION_TIMEOUT_MS = parseInt(process.env.SOROBAN_CONFIRMATION_TIMEOUT_MS || "30000", 10);
+const POLL_INTERVAL_MS = 1000;
+const MAX_POLL_ITERATIONS = Math.ceil(CONFIRMATION_TIMEOUT_MS / POLL_INTERVAL_MS);
+
 function getRpc() {
   return new StellarSdk.SorobanRpc.Server(rpcUrl);
 }
@@ -73,9 +77,14 @@ async function invokeContract(encryptedSecretKey, method, args) {
 
   // Poll for confirmation
   let response = result;
+  let iterations = 0;
   while (response.status === "PENDING" || response.status === "NOT_FOUND") {
-    await new Promise((r) => setTimeout(r, 1000));
+    if (iterations >= MAX_POLL_ITERATIONS) {
+      throw Object.assign(new Error("Transaction confirmation timeout after 30s"), { status: 504 });
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     response = await rpc.getTransaction(result.hash);
+    iterations++;
   }
 
   if (response.status !== "SUCCESS") {
@@ -138,9 +147,14 @@ async function _createEscrow({ encryptedSecretKey, recipient, agent, amount, fee
   }
 
   let response = result;
+  let iterations = 0;
   while (response.status === "PENDING" || response.status === "NOT_FOUND") {
-    await new Promise((r) => setTimeout(r, 1000));
+    if (iterations >= MAX_POLL_ITERATIONS) {
+      throw Object.assign(new Error("Transaction confirmation timeout after 30s"), { status: 504 });
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     response = await rpc.getTransaction(result.hash);
+    iterations++;
   }
 
   if (response.status !== "SUCCESS") {
@@ -186,9 +200,14 @@ async function confirmPayout({ encryptedSecretKey, escrowId }) {
   }
 
   let response = result;
+  let iterations = 0;
   while (response.status === "PENDING" || response.status === "NOT_FOUND") {
-    await new Promise((r) => setTimeout(r, 1000));
+    if (iterations >= MAX_POLL_ITERATIONS) {
+      throw Object.assign(new Error("Transaction confirmation timeout after 30s"), { status: 504 });
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     response = await rpc.getTransaction(result.hash);
+    iterations++;
   }
 
   if (response.status !== "SUCCESS") {
@@ -233,9 +252,14 @@ async function cancelEscrow({ encryptedSecretKey, escrowId }) {
   }
 
   let response = result;
+  let iterations = 0;
   while (response.status === "PENDING" || response.status === "NOT_FOUND") {
-    await new Promise((r) => setTimeout(r, 1000));
+    if (iterations >= MAX_POLL_ITERATIONS) {
+      throw Object.assign(new Error("Transaction confirmation timeout after 30s"), { status: 504 });
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     response = await rpc.getTransaction(result.hash);
+    iterations++;
   }
 
   if (response.status !== "SUCCESS") {
