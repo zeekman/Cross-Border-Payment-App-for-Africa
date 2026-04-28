@@ -13,6 +13,7 @@ CREATE TABLE users (
   token_expires_at   TIMESTAMPTZ,
   failed_login_attempts INTEGER NOT NULL DEFAULT 0,
   locked_until        TIMESTAMPTZ,
+  last_failed_attempt_at TIMESTAMPTZ,
   created_at         TIMESTAMPTZ DEFAULT NOW(),
   updated_at         TIMESTAMPTZ DEFAULT NOW()
 );
