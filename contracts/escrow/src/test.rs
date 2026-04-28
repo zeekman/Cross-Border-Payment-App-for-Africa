@@ -249,10 +249,57 @@ fn test_withdraw_fees_wrong_caller() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow not found")]
+#[should_panic(expected = "Escrow 999 not found")]
 fn test_get_nonexistent_escrow() {
     let (_, client, _, _) = setup();
     client.get_escrow(&999);
+}
+
+// ── #346: distinct addresses ──────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Sender, recipient, and agent must be distinct addresses")]
+fn test_create_escrow_sender_equals_agent() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
+    client.create_escrow(&sender, &recipient, &sender, &1_000_0000000, &250);
+}
+
+#[test]
+#[should_panic(expected = "Sender, recipient, and agent must be distinct addresses")]
+fn test_create_escrow_sender_equals_recipient() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let agent = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
+    client.create_escrow(&sender, &sender, &agent, &1_000_0000000, &250);
+}
+
+#[test]
+#[should_panic(expected = "Sender, recipient, and agent must be distinct addresses")]
+fn test_create_escrow_agent_equals_recipient() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
+    client.create_escrow(&sender, &recipient, &recipient, &1_000_0000000, &250);
+}
+
+// ── #347: withdraw_fees amount > 0 ───────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Amount must be positive")]
+fn test_withdraw_fees_zero_amount_panics() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &1_000_0000000, &500);
+    client.release_escrow(&agent, &escrow_id);
+    client.withdraw_fees(&admin, &0);
 }
 
 #[test]
