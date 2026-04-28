@@ -75,6 +75,7 @@ router.post(
   [
     body('password').notEmpty().withMessage('Password is required'),
     body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID'),
+    body('totp_code').optional().trim().isLength({ min: 6, max: 6 }).withMessage('TOTP code must be 6 digits'),
   ],
   validate,
   exportKey,
