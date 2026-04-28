@@ -197,6 +197,21 @@ EOF
 
 echo -e "${GREEN}✓ Deployment info saved to $DEPLOYMENT_FILE${NC}"
 
+# Step 5b: Write contract ID to .deployed_ids.env for backend configuration
+DEPLOYED_IDS_FILE="${CONTRACT_DIR}/.deployed_ids.env"
+
+# Derive the env var name from the contract name (uppercase + _CONTRACT_ID)
+ENV_VAR_NAME=$(echo "${TARGET_CONTRACT}" | tr '[:lower:]-' '[:upper:]_')_CONTRACT_ID
+
+# Append or update the entry
+if [ -f "$DEPLOYED_IDS_FILE" ] && grep -q "^${ENV_VAR_NAME}=" "$DEPLOYED_IDS_FILE"; then
+    sed -i.bak "s|^${ENV_VAR_NAME}=.*|${ENV_VAR_NAME}=${CONTRACT_ID}|" "$DEPLOYED_IDS_FILE" && rm -f "${DEPLOYED_IDS_FILE}.bak"
+else
+    echo "${ENV_VAR_NAME}=${CONTRACT_ID}" >> "$DEPLOYED_IDS_FILE"
+fi
+
+echo -e "${GREEN}✓ Contract ID written to $DEPLOYED_IDS_FILE${NC}"
+
 # Step 6: Output Stellar Explorer link
 echo -e "\n${YELLOW}Step 6: Verification${NC}"
 
@@ -213,8 +228,11 @@ echo "  Network: $NETWORK"
 echo "  Contract ID: $CONTRACT_ID"
 echo "  View on Stellar Expert: $EXPLORER_URL"
 echo ""
-echo "Next steps:"
-echo "1. Save the Contract ID for your backend configuration"
-echo "2. Call initialize() with admin address and USDC contract address"
-echo "3. Update backend to use this contract for escrow operations"
+echo -e "${YELLOW}Post-Deployment Checklist:${NC}"
+echo "  1. Source the deployed IDs into your backend .env:"
+echo "       cat contracts/.deployed_ids.env >> backend/.env"
+echo "     Or manually copy: ${ENV_VAR_NAME}=${CONTRACT_ID}"
+echo "  2. Call initialize() with admin address and USDC contract address"
+echo "  3. Restart the backend service to pick up the new contract ID"
+echo "  4. Verify the contract on Stellar Expert: $EXPLORER_URL"
 echo ""

@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol};
 
 mod test;
 
@@ -27,6 +27,12 @@ pub struct EscrowReleased {
 pub struct EscrowCancelled {
     pub escrow_id: u64,
     pub refund_amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct Upgraded {
+    pub new_wasm_hash: BytesN<32>,
 }
 
 #[derive(Clone)]
@@ -62,6 +68,12 @@ pub enum DataKey {
 
 const DEFAULT_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
 
+/// Maximum allowed fee: 50% (5000 bps). Configurable by admin via contract upgrade.
+const MAX_FEE_BPS: u32 = 5000;
+
+/// Minimum escrow amount in stroops to prevent integer-division rounding to zero fee.
+const MIN_ESCROW_AMOUNT: i128 = 100;
+
 #[contract]
 pub struct EscrowContract;
 
@@ -80,6 +92,33 @@ impl EscrowContract {
         );
     }
 
+    /// Upgrade the contract WASM. Only the admin may call this.
+    ///
+    /// # Irreversibility
+    /// Contract upgrades are **irreversible on-chain**. Once a new WASM hash is
+    /// applied, the previous bytecode cannot be restored. Always test on testnet
+    /// before upgrading mainnet deployments.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+
+        if admin != stored_admin {
+            panic!("Only admin can upgrade the contract");
+        }
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+
+        env.events().publish(
+            (Symbol::new(&env, "Upgraded"),),
+            Upgraded { new_wasm_hash },
+        );
+    }
+
     pub fn create_escrow(
         env: Env,
         sender: Address,
@@ -88,11 +127,14 @@ impl EscrowContract {
         amount: i128,
         release_fee_bps: u32,
     ) -> u64 {
-        if amount <= 0 {
-            panic!("Amount must be positive");
+        if amount < MIN_ESCROW_AMOUNT {
+            panic!("Amount below minimum (100 stroops)");
         }
-        if release_fee_bps > 10000 {
-            panic!("Fee percentage cannot exceed 100%");
+        if release_fee_bps == 10000 {
+            panic!("Fee cannot be 100%");
+        }
+        if release_fee_bps > MAX_FEE_BPS {
+            panic!("Fee exceeds maximum of 5000 bps (50%)");
         }
         if sender == recipient || sender == agent || recipient == agent {
             panic!("Sender, recipient, and agent must be distinct addresses");
@@ -314,6 +356,7 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&DataKey::Admin)
+            .unwrap();
             .expect("Contract not initialized");
 
         if admin != stored_admin {
@@ -334,6 +377,7 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&DataKey::UsdcAddress)
+            .unwrap();
             .expect("Contract not initialized");
 
         token::Client::new(&env, &usdc_address).transfer(
@@ -348,6 +392,7 @@ impl EscrowContract {
     }
 
     pub fn get_metadata(env: Env) -> (Address, Address) {
+        let admin: Address = env.storage().persistent().get(&DataKey::Admin).unwrap();
         let admin: Address = env
             .storage()
             .persistent()
@@ -357,6 +402,7 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&DataKey::UsdcAddress)
+            .unwrap();
             .expect("Contract not initialized");
         (admin, usdc_address)
     }
