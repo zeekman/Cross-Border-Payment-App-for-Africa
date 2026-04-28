@@ -288,4 +288,8 @@ router.post(
   submitSigned
 );
 
+// User-specific analytics (accessible to all authenticated users)
+const { summary: userAnalyticsSummary } = require('../controllers/analyticsController');
+router.get('/analytics', userAnalyticsSummary);
+
 module.exports = router;
