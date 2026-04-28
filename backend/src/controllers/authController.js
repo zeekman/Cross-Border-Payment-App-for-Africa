@@ -59,9 +59,30 @@ function scheduleTrustlineRetry({ publicKey, encryptedSecretKey, userId }, attem
   }, TRUSTLINE_RETRY_DELAYS_MS[attempt]);
 }
 
+/** Strip HTML tags and limit length for safe storage */
+function sanitizeFullName(value) {
+  if (typeof value !== 'string') return '';
+  // Remove any HTML/script tags
+  return value.replace(/<[^>]*>/g, '').trim().slice(0, 100);
+}
+
+/** Validate E.164 phone format: +[country code][number], 8–15 digits total */
+function isValidE164(phone) {
+  return /^\+[1-9]\d{7,14}$/.test(phone);
+}
+
 async function register(req, res, next) {
   try {
-    const { full_name, email, password, phone, secret_key: importedSecretKey, referral_code: referredBy } = req.body;
+    const { full_name: rawFullName, email, password, phone, secret_key: importedSecretKey, referral_code: referredBy } = req.body;
+
+    // Sanitize and validate inputs
+    const full_name = sanitizeFullName(rawFullName);
+    if (!full_name) {
+      return res.status(400).json({ error: 'full_name is required', field: 'full_name' });
+    }
+    if (phone && !isValidE164(phone)) {
+      return res.status(400).json({ error: 'phone must be a valid E.164 number (e.g. +2348012345678)', field: 'phone' });
+    }
 
     const existing = await db.query('SELECT id FROM users WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
