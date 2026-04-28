@@ -1,4 +1,5 @@
 const router = require('express').Router();
+const rateLimit = require('express-rate-limit');
 const authMiddleware = require('../middleware/auth');
 const isAdmin = require('../middleware/isAdmin');
 const { summary } = require('../controllers/analyticsController');
