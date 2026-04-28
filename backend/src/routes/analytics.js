@@ -1,17 +1,12 @@
 const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const authMiddleware = require('../middleware/auth');
+const isAdmin = require('../middleware/isAdmin');
 const { summary } = require('../controllers/analyticsController');
 
-const analyticsLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  keyGenerator: (req) => req.user?.userId || req.ip,
-  message: { error: 'Too many analytics requests, please try again later.' },
-});
+// All analytics routes require authentication and admin role
+router.use(authMiddleware, isAdmin);
 
-router.use(authMiddleware);
-
-router.get('/summary', analyticsLimiter, summary);
+router.get('/summary', summary);
 
 module.exports = router;
