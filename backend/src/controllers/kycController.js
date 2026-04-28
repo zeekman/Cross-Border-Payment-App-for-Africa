@@ -15,6 +15,9 @@ async function submitKYC(req, res, next) {
     if (!date_of_birth || isNaN(Date.parse(date_of_birth))) {
       return res.status(400).json({ error: "Invalid date of birth" });
     }
+    if (!req.file) {
+      return res.status(400).json({ error: "Document file is required" });
+    }
 
     // Check current status — do not allow resubmission if already verified or pending
     const userResult = await db.query("SELECT kyc_status FROM users WHERE id = $1", [
@@ -35,6 +38,8 @@ async function submitKYC(req, res, next) {
       id_type,
       id_number_last4: id_number.trim().slice(-4),
       date_of_birth,
+      document_filename: req.file.filename,
+      document_mimetype: req.file.mimetype,
       submitted_at: new Date().toISOString(),
     };
 
