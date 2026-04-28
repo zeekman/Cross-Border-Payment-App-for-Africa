@@ -121,29 +121,33 @@ function makeToken(userId = USER_ID) {
 
 /**
  * Happy-path send for LOW-value amounts (no KYC query):
- *   call 1 — wallet lookup → WALLET_ROW
- *   call 2 — fraud check   → count (default '0')
- *   call 3+ — INSERT + anything else → []
+ *   call 1 — wallet lookup   → WALLET_ROW
+ *   call 2 — velocity check  → count (default '0')
+ *   call 3 — daily limit     → total (default '0')
+ *   call 4+ — INSERT + anything else → []
  */
-function mockSendHappyPath({ fraudCount = '0' } = {}) {
+function mockSendHappyPath({ fraudCount = '0', dailyTotal = '0' } = {}) {
   db.query
     .mockResolvedValueOnce({ rows: [WALLET_ROW] })
     .mockResolvedValueOnce({ rows: [{ count: fraudCount }] })
+    .mockResolvedValueOnce({ rows: [{ total: dailyTotal }] })
     .mockResolvedValue({ rows: [] });
 }
 
 /**
  * Happy-path send for HIGH-value amounts (KYC query fires first):
- *   call 1 — KYC check     → verified
- *   call 2 — wallet lookup → WALLET_ROW
- *   call 3 — fraud check   → count (default '0')
- *   call 4+ — INSERT + anything else → []
+ *   call 1 — KYC check       → verified
+ *   call 2 — wallet lookup   → WALLET_ROW
+ *   call 3 — velocity check  → count (default '0')
+ *   call 4 — daily limit     → total (default '0')
+ *   call 5+ — INSERT + anything else → []
  */
-function mockSendHappyPathHighValue({ fraudCount = '0' } = {}) {
+function mockSendHappyPathHighValue({ fraudCount = '0', dailyTotal = '0' } = {}) {
   db.query
     .mockResolvedValueOnce({ rows: [{ kyc_status: 'verified' }] })
     .mockResolvedValueOnce({ rows: [WALLET_ROW] })
     .mockResolvedValueOnce({ rows: [{ count: fraudCount }] })
+    .mockResolvedValueOnce({ rows: [{ total: dailyTotal }] })
     .mockResolvedValue({ rows: [] });
 }
 
@@ -526,10 +530,11 @@ describe('POST /api/payments/send — business logic', () => {
     stellarErr.response = { data: { extras: { result_codes: { transaction: 'tx_bad_seq' } } } };
     sendPayment.mockRejectedValueOnce(stellarErr);
 
-    // Low-value: wallet → fraud → (sendPayment throws, no INSERT)
+    // Low-value: wallet → velocity → daily-limit → (sendPayment throws, no INSERT)
     db.query
       .mockResolvedValueOnce({ rows: [WALLET_ROW] })
-      .mockResolvedValueOnce({ rows: [{ count: '0' }] });
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] })
+      .mockResolvedValueOnce({ rows: [{ total: '0' }] });
 
     const res = await request(app)
       .post('/api/payments/send')
@@ -549,11 +554,12 @@ describe('POST /api/payments/send — business logic', () => {
 // POST /api/payments/send — fraud protection
 // ===========================================================================
 describe('POST /api/payments/send — fraud protection', () => {
-  test('blocks the 6th transaction within 10 minutes with 429', async () => {
-    // Low-value: wallet → fraud (count=5 → blocked)
+  test('blocks when velocity threshold is met (count=5) with 429', async () => {
+    // Low-value: wallet → velocity (count=5 → blocked, daily-limit not reached)
     db.query
       .mockResolvedValueOnce({ rows: [WALLET_ROW] })
-      .mockResolvedValueOnce({ rows: [{ count: '5' }] });
+      .mockResolvedValueOnce({ rows: [{ count: '5' }] })
+      .mockResolvedValueOnce({ rows: [{ total: '0' }] });
 
     const res = await request(app)
       .post('/api/payments/send')
@@ -570,7 +576,24 @@ describe('POST /api/payments/send — fraud protection', () => {
     expect(insertCall).toBeUndefined();
   });
 
-  test('allows the 5th transaction — count=4 is below threshold', async () => {
+  test('blocks when daily limit is exceeded with 429', async () => {
+    // velocity ok (count=0), daily limit exceeded
+    db.query
+      .mockResolvedValueOnce({ rows: [WALLET_ROW] })
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] })
+      .mockResolvedValueOnce({ rows: [{ total: '999999' }] });
+
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: RECIPIENT_KEY, amount: '1', asset: 'XLM' });
+
+    expect(res.status).toBe(429);
+    expect(res.body.code).toBe('DAILY_LIMIT_EXCEEDED');
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('allows the 4th transaction — count=4 is below threshold', async () => {
     mockSendHappyPath({ fraudCount: '4' });
 
     const res = await request(app)
@@ -582,7 +605,7 @@ describe('POST /api/payments/send — fraud protection', () => {
     expect(sendPayment).toHaveBeenCalledTimes(1);
   });
 
-  test('fraud check queries the correct sender wallet address', async () => {
+  test('velocity check queries the correct sender wallet address', async () => {
     mockSendHappyPath();
 
     await request(app)
@@ -590,14 +613,14 @@ describe('POST /api/payments/send — fraud protection', () => {
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ recipient_address: RECIPIENT_KEY, amount: '1', asset: 'XLM' });
 
-    const fraudCall = db.query.mock.calls.find(([sql]) =>
+    const velocityCall = db.query.mock.calls.find(([sql]) =>
       sql.includes('COUNT(*)') && sql.includes('sender_wallet')
     );
-    expect(fraudCall).toBeDefined();
-    expect(fraudCall[1][0]).toBe(SENDER_KEY);
+    expect(velocityCall).toBeDefined();
+    expect(velocityCall[1][0]).toBe(SENDER_KEY);
   });
 
-  test('fraud check window is scoped to 10 minutes', async () => {
+  test('both fraud checks share the same time window', async () => {
     mockSendHappyPath();
 
     await request(app)
@@ -605,11 +628,17 @@ describe('POST /api/payments/send — fraud protection', () => {
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ recipient_address: RECIPIENT_KEY, amount: '1', asset: 'XLM' });
 
-    const fraudCall = db.query.mock.calls.find(([sql]) =>
+    const velocityCall = db.query.mock.calls.find(([sql]) =>
       sql.includes('COUNT(*)') && sql.includes('sender_wallet')
     );
-    expect(fraudCall).toBeDefined();
-    expect(fraudCall[0]).toMatch(/10 minutes/i);
+    const limitCall = db.query.mock.calls.find(([sql]) =>
+      sql.includes('SUM(amount)') && sql.includes('sender_wallet')
+    );
+
+    expect(velocityCall).toBeDefined();
+    expect(limitCall).toBeDefined();
+    // Both use the same window parameter (index 1 in params array)
+    expect(velocityCall[1][1]).toBe(limitCall[1][1]);
   });
 });
 

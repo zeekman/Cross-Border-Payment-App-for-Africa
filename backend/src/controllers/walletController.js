@@ -63,13 +63,13 @@ async function getWallet(req, res, next) {
 
     const cached = await cache.get(cacheKey);
     if (cached) {
-      return res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, balances: cached, cached: true });
+      return res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, ...cached, cached: true });
     }
 
-    const balances = await getBalance(public_key);
-    await cache.set(cacheKey, balances, cache.BALANCE_TTL);
+    const balanceData = await getBalance(public_key);
+    await cache.set(cacheKey, balanceData, cache.BALANCE_TTL);
 
-    res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, balances, cached: false });
+    res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, ...balanceData, cached: false });
   } catch (err) {
     next(err);
   }
@@ -89,16 +89,16 @@ async function listWallets(req, res, next) {
     const wallets = await Promise.all(
       result.rows.map(async (w) => {
         const cacheKey = `balance:${w.public_key}`;
-        let balances = await cache.get(cacheKey);
-        if (!balances) {
+        let balanceData = await cache.get(cacheKey);
+        if (!balanceData) {
           try {
-            balances = await getBalance(w.public_key);
-            await cache.set(cacheKey, balances, cache.BALANCE_TTL);
+            balanceData = await getBalance(w.public_key);
+            await cache.set(cacheKey, balanceData, cache.BALANCE_TTL);
           } catch {
-            balances = [];
+            balanceData = { account_exists: false, balances: [] };
           }
         }
-        return { ...w, balances };
+        return { ...w, ...balanceData };
       }),
     );
 
@@ -168,9 +168,14 @@ async function getQRCode(req, res, next) {
 
 // ---------------------------------------------------------------------------
 // GET /wallet/transactions  (optionally ?wallet_id=<uuid>)
+// DEPRECATED — use GET /api/payments/history instead
 // ---------------------------------------------------------------------------
 async function getWalletTransactions(req, res, next) {
   try {
+    res.set('Deprecation', 'true');
+    res.set('Link', '</api/payments/history>; rel="successor-version"');
+    res.set('Sunset', 'Sat, 01 Jan 2026 00:00:00 GMT');
+
     const wallet = await resolveWallet(req.user.userId, req.query.wallet_id || null);
     if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
 

@@ -12,7 +12,10 @@ const validate = (req, res, next) => {
   next();
 };
 
-// GET /api/dex/orderbook?selling=XLM&buying=USDC
+/**
+ * GET /api/dex/orderbook
+ * @public — read-only market data, no wallet access required.
+ */
 router.get('/orderbook',
   [
     query('selling').matches(VALID_ASSETS).withMessage('Invalid selling asset'),
@@ -29,7 +32,10 @@ router.get('/orderbook',
   }
 );
 
-// POST /api/dex/swap
+/**
+ * POST /api/dex/swap
+ * @protected — accesses and signs with the authenticated user's wallet.
+ */
 router.post('/swap',
   authMiddleware,
   [
@@ -67,7 +73,10 @@ router.post('/swap',
   }
 );
 
-// GET /api/dex/offers/history — filled and cancelled offers for the authenticated user
+/**
+ * GET /api/dex/offers/history
+ * @protected — returns offer history scoped to the authenticated user's wallet.
+ */
 router.get(
   '/offers/history',
   authMiddleware,

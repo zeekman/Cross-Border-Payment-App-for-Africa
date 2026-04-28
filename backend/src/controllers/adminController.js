@@ -77,7 +77,8 @@ async function getTransactions(req, res, next) {
 
     params.push(limit, offset);
     const { rows } = await db.query(
-      `SELECT * FROM transactions ${where}
+      `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, created_at
+       FROM transactions ${where}
        ORDER BY created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params

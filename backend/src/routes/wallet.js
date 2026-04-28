@@ -48,6 +48,26 @@ router.post(
 // Single-wallet endpoints (support optional ?wallet_id query param)
 router.get('/balance', getWallet);
 router.get('/qr', getQRCode);
+
+/**
+ * @swagger
+ * /api/wallet/transactions:
+ *   get:
+ *     summary: "[DEPRECATED] Get wallet transactions"
+ *     description: >
+ *       **Deprecated.** Use `GET /api/payments/history` instead, which
+ *       supports pagination, filtering, and a consistent response shape.
+ *       This endpoint will be removed in a future release.
+ *     deprecated: true
+ *     tags: [Wallet]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Transaction list (deprecated response shape)
+ *       401:
+ *         description: Unauthorized
+ */
 router.get('/transactions', getWalletTransactions);
 
 router.post(

@@ -1,5 +1,41 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
+const cache = require('../utils/cache');
+const logger = require('../utils/logger');
+
+const ANCHOR_INFO_TTL = 5 * 60; // 5 minutes in seconds
+const anchorUrl = process.env.ANCHOR_URL || 'https://testanchor.stellar.org';
+
+/**
+ * Fetch the anchor's SEP-31 /info endpoint and cache for 5 minutes.
+ * Returns the parsed JSON response.
+ */
+async function fetchAnchorInfo(assetCode) {
+  const cacheKey = `sep31:anchor_info:${anchorUrl}`;
+  const cached = await cache.get(cacheKey);
+  if (cached) return cached;
+
+  const response = await fetch(`${anchorUrl}/sep31/info`);
+  if (!response.ok) {
+    throw new Error(`Anchor /info returned ${response.status}`);
+  }
+  const data = await response.json();
+  await cache.set(cacheKey, data, ANCHOR_INFO_TTL);
+  return data;
+}
+
+/**
+ * Get required fields for a given asset from the anchor /info response.
+ * Returns an array of required field names.
+ */
+function getRequiredFields(anchorInfo, assetCode) {
+  const assetInfo = anchorInfo?.receive?.[assetCode];
+  if (!assetInfo) return [];
+  const fields = assetInfo.fields || {};
+  return Object.entries(fields)
+    .filter(([, meta]) => !meta.optional)
+    .map(([name]) => name);
+}
 
 async function getInfo(req, res, next) {
   try {
@@ -26,11 +62,28 @@ async function getInfo(req, res, next) {
 
 async function createTransaction(req, res, next) {
   try {
-    const { amount, asset_code = 'USDC', receiver_account, sender_name, sender_email } = req.body;
+    const { amount, asset_code = 'USDC', receiver_account, fields = {}, sender_name, sender_email } = req.body;
     const userId = req.user.userId;
 
     if (!amount || !receiver_account) {
       return res.status(400).json({ error: 'amount and receiver_account required' });
+    }
+
+    // Validate fields against anchor /info schema
+    let requiredFields = [];
+    try {
+      const anchorInfo = await fetchAnchorInfo(asset_code);
+      requiredFields = getRequiredFields(anchorInfo, asset_code);
+    } catch (err) {
+      logger.warn('Could not fetch anchor /info for field validation', { error: err.message });
+      // Proceed without validation if anchor is unreachable
+    }
+
+    if (requiredFields.length > 0) {
+      const missing = requiredFields.filter((f) => !fields[f]);
+      if (missing.length > 0) {
+        return res.status(400).json({ error: 'Missing required fields', missing_fields: missing });
+      }
     }
 
     // Check KYC status
@@ -82,5 +135,7 @@ async function getTransaction(req, res, next) {
 module.exports = {
   getInfo,
   createTransaction,
-  getTransaction
+  getTransaction,
+  fetchAnchorInfo,
+  getRequiredFields,
 };
