@@ -1,24 +1,17 @@
 const router = require('express').Router();
+const rateLimit = require('express-rate-limit');
 const authMiddleware = require('../middleware/auth');
 const { summary } = require('../controllers/analyticsController');
 
+const analyticsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => req.user?.userId || req.ip,
+  message: { error: 'Too many analytics requests, please try again later.' },
+});
+
 router.use(authMiddleware);
 
-router.get('/summary', summary);
-/**
- * @swagger
- * /api/analytics/summary:
- *   get:
- *     summary: Get analytics summary
- *     tags: [Analytics]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Analytics summary returned successfully
- *       401:
- *         description: Unauthorized
- */
-router.get('/summary', authMiddleware, summary);
+router.get('/summary', analyticsLimiter, summary);
 
 module.exports = router;
