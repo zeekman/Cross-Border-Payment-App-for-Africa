@@ -12,6 +12,7 @@ const {
   validateBatchRecipient,
   findReceivePath,
   sendStrictReceivePathPayment,
+  getBalance,
 } = require("../services/stellar");
 const webhook = require("../services/webhook");
 const cache = require("../utils/cache");
@@ -73,6 +74,35 @@ async function dailyLimitExceeded(walletAddress, amount) {
   );
   const totalToday = parseFloat(result.rows[0].total);
   return totalToday + parseFloat(amount) > DAILY_SEND_LIMIT;
+}
+
+/**
+ * Check that the sender has sufficient balance (cached or live) for amount + estimated fee.
+ * Throws a structured 400 error if underfunded.
+ */
+async function checkSufficientBalance(publicKey, amount, asset) {
+  const FEE_XLM = 0.00001; // conservative single-op fee estimate
+  const required = parseFloat(amount) + (asset === 'XLM' ? FEE_XLM : 0);
+
+  let balances = await cache.get(`balance:${publicKey}`);
+  if (!balances) {
+    balances = await getBalance(publicKey);
+    await cache.set(`balance:${publicKey}`, balances);
+  }
+
+  const entry = balances.find(b => b.asset === asset);
+  const available = parseFloat(entry?.available_balance ?? entry?.balance ?? '0');
+
+  if (available < required) {
+    const err = new Error('Insufficient balance');
+    err.status = 400;
+    err.payload = {
+      code: 'INSUFFICIENT_BALANCE',
+      available: (entry?.available_balance ?? entry?.balance ?? '0').toString(),
+      required: required.toFixed(7),
+    };
+    throw err;
+  }
 }
 
 async function ensureKycIfNeeded(userId, amount, asset) {
@@ -254,6 +284,10 @@ async function send(req, res, next) {
         .json({ error: "Daily send limit reached. Try again later.", code: "DAILY_LIMIT_EXCEEDED" });
     }
 
+    // Balance check — fail fast with a clear message before hitting Stellar
+    await checkSufficientBalance(public_key, amount, asset);
+
+    // Broadcast to Stellar
     const { transactionHash, ledger, type, claimableBalanceId } = await sendPayment({
       senderPublicKey: public_key,
       encryptedSecretKey: encrypted_secret_key,
@@ -638,6 +672,9 @@ async function sendPath(req, res, next) {
       await logFraudBlock(public_key, fraudCheck.reason, source_amount, source_asset);
       return res.status(429).json({ error: fraudCheck.reason });
     }
+
+    // Balance check — fail fast with a clear message before hitting Stellar
+    await checkSufficientBalance(public_key, source_amount, source_asset);
 
     const { transactionHash, ledger } = await sendPathPayment({
       senderPublicKey: public_key, encryptedSecretKey: encrypted_secret_key,

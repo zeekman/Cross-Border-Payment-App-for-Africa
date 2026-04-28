@@ -324,6 +324,13 @@ STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
 # AES-256 encryption key for private key storage (must be exactly 32 characters)
 ENCRYPTION_KEY=your_32_character_encryption_key_
 
+# Cache Configuration
+# Balance cache TTL in seconds (default: 30)
+# Time-To-Live for cached wallet balance data. Lower values ensure fresher data but increase load on Horizon.
+# Higher values reduce load but may show stale balances after recent transactions.
+# Cache is automatically invalidated after send, sendBatch, and sendPath operations.
+BALANCE_CACHE_TTL_SECONDS=30
+
 # CORS
 FRONTEND_URL=http://localhost:3000
 ```
@@ -341,6 +348,24 @@ FRONTEND_URL=http://localhost:3000
 - Fraud protection: blocks wallets exceeding 5 transactions in 10 minutes
 - Input validation on all endpoints via `express-validator`
 - CORS restricted to configured frontend origin
+
+---
+
+## Performance & Caching
+
+**Balance Caching with Redis**
+
+Wallet balances are cached in Redis to reduce load on the Stellar Horizon API. The cache behavior is configurable:
+
+- **Configurable TTL**: Set `BALANCE_CACHE_TTL_SECONDS` in your environment (default: 30 seconds)
+- **Automatic Invalidation**: Cache is cleared immediately after:
+  - Standard payments (`POST /api/payments`)
+  - Batch payments (`POST /api/payments/batch`)
+  - Path payments (`POST /api/payments/send-path`)
+- **Fallback Behavior**: If Redis is not configured, balances are fetched live from Horizon on every request
+- **Stale Balance Risk**: In production, ensure the TTL is low enough (15-30 seconds recommended) to prevent users from seeing significantly stale balances after receiving payments
+
+To adjust the cache TTL in production, update the `BALANCE_CACHE_TTL_SECONDS` environment variable without restarting (if using a process manager with hot-reload support).
 
 ---
 

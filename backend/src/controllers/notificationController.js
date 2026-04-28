@@ -9,8 +9,19 @@ const { startStreamForUser, stopStreamForUser } = require('../services/horizonWo
 async function subscribe(req, res, next) {
   try {
     const { subscription } = req.body;
-    if (!subscription?.endpoint) {
-      return res.status(400).json({ error: 'Invalid push subscription' });
+    const errors = [];
+
+    if (!subscription?.endpoint || !/^https:\/\//i.test(subscription.endpoint)) {
+      errors.push({ field: 'subscription.endpoint', message: 'endpoint must be a valid HTTPS URL' });
+    }
+    if (!subscription?.keys?.p256dh || typeof subscription.keys.p256dh !== 'string' || !subscription.keys.p256dh.trim()) {
+      errors.push({ field: 'subscription.keys.p256dh', message: 'keys.p256dh must be a non-empty string' });
+    }
+    if (!subscription?.keys?.auth || typeof subscription.keys.auth !== 'string' || !subscription.keys.auth.trim()) {
+      errors.push({ field: 'subscription.keys.auth', message: 'keys.auth must be a non-empty string' });
+    }
+    if (errors.length > 0) {
+      return res.status(400).json({ errors });
     }
 
     await db.query(
