@@ -266,6 +266,44 @@ test('search is case-insensitive', async () => {
   expect(screen.getByText('Alice')).toBeInTheDocument();
 });
 
+// ── Issue #284: two-step flow ──────────────────────────────────────────────
+
+test('first click shows confirmation preview and does not open PIN modal', async () => {
+  renderComponent();
+
+  await userEvent.type(screen.getByPlaceholderText('G... Stellar address'), RECIPIENT);
+  await userEvent.type(screen.getByPlaceholderText('0.00'), '10');
+
+  fireEvent.submit(screen.getByRole('button', { name: /review payment/i }).closest('form'));
+
+  // Confirmation panel should appear
+  await screen.findByText('Confirm Transaction');
+  // PIN modal must NOT be visible yet
+  expect(screen.queryByRole('dialog', { name: /pin/i })).not.toBeInTheDocument();
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test('second click opens PIN verification modal', async () => {
+  renderComponent();
+
+  await userEvent.type(screen.getByPlaceholderText('G... Stellar address'), RECIPIENT);
+  await userEvent.type(screen.getByPlaceholderText('0.00'), '10');
+
+  // First click → confirmation preview
+  fireEvent.submit(screen.getByRole('button', { name: /review payment/i }).closest('form'));
+  await screen.findByText('Confirm Transaction');
+
+  // Second click → PIN modal
+  fireEvent.submit(screen.getByRole('button', { name: /confirm & send/i }).closest('form'));
+
+  // PINVerificationModal renders a heading or label containing "PIN"
+  await waitFor(() =>
+    expect(screen.getByText(/enter.*pin|pin.*verification/i)).toBeInTheDocument()
+  );
+  // Payment API must not have been called yet (PIN not entered)
+  expect(api.post).not.toHaveBeenCalledWith('/payments/send', expect.anything());
+});
+
 test('submit button is disabled while loading', async () => {
   api.post.mockReturnValue(new Promise(() => {})); // never resolves → stays loading
   renderComponent();

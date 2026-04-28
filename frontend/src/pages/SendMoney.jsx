@@ -245,8 +245,9 @@ export default function SendMoney() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    // First call: show confirmation preview with fresh fee estimate and optional contract simulation.
     if (!confirmed) {
-      // Fetch fresh fee estimate at confirmation time
       try {
         const r = await api.get('/payments/estimate-fee');
         setFeeXLM(r.data.fee_xlm);
@@ -284,8 +285,8 @@ export default function SendMoney() {
       setConfirmed(true);
       return;
     }
-    // Show PIN verification modal instead of directly submitting
-    if (!confirmed) { setConfirmed(true); return; }
+
+    // Second call: user confirmed the preview — open PIN modal to authorise the payment.
     setShowPINVerification(true);
   };
 
