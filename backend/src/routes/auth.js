@@ -27,13 +27,42 @@ const validate = (req, res, next) => {
   next();
 };
 
+const PASSWORD_MIN_LENGTH = parseInt(process.env.PASSWORD_MIN_LENGTH, 10) || 8;
+
+/**
+ * Validates password strength and returns a list of unmet requirements.
+ * Rules: min length, uppercase, lowercase, digit, special character.
+ */
+function checkPasswordStrength(password) {
+  const unmet = [];
+  if (password.length < PASSWORD_MIN_LENGTH)
+    unmet.push(`at least ${PASSWORD_MIN_LENGTH} characters`);
+  if (!/[A-Z]/.test(password))
+    unmet.push('at least one uppercase letter');
+  if (!/[a-z]/.test(password))
+    unmet.push('at least one lowercase letter');
+  if (!/\d/.test(password))
+    unmet.push('at least one digit');
+  if (!/[^A-Za-z0-9]/.test(password))
+    unmet.push('at least one special character');
+  return unmet;
+}
+
 router.post(
   '/register',
   geoRestriction,
   [
     body('full_name').trim().notEmpty().withMessage('Full name is required'),
     body('email').isEmail().normalizeEmail(),
-    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    body('password')
+      .notEmpty().withMessage('Password is required')
+      .custom((value) => {
+        const unmet = checkPasswordStrength(value);
+        if (unmet.length > 0) {
+          throw new Error(`Password does not meet requirements: ${unmet.join(', ')}`);
+        }
+        return true;
+      }),
   ],
   validate,
   register
