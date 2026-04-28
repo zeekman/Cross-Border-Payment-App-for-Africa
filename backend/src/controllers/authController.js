@@ -630,9 +630,11 @@ async function resetPassword(req, res, next) {
       `UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
       [userId]
     );
+    await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
     await db.query('COMMIT');
 
     audit.log(userId, 'password_change', req.ip, req.headers['user-agent']);
+    audit.log(userId, 'password_reset_sessions_invalidated', req.ip, req.headers['user-agent']);
     res.json({ message: 'Password has been reset. You can now log in.' });
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
