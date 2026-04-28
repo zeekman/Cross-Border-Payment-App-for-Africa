@@ -93,6 +93,20 @@ describe('POST /wallet/contacts', () => {
     expect(paths).toContain('name');
     expect(paths).toContain('wallet_address');
   });
+
+  test('accepts a federation address (user*domain.com format)', async () => {
+    db.query.mockResolvedValueOnce({
+      rows: [{ name: 'Bob', wallet_address: 'bob*afripay.io' }],
+    });
+
+    const res = await request(app)
+      .post('/wallet/contacts')
+      .set('Authorization', 'Bearer token')
+      .send({ name: 'Bob', wallet_address: 'bob*afripay.io' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.contact.wallet_address).toBe('bob*afripay.io');
+  });
 });
 
 describe('DELETE /wallet/contacts/:id', () => {

@@ -95,7 +95,8 @@ router.post(
       .notEmpty()
       .withMessage('Wallet address is required')
       .custom((value) => {
-        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) throw new Error('Invalid Stellar wallet address');
+        if (!value.includes('*') && !StellarSdk.StrKey.isValidEd25519PublicKey(value))
+          throw new Error('Invalid Stellar wallet address');
         return true;
       }),
     body('notes').optional({ nullable: true }).isLength({ max: 500 }).withMessage('Notes max 500 characters'),
