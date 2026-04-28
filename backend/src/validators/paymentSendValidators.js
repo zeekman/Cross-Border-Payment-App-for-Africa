@@ -35,8 +35,8 @@ module.exports = [
       return true;
     }
 
-    if (mt === 'text' && memo.length > 28) {
-      throw new Error('Text memo must be at most 28 characters');
+    if (mt === 'text' && Buffer.byteLength(memo, 'utf8') > 28) {
+      throw new Error('Text memo must be at most 28 bytes');
     }
     if (mt === 'id') {
       if (!/^\d+$/.test(memo)) throw new Error('Memo ID must be a numeric string');

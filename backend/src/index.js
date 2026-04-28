@@ -120,6 +120,8 @@ app.listen(PORT, () => {
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS).unref();
 
+  scheduledPaymentsJob.stop();
+
   server.close(async () => {
     clearTimeout(forceExit);
     try {

@@ -3,7 +3,7 @@ const db = require('../db');
 
 async function create(req, res, next) {
   try {
-    const { recipient_wallet, amount, asset = 'XLM', frequency, memo } = req.body;
+    const { recipient_wallet, amount, asset = 'XLM', frequency, memo, execute_at } = req.body;
     const userId = req.user.userId;
 
     if (!amount || parseFloat(amount) <= 0) {
@@ -14,7 +14,7 @@ async function create(req, res, next) {
     }
 
     const id = uuidv4();
-    const nextRunAt = new Date();
+    const nextRunAt = new Date(execute_at);
 
     await db.query(
       `INSERT INTO scheduled_payments (id, user_id, recipient_wallet, amount, asset, frequency, next_run_at, memo)

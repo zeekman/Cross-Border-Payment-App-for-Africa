@@ -31,6 +31,33 @@ const validate = (req, res, next) => {
 router.use(authMiddleware);
 router.use(isAdmin);
 
+/**
+ * @openapi
+ * /api/admin/health:
+ *   get:
+ *     summary: Full health diagnostics (admin only)
+ *     description: Returns detailed service health including DB, Stellar, network, and pool stats.
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: All services healthy
+ *       503:
+ *         description: One or more services degraded
+ *       403:
+ *         description: Admin access required
+ */
+router.get('/health', async (req, res) => {
+  const { runHealthChecks } = require('../services/health');
+  try {
+    const body = await runHealthChecks();
+    res.status(body.status === 'ok' ? 200 : 503).json(body);
+  } catch {
+    res.status(503).json({ status: 'degraded', db: 'down', stellar: 'down' });
+  }
+});
+
 router.get('/stats', getStats);
 router.get('/users', getUsers);
 router.get('/transactions', getTransactions);

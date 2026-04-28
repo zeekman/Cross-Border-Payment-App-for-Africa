@@ -25,3 +25,20 @@
 
 Current progress: Starting step 1.
 
+
+---
+
+## Deprecation Removal TODO
+
+### GET /api/wallet/transactions (issue #270)
+
+- **Status**: Deprecated as of 2025-04-27
+- **Replacement**: `GET /api/payments/history`
+- **Sunset date**: 2026-01-01
+- **Deprecation headers set**: `Deprecation: true`, `Link: </api/payments/history>; rel="successor-version"`, `Sunset`
+- **Swagger**: marked `deprecated: true` in `backend/src/routes/wallet.js`
+- [ ] **Remove** `GET /api/wallet/transactions` route from `backend/src/routes/wallet.js`
+- [ ] **Remove** `getWalletTransactions` from `backend/src/controllers/walletController.js`
+- [ ] **Remove** `getWalletTransactions` export from `walletController.js`
+- [ ] Verify no frontend code references `/wallet/transactions`
+- [ ] Update this TODO entry to mark removal complete

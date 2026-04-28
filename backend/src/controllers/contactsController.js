@@ -35,7 +35,11 @@ async function addContact(req, res, next) {
 
 async function deleteContact(req, res, next) {
   try {
-    await db.query('DELETE FROM contacts WHERE id = $1 AND user_id = $2', [req.params.id, req.user.userId]);
+    const result = await db.query(
+      'DELETE FROM contacts WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.userId],
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Contact not found' });
     res.json({ message: 'Contact deleted' });
   } catch (err) { next(err); }
 }

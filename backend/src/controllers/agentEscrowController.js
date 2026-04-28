@@ -25,6 +25,15 @@ async function create(req, res, next) {
   try {
     const { agent_wallet, recipient_wallet, amount, asset = "USDC" } = req.body;
 
+    // Validate that the agent is a registered, approved AfriPay agent
+    const agentResult = await db.query(
+      "SELECT id FROM agents WHERE wallet_address = $1 AND status = 'approved'",
+      [agent_wallet]
+    );
+    if (!agentResult.rows[0]) {
+      return res.status(400).json({ error: "Agent is not registered in the AfriPay network" });
+    }
+
     const walletResult = await db.query(
       "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
       [req.user.userId]
