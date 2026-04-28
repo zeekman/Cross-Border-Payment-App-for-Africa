@@ -696,10 +696,11 @@ test('resetPassword: updates password and marks tokens used', async () => {
   const bcrypt = require('bcryptjs');
   db.query
     .mockResolvedValueOnce({ rows: [{ id: 't1', user_id: 'u1' }] })
-    .mockResolvedValueOnce({ rows: [] })
-    .mockResolvedValueOnce({ rows: [] })
-    .mockResolvedValueOnce({ rows: [] })
-    .mockResolvedValueOnce({ rows: [] });
+    .mockResolvedValueOnce({ rows: [] })  // BEGIN
+    .mockResolvedValueOnce({ rows: [] })  // UPDATE users
+    .mockResolvedValueOnce({ rows: [] })  // UPDATE password_reset_tokens
+    .mockResolvedValueOnce({ rows: [] })  // DELETE refresh_tokens
+    .mockResolvedValueOnce({ rows: [] }); // COMMIT
 
   const req = { body: { token: 'raw-reset-token', password: 'newpass12' } };
   const res = mockRes();
@@ -715,6 +716,29 @@ test('resetPassword: updates password and marks tokens used', async () => {
   expect(res.json).toHaveBeenCalledWith(
     expect.objectContaining({ message: expect.stringContaining('reset') })
   );
+});
+
+test('resetPassword: deletes all refresh tokens for user after reset', async () => {
+  const audit = require('../src/services/audit');
+  db.query
+    .mockResolvedValueOnce({ rows: [{ id: 't1', user_id: 'u1' }] })
+    .mockResolvedValueOnce({ rows: [] })  // BEGIN
+    .mockResolvedValueOnce({ rows: [] })  // UPDATE users
+    .mockResolvedValueOnce({ rows: [] })  // UPDATE password_reset_tokens
+    .mockResolvedValueOnce({ rows: [] })  // DELETE refresh_tokens
+    .mockResolvedValueOnce({ rows: [] }); // COMMIT
+
+  const req = { body: { token: 'raw-reset-token', password: 'newpass12' }, ip: '1.2.3.4', headers: { 'user-agent': 'test' } };
+  const res = mockRes();
+  await resetPassword(req, res, jest.fn());
+
+  const deleteCall = db.query.mock.calls.find(
+    (c) => typeof c[0] === 'string' && c[0].includes('DELETE FROM refresh_tokens')
+  );
+  expect(deleteCall).toBeDefined();
+  expect(deleteCall[1][0]).toBe('u1');
+
+  expect(audit.log).toHaveBeenCalledWith('u1', 'password_reset_sessions_invalidated', expect.anything(), expect.anything());
 });
 
 // ── getMe ─────────────────────────────────────────────────────────────────────

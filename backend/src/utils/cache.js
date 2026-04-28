@@ -1,7 +1,8 @@
 const Redis = require('ioredis');
 const logger = require('./logger');
 
-const BALANCE_TTL = 30; // seconds
+// Read balance cache TTL from environment, default to 30 seconds
+const BALANCE_TTL = parseInt(process.env.BALANCE_CACHE_TTL_SECONDS || '30', 10);
 
 let client = null;
 

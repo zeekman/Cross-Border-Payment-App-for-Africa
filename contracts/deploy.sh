@@ -12,11 +12,38 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Configuration
+# Parse arguments
 NETWORK="${STELLAR_NETWORK:-testnet}"
-CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Default to escrow for backwards compatibility; override with CONTRACT=recurring-payments
+CONFIRM_MAINNET=false
 TARGET_CONTRACT="${CONTRACT:-escrow}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --network)
+            NETWORK="$2"
+            shift 2
+            ;;
+        --confirm-mainnet)
+            CONFIRM_MAINNET=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [[ "$NETWORK" != "testnet" && "$NETWORK" != "mainnet" ]]; then
+    echo -e "${RED}Error: --network must be 'testnet' or 'mainnet'${NC}"
+    exit 1
+fi
+
+if [[ "$NETWORK" == "mainnet" && "$CONFIRM_MAINNET" != "true" ]]; then
+    echo -e "${RED}Error: Mainnet deployment requires --confirm-mainnet flag to prevent accidental production deployments.${NC}"
+    exit 1
+fi
+
+CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 case "$TARGET_CONTRACT" in
   escrow)
@@ -48,7 +75,7 @@ esac
 BUILTIN_CONTRACT_DIR="$HOME/.soroban"
 
 echo -e "${YELLOW}=== Soroban ${TARGET_CONTRACT} Contract Deployment ===${NC}"
-echo "Network: $NETWORK"
+echo -e "${YELLOW}>>> DEPLOYING TO NETWORK: ${NETWORK} <<<${NC}"
 echo "Contract Directory: $CONTRACT_DIR"
 
 # Step 1: Check prerequisites

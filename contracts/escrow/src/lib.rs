@@ -66,7 +66,6 @@ pub enum DataKey {
     Escrow(u64),
 }
 
-// 30 days in seconds
 const DEFAULT_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Maximum allowed fee: 50% (5000 bps). Configurable by admin via contract upgrade.
@@ -137,6 +136,9 @@ impl EscrowContract {
         if release_fee_bps > MAX_FEE_BPS {
             panic!("Fee exceeds maximum of 5000 bps (50%)");
         }
+        if sender == recipient || sender == agent || recipient == agent {
+            panic!("Sender, recipient, and agent must be distinct addresses");
+        }
 
         sender.require_auth();
 
@@ -193,7 +195,6 @@ impl EscrowContract {
         next_id
     }
 
-    /// Top up an existing pending escrow. Panics if the escrow has expired.
     pub fn deposit(env: Env, sender: Address, escrow_id: u64, amount: i128) {
         if amount <= 0 {
             panic!("Amount must be positive");
@@ -205,7 +206,7 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
-            .expect("Escrow not found");
+            .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
 
         if escrow.status != EscrowStatus::Pending {
             panic!("Escrow is not in pending state");
@@ -219,7 +220,7 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&DataKey::UsdcAddress)
-            .unwrap();
+            .expect("Contract not initialized");
 
         token::Client::new(&env, &usdc_address).transfer(
             &sender,
@@ -240,7 +241,7 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
-            .expect("Escrow not found");
+            .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
 
         if agent != escrow.agent {
             panic!("Only the agent can release escrow");
@@ -256,7 +257,7 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&DataKey::UsdcAddress)
-            .unwrap();
+            .expect("Contract not initialized");
 
         token::Client::new(&env, &usdc_address).transfer(
             &env.current_contract_address(),
@@ -295,7 +296,7 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
-            .expect("Escrow not found");
+            .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
 
         if sender != escrow.sender {
             panic!("Only the sender can cancel escrow");
@@ -308,7 +309,7 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&DataKey::UsdcAddress)
-            .unwrap();
+            .expect("Contract not initialized");
 
         token::Client::new(&env, &usdc_address).transfer(
             &env.current_contract_address(),
@@ -334,7 +335,7 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
-            .expect("Escrow not found")
+            .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id))
     }
 
     pub fn get_accumulated_fees(env: Env) -> i128 {
@@ -347,11 +348,16 @@ impl EscrowContract {
     pub fn withdraw_fees(env: Env, admin: Address, amount: i128) {
         admin.require_auth();
 
+        if amount <= 0 {
+            panic!("Amount must be positive");
+        }
+
         let stored_admin: Address = env
             .storage()
             .persistent()
             .get(&DataKey::Admin)
             .unwrap();
+            .expect("Contract not initialized");
 
         if admin != stored_admin {
             panic!("Only admin can withdraw fees");
@@ -372,6 +378,7 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::UsdcAddress)
             .unwrap();
+            .expect("Contract not initialized");
 
         token::Client::new(&env, &usdc_address).transfer(
             &env.current_contract_address(),
@@ -386,11 +393,17 @@ impl EscrowContract {
 
     pub fn get_metadata(env: Env) -> (Address, Address) {
         let admin: Address = env.storage().persistent().get(&DataKey::Admin).unwrap();
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
         let usdc_address: Address = env
             .storage()
             .persistent()
             .get(&DataKey::UsdcAddress)
             .unwrap();
+            .expect("Contract not initialized");
         (admin, usdc_address)
     }
 }

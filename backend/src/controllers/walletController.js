@@ -22,6 +22,7 @@ const {
 const QRCode = require('qrcode');
 const cache = require('../utils/cache');
 const audit = require('../services/audit');
+const { verifyToken } = require('../services/twofa');
 
 
 const MAX_WALLETS_PER_USER = 5;
@@ -197,14 +198,21 @@ async function getWalletTransactions(req, res, next) {
 // ---------------------------------------------------------------------------
 async function exportKey(req, res, next) {
   try {
-    const { password, wallet_id } = req.body;
+    const { password, wallet_id, totp_code } = req.body;
     if (!password) return res.status(400).json({ error: 'Password is required' });
 
-    const userResult = await db.query('SELECT password_hash FROM users WHERE id = $1', [req.user.userId]);
+    const userResult = await db.query('SELECT password_hash, totp_enabled, totp_secret FROM users WHERE id = $1', [req.user.userId]);
     if (!userResult.rows[0]) return res.status(404).json({ error: 'User not found' });
 
     const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
     if (!valid) return res.status(401).json({ error: 'Incorrect password' });
+
+    // Check 2FA if enabled
+    if (userResult.rows[0].totp_enabled) {
+      if (!totp_code) return res.status(403).json({ error: '2FA verification required' });
+      const isValidTotp = verifyToken(userResult.rows[0].totp_secret, totp_code);
+      if (!isValidTotp) return res.status(403).json({ error: '2FA verification required' });
+    }
 
     const wallet = await resolveWallet(req.user.userId, wallet_id || null);
     if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
