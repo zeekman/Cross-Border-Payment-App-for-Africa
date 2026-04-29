@@ -6,6 +6,9 @@ const {
   refresh,
   logout,
   verifyEmail,
+  getMe,
+  setPIN,
+  verifyPIN,
   verifyPhone,
   getMe,
   updateProfile,
@@ -54,6 +57,7 @@ router.post(
   [
     body('full_name').trim().notEmpty().withMessage('Full name is required'),
     body('email').isEmail().normalizeEmail(),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
     body('password')
       .notEmpty().withMessage('Password is required')
       .custom((value) => {
@@ -86,12 +90,17 @@ router.post(
 router.post(
   '/reset-password',
   [
+    body('email').isEmail().normalizeEmail(),
+    body('password').notEmpty(),
     body('token').trim().notEmpty().withMessage('Reset token is required'),
     body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   ],
   validate,
   resetPassword
 );
+
+router.post('/refresh', refresh);
+router.post('/logout', logout);
 
 router.get('/verify-email', verifyEmail);
 router.post(
@@ -127,6 +136,7 @@ router.post('/2fa/setup', authMiddleware, setup2FA);
 
 router.post('/2fa/verify',
   authMiddleware,
+  [body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')],
   [
     body('totp_code').matches(/^\d{6}$/).withMessage('TOTP code must be 6 digits')
   ],
@@ -136,6 +146,7 @@ router.post('/2fa/verify',
 
 router.post('/2fa/disable',
   authMiddleware,
+  [body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')],
   [
     body('password').notEmpty().withMessage('Password is required')
   ],
