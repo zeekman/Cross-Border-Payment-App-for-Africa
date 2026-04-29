@@ -1,9 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Send, ChevronDown, Users, Camera, Code } from 'lucide-react';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Send, ChevronDown, Users, Camera, ArrowRightLeft, Wallet } from 'lucide-react';
+import { ArrowLeft, Send, ChevronDown, Users, Camera, Code, ArrowRightLeft, Wallet, AlertTriangle } from 'lucide-react';
 import api from '../utils/api';
 import { useExchangeRates } from '../hooks/useExchangeRates';
 import toast from 'react-hot-toast';
@@ -55,6 +52,9 @@ export default function SendMoney() {
   const [memoRequired, setMemoRequired] = useState(false);
   // 'send' = strict send (sender specifies exact amount), 'receive' = strict receive (recipient gets exact amount)
   const [sendMode, setSendMode] = useState('send');
+
+  // Trustline check state
+  const [trustlineWarning, setTrustlineWarning] = useState(null); // null | string (asset code)
 
   // Ledger hardware wallet state
   const [showLedgerModal, setShowLedgerModal] = useState(false);
@@ -230,6 +230,36 @@ export default function SendMoney() {
       setMemoRequired(false);
     }
   }, []);
+
+  // Debounced trustline check: warn when recipient may not hold the selected non-XLM asset
+  useEffect(() => {
+    const address = form.recipient_address;
+    const asset = form.asset;
+
+    // Only check for non-XLM assets with a plausible Stellar address
+    if (asset === 'XLM' || !address || address.length < 56 || !address.startsWith('G')) {
+      setTrustlineWarning(null);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await api.get('/wallet/check-trustline', {
+          params: { address, asset },
+        });
+        if (res.data.has_trustline === false) {
+          setTrustlineWarning(asset);
+        } else {
+          setTrustlineWarning(null);
+        }
+      } catch {
+        // Silently ignore — don't block the user on a failed check
+        setTrustlineWarning(null);
+      }
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [form.recipient_address, form.asset]);
 
   const estimatedValue = form.amount && form.asset === 'XLM'
     ? `≈ ${convertFromXLM(form.amount, 'USD')} USD`
@@ -577,6 +607,19 @@ export default function SendMoney() {
         {memoRequired && !form.memo.trim() && (
           <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-3 text-yellow-400 text-sm">
             ⚠️ This address requires a memo. Payments without a memo may be lost.
+          </div>
+        )}
+
+        {/* Trustline warning — advisory only, does not block submission */}
+        {trustlineWarning && (
+          <div
+            role="alert"
+            className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/40 rounded-xl px-4 py-3 text-amber-400 text-sm"
+          >
+            <AlertTriangle size={16} className="shrink-0 mt-0.5" aria-hidden="true" />
+            <span>
+              ⚠️ Recipient may not be able to receive {trustlineWarning}. Verify their wallet supports this asset.
+            </span>
           </div>
         )}
 
