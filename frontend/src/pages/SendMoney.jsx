@@ -13,6 +13,11 @@ import LedgerSignModal from '../components/LedgerSignModal';
 const SLIPPAGE_OPTIONS = [0.5, 1, 2];
 const DEFAULT_SLIPPAGE = 1;
 
+const getSavedSlippage = () => {
+  const v = parseFloat(localStorage.getItem('afripay_slippage'));
+  return SLIPPAGE_OPTIONS.includes(v) ? v : DEFAULT_SLIPPAGE;
+};
+
 export default function SendMoney() {
   const navigate = useNavigate();
   const { t } = useTranslation();
@@ -24,7 +29,7 @@ export default function SendMoney() {
     asset: searchParams.get('asset') || 'XLM',
     memo: searchParams.get('memo') || '',
     destination_asset: '',
-    slippage: DEFAULT_SLIPPAGE,
+    slippage: getSavedSlippage(),
     memo_type: 'text',
     fee_priority: 'standard',
   });
@@ -70,7 +75,7 @@ export default function SendMoney() {
     asset: searchParams.get('asset') || 'XLM',
     memo: searchParams.get('memo') || '',
     destination_asset: '',
-    slippage: DEFAULT_SLIPPAGE,
+    slippage: getSavedSlippage(),
     memo_type: 'text',
     fee_priority: 'standard',
     private_note: '',
@@ -784,7 +789,7 @@ export default function SendMoney() {
                       <button
                         key={s}
                         type="button"
-                        onClick={() => setForm({ ...form, slippage: s })}
+                        onClick={() => { localStorage.setItem('afripay_slippage', s); setForm({ ...form, slippage: s }); }}
                         className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${form.slippage === s
                           ? 'border-primary-500 text-primary-400'
                           : 'border-gray-600 text-gray-400 hover:border-gray-400'
@@ -811,7 +816,7 @@ export default function SendMoney() {
                       <button
                         key={s}
                         type="button"
-                        onClick={() => setForm({ ...form, slippage: s })}
+                        onClick={() => { localStorage.setItem('afripay_slippage', s); setForm({ ...form, slippage: s }); }}
                         className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${form.slippage === s
                           ? 'border-primary-500 text-primary-400'
                           : 'border-gray-600 text-gray-400 hover:border-gray-400'

@@ -58,6 +58,7 @@ export function AuthProvider({ children }) {
       /* still clear local session */
     }
     tokenStore.clear();
+    localStorage.removeItem('afripay_slippage');
     setUser(null);
     Sentry.setUser(null);
   };
