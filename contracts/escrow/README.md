@@ -1,56 +1,101 @@
 # Soroban Escrow Contract
 
-A trustless, on-chain escrow contract for USDC remittances on the Stellar network. This contract enables secure multi-party fund transfers with agent-mediated payout confirmation and automated fee collection.
+A trustless, on-chain escrow contract for USDC remittances on the Stellar network. This contract holds funds in escrow, allows agents to confirm payout, and accumulates fees for withdrawal by the admin.
 
-## Overview
+## Contents
 
-The escrow contract implements a three-party model:
-1. **Sender** — Initiates the remittance by depositing USDC
-2. **Recipient** — The final beneficiary of funds
-3. **Agent** — Handles off-chain fiat distribution and confirms completion
+- [Contract Overview](#contract-overview)
+- [Public Function ABI](#public-function-abi)
+- [Event Schemas](#event-schemas)
+- [Storage Layout](#storage-layout)
+- [Getting Started](#getting-started)
+- [Deployment](#deployment)
+- [Deployed Contract IDs](#deployed-contract-ids)
+- [Integration Notes](#integration-notes)
+- [Security Summary](#security-summary)
 
-The contract ensures funds are held safely until the agent confirms successful payout, at which point fees are deducted and the agent receives their share.
+## Contract Overview
 
-## Architecture
+This contract supports a three-party escrow flow:
 
-### Core Components
+1. **Sender** - deposits USDC into escrow
+2. **Recipient** - beneficiary of the payout
+3. **Agent** - confirms payout and triggers release
 
-**Escrow State Machine**
-```
-Pending → Released (agent confirms)
-       ↓
-    Cancelled (sender refunds)
-```
+The escrow lifecycle is:
 
-**Data Model**
-- `Escrow` — Tracks sender, recipient, agent, amount, fees, status, and timestamp
-- `EscrowStatus` — Enum: Pending, Released, Cancelled
-- Events — Emitted on all state transitions for blockchain transparency
+- `Pending` → `Released` when the assigned agent calls `release_escrow`
+- `Pending` → `Cancelled` when the original sender calls `cancel_escrow`
 
-**Fee Mechanism**
-- Fees calculated in basis points (100 bps = 1%)
-- Deducted automatically on release
-- Accumulated for admin withdrawal
+Fees are calculated in basis points and stored separately as `AccumulatedFees`.
 
-## Smart Contract Functions
+## Public Function ABI
 
-### Initialization
+### `initialize`
+
+Signature:
 ```rust
-fn initialize(admin: Address, usdc_address: Address)
+fn initialize(env: Env, admin: Address, usdc_address: Address)
 ```
-Sets up the contract with an admin account and USDC token address. Called once during deployment.
 
-**Parameters:**
-- `admin` — Address authorized to withdraw accumulated fees
-- `usdc_address` — USDC contract address on Stellar (e.g., USDC on testnet)
+Description:
+- Sets the admin address and the USDC token contract address.
+- Can only be called once.
 
-**Events:** `EscrowInitialized`
+Parameters:
+- `admin` (`Address`) - the account authorized to withdraw collected fees and perform upgrades.
+- `usdc_address` (`Address`) - the contract ID for the USDC token on the network.
+
+Returns:
+- `void`
+
+Authorization:
+- No authorization check beyond deployment; this is expected to be called during contract setup.
+
+Panics / Errors:
+- `Contract already initialized` if the contract has already been initialized.
+
+Events:
+- `EscrowInitialized`
 
 ---
 
-### Create Escrow
+### `upgrade`
+
+Signature:
+```rust
+fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>)
+```
+
+Description:
+- Upgrades the current contract WASM code.
+- Only the stored admin may call this function.
+
+Parameters:
+- `admin` (`Address`) - must match the stored admin address.
+- `new_wasm_hash` (`BytesN<32>`) - the hash of the new WASM bytecode.
+
+Returns:
+- `void`
+
+Authorization:
+- Requires `admin.require_auth()` and the provided admin must equal the stored admin.
+
+Panics / Errors:
+- `Contract not initialized` if the contract has not been initialized.
+- `Only admin can upgrade the contract` if the caller is not the stored admin.
+
+Events:
+- `Upgraded`
+
+---
+
+### `create_escrow`
+
+Signature:
 ```rust
 fn create_escrow(
+    env: Env,
     sender: Address,
     recipient: Address,
     agent: Address,
@@ -58,87 +103,293 @@ fn create_escrow(
     release_fee_bps: u32,
 ) -> u64
 ```
-Creates a new escrow and transfers USDC from sender to the contract.
 
-**Parameters:**
-- `sender` — Stellar address of the remittance originator
-- `recipient` — Stellar address of the final recipient
-- `agent` — Agent handling the payout (agent account address)
-- `amount` — Amount in stroops (USDC smallest unit, 1 USDC = 10^7 stroops)
-- `release_fee_bps` — Fee in basis points (0-10000, where 10000 = 100%)
+Description:
+- Creates a new escrow entry and transfers USDC from the sender to the contract.
+- Stores sender, recipient, agent, amount, fee, status, timestamps, and expiry.
 
-**Returns:** Unique escrow ID (u64)
+Parameters:
+- `sender` (`Address`) - originator who must authorize the transfer.
+- `recipient` (`Address`) - the intended final beneficiary.
+- `agent` (`Address`) - the account that can release the escrow.
+- `amount` (`i128`) - USDC amount in stroops (`1 USDC = 10^7 stroops`).
+- `release_fee_bps` (`u32`) - release fee in basis points (max 5000).
 
-**Validations:**
-- Amount must be > 0
-- Fee must be ≤ 100% (10000 bps)
-- Sender must have sufficient USDC balance and approval
+Returns:
+- `u64` - the newly created escrow ID.
 
-**Events:** `EscrowCreated`
+Authorization:
+- `sender.require_auth()` is required.
 
-**Example (JavaScript via soroban.js):**
-```javascript
-const escrowId = await client.create_escrow(
-    senderAddress,
-    recipientAddress,
-    agentAddress,
-    1000_0000000n,  // 1000 USDC
-    250n             // 2.5% fee
-);
-```
+Panics / Errors:
+- `Amount below minimum (100 stroops)` if `amount < 100`.
+- `Fee cannot be 100%` if `release_fee_bps == 10000`.
+- `Fee exceeds maximum of 5000 bps (50%)` if `release_fee_bps > 5000`.
+- `Sender, recipient, and agent must be distinct addresses` if any two roles overlap.
+- Panics from the underlying USDC token transfer if the sender has insufficient allowance or balance.
 
----
-
-### Release Escrow
-```rust
-fn release_escrow(escrow_id: u64)
-```
-Confirms payout and releases funds to the agent. Only the assigned agent can call this.
-
-**Parameters:**
-- `escrow_id` — ID of the escrow to release
-
-**Logic:**
-1. Validates caller is the agent
-2. Calculates: `fee = (amount × fee_bps) / 10000`
-3. Transfers `agent_amount = amount - fee` to agent
-4. Accumulates `fee` in contract
-5. Updates escrow status to `Released`
-
-**Events:** `EscrowReleased`
-
-**Security:** Only the agent specified in `create_escrow` can release, preventing unauthorized payouts.
+Events:
+- `EscrowCreated`
 
 ---
 
-### Cancel Escrow
+### `deposit`
+
+Signature:
 ```rust
-fn cancel_escrow(escrow_id: u64)
+fn deposit(env: Env, sender: Address, escrow_id: u64, amount: i128)
 ```
-Refunds the full amount to sender. Only the sender can cancel, and only if escrow is pending.
 
-**Parameters:**
-- `escrow_id` — ID of the escrow to cancel
+Description:
+- Adds additional USDC to an existing pending escrow.
 
-**Logic:**
-1. Validates caller is the sender
-2. Verifies escrow is `Pending`
-3. Transfers full `amount` back to sender
-4. Updates escrow status to `Cancelled`
+Parameters:
+- `sender` (`Address`) - must authorize the transfer.
+- `escrow_id` (`u64`) - the escrow to deposit into.
+- `amount` (`i128`) - the deposit amount in stroops.
 
-**Events:** `EscrowCancelled`
+Returns:
+- `void`
+
+Authorization:
+- `sender.require_auth()` is required.
+
+Panics / Errors:
+- `Amount must be positive` if `amount <= 0`.
+- `Escrow {id} not found` if the escrow does not exist.
+- `Escrow is not in pending state` if the escrow is already released or cancelled.
+- `Escrow has expired` if the current ledger timestamp is greater than or equal to `expires_at`.
+- Panics from the underlying USDC transfer if the sender has insufficient allowance or balance.
+
+Events:
+- None emitted by this function.
 
 ---
 
-### Get Escrow
-```rust
-fn get_escrow(escrow_id: u64) -> Escrow
-```
-Retrieves full escrow details.
+### `release_escrow`
 
-**Returns:**
+Signature:
 ```rust
-Escrow {
+fn release_escrow(env: Env, agent: Address, escrow_id: u64)
+```
+
+Description:
+- Releases escrow funds to the assigned agent and records fees.
+
+Parameters:
+- `agent` (`Address`) - must be the escrow-assigned agent and authorize the call.
+- `escrow_id` (`u64`) - the escrow to release.
+
+Returns:
+- `void`
+
+Authorization:
+- `agent.require_auth()` is required.
+- The caller must match `escrow.agent`.
+
+Panics / Errors:
+- `Escrow {id} not found` if the escrow does not exist.
+- `Only the agent can release escrow` if the caller is not the assigned agent.
+- `Escrow is not in pending state` if the escrow is already released or cancelled.
+
+Behavior:
+- Calculates `fee_amount = (amount * release_fee_bps) / 10000`.
+- Sends `agent_amount = amount - fee_amount` to the agent.
+- Adds `fee_amount` to `AccumulatedFees` storage.
+- Updates the escrow status to `Released`.
+
+Events:
+- `EscrowReleased`
+
+---
+
+### `cancel_escrow`
+
+Signature:
+```rust
+fn cancel_escrow(env: Env, sender: Address, escrow_id: u64)
+```
+
+Description:
+- Refunds the full escrow amount to the original sender.
+
+Parameters:
+- `sender` (`Address`) - must authorize the refund.
+- `escrow_id` (`u64`) - the escrow to cancel.
+
+Returns:
+- `void`
+
+Authorization:
+- `sender.require_auth()` is required.
+- The caller must match `escrow.sender`.
+
+Panics / Errors:
+- `Escrow {id} not found` if the escrow does not exist.
+- `Only the sender can cancel escrow` if the caller is not the original sender.
+- `Escrow is not in pending state` if the escrow is already released or cancelled.
+
+Behavior:
+- Transfers the full escrow amount back to `sender`.
+- Updates the escrow status to `Cancelled`.
+
+Events:
+- `EscrowCancelled`
+
+---
+
+### `get_escrow`
+
+Signature:
+```rust
+fn get_escrow(env: Env, escrow_id: u64) -> Escrow
+```
+
+Description:
+- Reads the escrow record from storage.
+
+Parameters:
+- `escrow_id` (`u64`) - the escrow to retrieve.
+
+Returns:
+- `Escrow` struct.
+
+Panics / Errors:
+- `Escrow {id} not found` if the escrow does not exist.
+
+Authorization:
+- Public read-only.
+
+---
+
+### `get_accumulated_fees`
+
+Signature:
+```rust
+fn get_accumulated_fees(env: Env) -> i128
+```
+
+Description:
+- Returns the current collected fee balance.
+
+Returns:
+- `i128` - accumulated fee amount in stroops.
+
+Authorization:
+- Public read-only.
+
+---
+
+### `withdraw_fees`
+
+Signature:
+```rust
+fn withdraw_fees(env: Env, admin: Address, amount: i128)
+```
+
+Description:
+- Withdraws collected fees to the admin account.
+
+Parameters:
+- `admin` (`Address`) - must match the stored admin and authorize the call.
+- `amount` (`i128`) - withdrawal amount in stroops.
+
+Returns:
+- `void`
+
+Authorization:
+- `admin.require_auth()` is required.
+- The caller must equal the stored admin.
+
+Panics / Errors:
+- `Amount must be positive` if `amount <= 0`.
+- `Contract not initialized` if the contract was never initialized.
+- `Only admin can withdraw fees` if the caller is not the stored admin.
+- `Insufficient accumulated fees` if `amount` exceeds the stored fee balance.
+- Panics from the underlying USDC transfer if the contract account cannot send the requested amount.
+
+---
+
+### `get_metadata`
+
+Signature:
+```rust
+fn get_metadata(env: Env) -> (Address, Address)
+```
+
+Description:
+- Returns the configured admin and USDC token contract address.
+
+Returns:
+- `(Address, Address)` - `(admin, usdc_address)`.
+
+Authorization:
+- Public read-only.
+
+Panics / Errors:
+- `Contract not initialized` if the contract was never initialized.
+
+## Event Schemas
+
+### `EscrowInitialized`
+
+Emitted by `initialize`.
+
+Fields:
+- `contract_id` (`Address`) - the contract's own address.
+- `admin` (`Address`) - configured admin for the contract.
+- `usdc_address` (`Address`) - configured USDC token contract.
+
+### `Upgraded`
+
+Emitted by `upgrade`.
+
+Fields:
+- `new_wasm_hash` (`BytesN<32>`) - hash of the new contract WASM bytecode.
+
+### `EscrowCreated`
+
+Emitted by `create_escrow`.
+
+Fields:
+- `escrow_id` (`u64`) - assigned escrow identifier.
+- `sender` (`Address`) - escrow originator.
+- `recipient` (`Address`) - final beneficiary.
+- `agent` (`Address`) - payout agent.
+- `amount` (`i128`) - escrowed USDC amount in stroops.
+- `release_fee_bps` (`u32`) - configured fee in basis points.
+
+### `EscrowReleased`
+
+Emitted by `release_escrow`.
+
+Fields:
+- `escrow_id` (`u64`) - released escrow identifier.
+- `agent_amount` (`i128`) - amount transferred to the agent after fees.
+- `fee_amount` (`i128`) - fee amount added to accumulated fees.
+
+### `EscrowCancelled`
+
+Emitted by `cancel_escrow`.
+
+Fields:
+- `escrow_id` (`u64`) - cancelled escrow identifier.
+- `refund_amount` (`i128`) - refunded amount returned to the sender.
+
+## Storage Layout
+
+This contract stores state under the following `DataKey` variants in persistent storage:
+
+- `DataKey::Admin` -> `Address`
+- `DataKey::UsdcAddress` -> `Address`
+- `DataKey::EscrowCounter` -> `u64`
+- `DataKey::AccumulatedFees` -> `i128`
+- `DataKey::Escrow(u64)` -> `Escrow`
+
+### `Escrow` struct layout
+
+```rust
+struct Escrow {
     id: u64,
     sender: Address,
     recipient: Address,
@@ -146,93 +397,140 @@ Escrow {
     amount: i128,
     release_fee_bps: u32,
     status: EscrowStatus,
-    created_at: u64,  // Ledger timestamp in seconds
+    created_at: u64,
+    expires_at: u64,
 }
 ```
 
----
+### `EscrowStatus` enum
 
-### Get Accumulated Fees
 ```rust
-fn get_accumulated_fees() -> i128
-```
-Returns total platform fees collected but not yet withdrawn.
-
----
-
-### Withdraw Fees
-```rust
-fn withdraw_fees(amount: i128)
-```
-Withdraws accumulated fees to the admin account. Only admin can call.
-
-**Parameters:**
-- `amount` — Amount to withdraw (must be ≤ accumulated fees)
-
-**Security:** Only initialized admin can withdraw.
-
----
-
-### Get Metadata
-```rust
-fn get_metadata() -> (Address, Address)
-```
-Returns `(admin, usdc_address)` for verification and integration.
-
----
-
-## Events
-
-### EscrowInitialized
-```rust
-struct EscrowInitialized {
-    contract_id: Address,
-    admin: Address,
-    usdc_address: Address,
+enum EscrowStatus {
+    Pending,
+    Released,
+    Cancelled,
 }
 ```
 
-### EscrowCreated
-```rust
-struct EscrowCreated {
-    escrow_id: u64,
-    sender: Address,
-    recipient: Address,
-    agent: Address,
-    amount: i128,
-    release_fee_bps: u32,
+## Getting Started
+
+### JavaScript / Stellar SDK Example
+
+The contract can be invoked using the Soroban `InvokeHostFunction` operation via the Stellar SDK. The example below shows how to call `create_escrow`.
+
+> Replace `CONTRACT_ID`, `USDC_ADDRESS`, and account setup with your own values.
+
+```javascript
+import { Server, Keypair, Networks, TransactionBuilder, Operation, xdr, Contract } from 'stellar-sdk';
+
+const server = new Server('https://horizon-testnet.stellar.org');
+const NETWORK_PASSPHRASE = Networks.TESTNET;
+const CONTRACT_ID = 'YOUR_ESCROW_CONTRACT_ID';
+const USDC_ADDRESS = 'YOUR_USDC_CONTRACT_ID';
+
+async function invokeContract(sourceKeypair, functionName, args) {
+  const sourceAccount = await server.loadAccount(sourceKeypair.publicKey());
+  const contractAddress = Contract.fromContractId(CONTRACT_ID).address();
+
+  const tx = new TransactionBuilder(sourceAccount, {
+    fee: await server.fetchBaseFee(),
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(Operation.invokeHostFunction({
+      func: xdr.HostFunction.hostFunctionTypeInvokeContract(new xdr.InvokeContractArgs({
+        contractAddress,
+        functionName: xdr.Symbol.fromString(functionName),
+        args,
+      })),
+    }))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(sourceKeypair);
+  return server.submitTransaction(tx);
+}
+
+function addressToScVal(address) {
+  return xdr.ScVal.scvAddress(xdr.ScAddress.publicKeyTypeEd25519(address));
+}
+
+async function createEscrow(senderKeypair, recipientAddress, agentAddress, amountStroops, feeBps) {
+  const args = [
+    addressToScVal(senderKeypair.publicKey()),
+    addressToScVal(recipientAddress),
+    addressToScVal(agentAddress),
+    xdr.ScVal.scvI128(amountStroops.toString()),
+    xdr.ScVal.scvU32(feeBps),
+  ];
+
+  return invokeContract(senderKeypair, 'create_escrow', args);
 }
 ```
 
-### EscrowReleased
-```rust
-struct EscrowReleased {
-    escrow_id: u64,
-    agent_amount: i128,
-    fee_amount: i128,
-}
+### Recommended call flow
+
+1. Deploy and initialize the contract with `initialize(admin, usdc_address)`.
+2. Call `create_escrow(sender, recipient, agent, amount, release_fee_bps)`.
+3. Optionally call `deposit(sender, escrow_id, amount)` to add funds.
+4. Call `release_escrow(agent, escrow_id)` when payout is confirmed.
+5. Call `cancel_escrow(sender, escrow_id)` to refund pending escrow.
+6. Admin calls `withdraw_fees(admin, amount)` to collect fees.
+
+## Deployment
+
+### Testnet deployment
+
+```bash
+export STELLAR_NETWORK=testnet
+export SOROBAN_SECRET_KEY='YOUR_SECRET_KEY'
+cd contracts
+bash deploy.sh
 ```
 
-### EscrowCancelled
-```rust
-struct EscrowCancelled {
-    escrow_id: u64,
-    refund_amount: i128,
-}
+### Mainnet deployment
+
+```bash
+export STELLAR_NETWORK=mainnet
+export SOROBAN_SECRET_KEY='YOUR_SECRET_KEY'
+cd contracts
+bash deploy.sh
 ```
 
-All events are published to the Stellar ledger and visible on Stellar Expert.
+### Manual deployment
 
----
+```bash
+cargo build --release --target wasm32-unknown-unknown
+soroban contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/escrow_contract.wasm \
+  --source YOUR_SECRET_KEY \
+  --network testnet
+```
 
-## Building
+## Deployed Contract IDs
 
-### Prerequisites
-- Rust 1.70+
-- `wasm32-unknown-unknown` target
-- Soroban CLI
+- Testnet: `TBD`
+- Mainnet: `TBD`
 
-### Build
+> Update these values once the escrow contract is deployed to the desired network.
+
+## Integration Notes
+
+- Amounts are always represented in stroops for USDC (`1 USDC = 10^7 stroops`).
+- Fees are basis points: `100 bps = 1%`, `250 bps = 2.5%`.
+- `create_escrow` will fail if sender, recipient, and agent addresses are not distinct.
+- Deposits are only allowed while escrow status is `Pending` and before `expires_at`.
+- The contract does not emit an event for `deposit`.
+
+## Security Summary
+
+- `initialize` is single-use and sets trusted admin and USDC addresses.
+- `create_escrow` requires sender authorization.
+- `release_escrow` can only be called by the assigned agent.
+- `cancel_escrow` can only be called by the original sender.
+- `withdraw_fees` can only be called by the stored admin.
+- Fees are stored in `AccumulatedFees` and never directly withdrawable by non-admin accounts.
+
+## Build
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -240,203 +538,9 @@ cd contracts/escrow
 cargo build --release --target wasm32-unknown-unknown
 ```
 
-Output: `target/wasm32-unknown-unknown/release/escrow_contract.wasm`
-
-### Test
+## Tests
 
 ```bash
 cd contracts/escrow
 cargo test
 ```
-
-Tests cover:
-- Initialization
-- Double initialization prevention
-- Escrow creation
-- Multiple escrows
-- Invalid amount/fee validation
-- Fee accumulation
-- Non-existent escrow handling
-- Metadata retrieval
-
----
-
-## Deployment
-
-### Prerequisites
-1. **Soroban CLI** — [Installation guide](https://soroban.stellar.org/docs/reference/cli)
-2. **Stellar account** with XLM for transaction fees
-3. **Secret key** with proper permissions
-
-### Deploy to Testnet
-
-```bash
-export STELLAR_NETWORK=testnet
-export SOROBAN_SECRET_KEY='your-secret-key'
-cd contracts
-bash deploy.sh
-```
-
-### Deploy to Mainnet
-
-```bash
-export STELLAR_NETWORK=mainnet
-export SOROBAN_SECRET_KEY='your-secret-key'
-cd contracts
-bash deploy.sh
-```
-
-The script will:
-1. Build the contract
-2. Optimize the WASM
-3. Deploy to the specified network
-4. Save deployment info to `deployments/{network}_deployment.json`
-5. Output the contract ID and Stellar Expert link
-
-### Manual Deployment
-
-```bash
-# Compile
-cargo build --release --target wasm32-unknown-unknown
-
-# Deploy
-soroban contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/escrow_contract.wasm \
-  --source YOUR_SECRET_KEY \
-  --network testnet
-```
-
----
-
-## Integration with Backend
-
-### Node.js Integration Example
-
-```javascript
-const StellarSdk = require('@stellar/stellar-sdk');
-
-const CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
-const USDC_ADDRESS = 'GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTPK5XNQWRZNRNW5DOOJ4JY6P';
-
-async function initializeEscrowContract(adminAddress) {
-    const contract = new StellarSdk.Contract(CONTRACT_ID);
-    
-    const tx = new StellarSdk.TransactionBuilder(sourceAccount, {
-        fee: StellarSdk.BASE_FEE,
-        networkPassphrase: StellarSdk.Networks.TESTNET,
-    })
-        .addOperation(
-            new StellarSdk.Operation.InvokeHostFunction({
-                func: new StellarSdk.xdr.HostFunction({
-                    type: StellarSdk.xdr.HostFunctionType.hostFunctionTypeInvokeContract(),
-                    invokeContract: new StellarSdk.xdr.InvokeContractArgs({
-                        contractAddress: contract.address(),
-                        functionName: 'initialize',
-                        args: [
-                            StellarSdk.nativeToScVal(adminAddress, { type: 'address' }),
-                            StellarSdk.nativeToScVal(USDC_ADDRESS, { type: 'address' }),
-                        ],
-                    }),
-                }),
-            })
-        )
-        .setTimeout(30)
-        .build();
-    
-    // Sign and submit...
-}
-
-async function createEscrow(senderAddress, recipientAddress, agentAddress, amount, feeBps) {
-    // Similar pattern to initialize - invoke contract function
-    // Returns escrow_id on success
-}
-```
-
-### Key Points
-1. Use `soroban contract invoke` CLI or SDK for function calls
-2. Amounts must be in stroops (multiply USDC by 10^7)
-3. Fees are in basis points (100 = 1%, 250 = 2.5%, etc.)
-4. Always verify contract ID and network before submitting transactions
-
----
-
-## Security Considerations
-
-### Access Control
-- **Initialize**: Deploys call only
-- **Create Escrow**: Any caller with funds (public function)
-- **Release Escrow**: Only assigned agent
-- **Cancel Escrow**: Only original sender
-- **Withdraw Fees**: Only admin
-
-### Fund Safety
-- Contract holds USDC through Stellar's native token system
-- No private key storage
-- Trustline validation integrated into Stellar transfers
-- All revert conditions explicitly documented
-
-### Risks & Mitigations
-| Risk | Mitigation |
-|------|-----------|
-| Agent doesn't release | Sender can cancel and refund within reasonable timeframe |
-| Rug pull by admin | Fees only on released escrows; admin cannot access pending funds |
-| Wrong contract deployed | Verify contract ID on Stellar Expert before first use |
-| Network outage | Stellar's infrastructure redundancy; stored on immutable ledger |
-
----
-
-## Monitoring & Debugging
-
-### Check Escrow Status
-```bash
-soroban contract invoke \
-  --id CAAAA... \
-  --source SOURCE_KEY \
-  --fn get_escrow \
-  --arg-u64 123
-```
-
-### Monitor Events
-```bash
-# Use Stellar Expert or soroban-cli to watch contract events
-soroban events --id CAAAA... --network testnet
-```
-
-### View Deployments
-```bash
-cat contracts/deployments/testnet_deployment.json
-```
-
----
-
-## Roadmap & Future Enhancements
-
-- **Timelock Escrow** — Automatic refund after 30 days if not released
-- **Multi-Agent Support** — Multiple agents per escrow for redundancy
-- **Dispute Resolution** — Escalation mechanism for conflicting claims
-- **Automated Price Feeds** — Integrate Stellar's price oracle for dynamic fees
-- **Batch Operations** — Create multiple escrows in one transaction
-
----
-
-## References
-
-- [Soroban Documentation](https://soroban.stellar.org)
-- [Stellar Expert Contract Explorer](https://stellar.expert)
-- [USDC on Stellar](https://www.circle.com/usdc-on-stellar)
-- [Stellar Testnet](https://stellar.org/developers)
-
----
-
-## License
-
-This contract is part of the AfriPay cross-border payment platform. See root LICENSE file.
-
----
-
-## Support
-
-For issues or questions:
-1. Check [Soroban Discord](https://discord.gg/stellardev)
-2. Review contract ABI in this README
-3. Check test cases in `src/lib.rs` for usage examples
