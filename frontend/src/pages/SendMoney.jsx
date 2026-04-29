@@ -55,6 +55,8 @@ export default function SendMoney() {
   const [pathResult, setPathResult] = useState(null);
   const [pathLoading, setPathLoading] = useState(false);
   const [memoRequired, setMemoRequired] = useState(false);
+  const [memoError, setMemoError] = useState(false);
+  const memoRef = useRef(null);
   // 'send' = strict send (sender specifies exact amount), 'receive' = strict receive (recipient gets exact amount)
   const [sendMode, setSendMode] = useState('send');
 
@@ -88,6 +90,7 @@ export default function SendMoney() {
     setFeeXLM(null);
     setPathResult(null);
     setMemoRequired(false);
+    setMemoError(false);
     setContractSimData(null);
   };
 
@@ -488,9 +491,19 @@ export default function SendMoney() {
       resetForm();
       navigate('/dashboard');
     } catch (err) {
-      toast.error(err.response?.data?.error || t('send.error'));
-      setConfirmed(false);
-      setShowPINVerification(false);
+      if (err.response?.data?.code === 'MEMO_REQUIRED') {
+        setMemoError(true);
+        setConfirmed(false);
+        setShowPINVerification(false);
+        setTimeout(() => {
+          memoRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          memoRef.current?.focus();
+        }, 50);
+      } else {
+        toast.error(err.response?.data?.error || t('send.error'));
+        setConfirmed(false);
+        setShowPINVerification(false);
+      }
     } finally {
       setLoading(false);
     }
@@ -910,13 +923,19 @@ export default function SendMoney() {
         <div>
           <label className="text-sm text-gray-400 mb-1 block">{t('send.memo')}</label>
           <input
+            ref={memoRef}
             type="text"
             maxLength={memoMaxLen}
             placeholder={t('send.memo_placeholder')}
             value={form.memo}
-            onChange={e => setForm({ ...form, memo: e.target.value })}
-            className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors font-mono text-sm"
+            onChange={e => { setForm({ ...form, memo: e.target.value }); setMemoError(false); }}
+            className={`w-full bg-gray-800 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none transition-colors font-mono text-sm border ${
+              memoError ? 'border-red-500 focus:border-red-400' : 'border-gray-700 focus:border-primary-500'
+            }`}
           />
+          {memoError && (
+            <p className="mt-1 text-xs text-red-400">A memo is required for this recipient. Please add one before sending.</p>
+          )}
           {memoTrimmed ? (
             <div className="mt-2">
               <label className="text-sm text-gray-400 mb-1 block" htmlFor="memo-type">

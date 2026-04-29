@@ -89,14 +89,21 @@ export default function Layout() {
           <NavLink
             key={to}
             to={to}
+            aria-current={({ isActive }) => isActive ? 'page' : undefined}
             className={({ isActive }) =>
               `flex flex-col items-center gap-0.5 px-3 py-1 rounded-lg transition-colors text-xs ${
-                isActive ? 'text-primary-500' : 'text-gray-500 hover:text-gray-300'
+                isActive
+                  ? 'text-primary-500 font-semibold'
+                  : 'text-gray-500 hover:text-gray-300'
               }`
             }
           >
-            <Icon size={20} />
-            <span>{label}</span>
+            {({ isActive }) => (
+              <>
+                <Icon size={20} strokeWidth={isActive ? 2.5 : 1.75} />
+                <span>{label}</span>
+              </>
+            )}
           </NavLink>
         ))}
       </nav>

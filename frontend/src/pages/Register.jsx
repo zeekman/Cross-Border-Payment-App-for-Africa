@@ -1,9 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
-import { Eye, EyeOff, ArrowLeft, ChevronDown, ChevronUp } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeft, ChevronDown, ChevronUp, Check, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+
+function getPasswordStrength(password) {
+  const checks = {
+    length: password.length >= 8,
+    uppercase: /[A-Z]/.test(password),
+    number: /[0-9]/.test(password),
+    special: /[^A-Za-z0-9]/.test(password),
+  };
+  const score = Object.values(checks).filter(Boolean).length;
+  const levels = ['', 'weak', 'fair', 'strong', 'very strong'];
+  const colors = ['', 'bg-red-500', 'bg-orange-500', 'bg-yellow-500', 'bg-green-500'];
+  const textColors = ['', 'text-red-500', 'text-orange-500', 'text-yellow-500', 'text-green-500'];
+  return { checks, score, label: levels[score], barColor: colors[score], textColor: textColors[score] };
+}
+
 export default function Register() {
   const { register } = useAuth();
   const navigate = useNavigate();
@@ -17,6 +32,8 @@ export default function Register() {
   const [secretKey, setSecretKey] = useState('');
   const [showSecretKey, setShowSecretKey] = useState(false);
   const [secretKeyError, setSecretKeyError] = useState('');
+
+  const strength = useMemo(() => getPasswordStrength(form.password), [form.password]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -105,11 +122,33 @@ export default function Register() {
                 {showPass ? <EyeOff size={18} /> : <Eye size={18} />}
               </button>
             </div>
+            {form.password && (
+              <div className="mt-2 space-y-2">
+                <div className="flex gap-1">
+                  {[1, 2, 3, 4].map(i => (
+                    <div key={i} className={`h-1 flex-1 rounded-full transition-colors ${i <= strength.score ? strength.barColor : 'bg-gray-200 dark:bg-gray-700'}`} />
+                  ))}
+                </div>
+                <p className={`text-xs font-medium capitalize ${strength.textColor}`}>{strength.label}</p>
+                <ul className="space-y-1">
+                  {[
+                    { key: 'length', label: 'At least 8 characters' },
+                    { key: 'uppercase', label: 'One uppercase letter' },
+                    { key: 'number', label: 'One number' },
+                    { key: 'special', label: 'One special character' },
+                  ].map(({ key, label }) => (
+                    <li key={key} className={`flex items-center gap-1.5 text-xs ${strength.checks[key] ? 'text-green-500' : 'text-gray-400 dark:text-gray-500'}`}>
+                      {strength.checks[key] ? <Check size={12} /> : <X size={12} />} {label}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || strength.score < 2}
             className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl transition-colors mt-2"
           >
             {loading ? t('register.submitting') : t('register.submit')}
