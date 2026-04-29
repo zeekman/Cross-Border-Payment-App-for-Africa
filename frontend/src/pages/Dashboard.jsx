@@ -54,6 +54,7 @@ export default function Dashboard() {
 
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [selectedCurrency, setSelectedCurrency] = useState('XLM');
   const [funding, setFunding] = useState(false);
@@ -83,7 +84,14 @@ export default function Dashboard() {
 
   const { isConnected, isReconnecting, error: streamError } = usePaymentStream(wallet?.public_key, handlePayment);
 
-  const loadDashboard = useCallback(async () => {
+  const loadDashboard = useCallback(async (isRefresh = false) => {
+    // Initial load shows full skeleton; manual refresh shows spinner on button only
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+
     if (!navigator.onLine) {
       try {
         const [cachedWallets, cachedHistory] = await Promise.all([
@@ -102,6 +110,7 @@ export default function Dashboard() {
         // IndexedDB unavailable
       } finally {
         setLoading(false);
+        setRefreshing(false);
       }
       return;
     }
@@ -143,6 +152,7 @@ export default function Dashboard() {
       }
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
@@ -279,11 +289,15 @@ export default function Dashboard() {
           </h2>
         </div>
         <button
-          onClick={() => loadDashboard()}
-          className="text-gray-400 hover:text-white"
-          aria-label="Refresh dashboard"
+          onClick={() => loadDashboard(true)}
+          disabled={refreshing}
+          className="text-gray-400 hover:text-white disabled:opacity-50 transition-opacity"
+          aria-label={refreshing ? 'Refreshing dashboard…' : 'Refresh dashboard'}
         >
-          <RefreshCw size={18} />
+          <RefreshCw
+            size={18}
+            className={refreshing ? 'animate-spin' : ''}
+          />
         </button>
       </div>
 
