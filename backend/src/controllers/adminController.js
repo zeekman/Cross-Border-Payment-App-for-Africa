@@ -30,7 +30,15 @@ async function getUsers(req, res, next) {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, parseInt(req.query.limit) || 20);
     const offset = (page - 1) * limit;
-    const search = req.query.search ? `%${req.query.search}%` : null;
+    let search = req.query.search || null;
+    if (search) {
+      if (search.length > 100) {
+        return res.status(400).json({ error: 'Search string exceeds maximum length of 100 characters' });
+      }
+      // Escape PostgreSQL special pattern characters
+      search = search.replace(/[%_\\]/g, '\\$&');
+      search = `%${search}%`;
+    }
 
     const params = search ? [search, search, limit, offset] : [limit, offset];
     const where = search ? `WHERE u.full_name ILIKE $1 OR u.email ILIKE $2` : '';
@@ -96,7 +104,7 @@ async function getTransactions(req, res, next) {
   }
 }
 
-module.exports = { getStats, getUsers, getTransactions, getStellarNetworkStats };
+
 
 async function getStellarNetworkStats(req, res, next) {
   try {
@@ -115,7 +123,10 @@ async function getStellarNetworkStats(req, res, next) {
     stellarStatsCacheTime = now;
 
     res.json(stats);
-module.exports = { getStats, getUsers, getTransactions, clawback };
+  } catch (err) {
+    next(err);
+  }
+}
 
 /**
  * POST /api/admin/clawback
@@ -267,7 +278,7 @@ async function revokeKYC(req, res, next) {
   }
 }
 
-module.exports = { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC };
+
 
 const { getAccountFlags, setAccountFlags } = require('../services/stellar');
 
