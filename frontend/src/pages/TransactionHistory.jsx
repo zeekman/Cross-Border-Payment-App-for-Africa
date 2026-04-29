@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Send, Download, ExternalLink, Filter, Search, Flag, X, WifiOff } from 'lucide-react';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
@@ -35,21 +35,53 @@ function buildHistoryParams(cursor, dateFrom, dateTo, asset) {
 
 export default function TransactionHistory() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { t } = useTranslation();
   const { isOnline } = useOnlineStatus();
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [filter, setFilter] = useState('all');
   const [nextCursor, setNextCursor] = useState(null);
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState(null);
   const [fromCache, setFromCache] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [search, setSearch] = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const [asset, setAsset] = useState('');
+
+  // Filter state derived from URL params
+  const filter = searchParams.get('direction') || 'all';
+  const dateFrom = searchParams.get('from') || '';
+  const dateTo = searchParams.get('to') || '';
+  const asset = searchParams.get('asset') || '';
+
+  function setFilter(value) {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (value === 'all') next.delete('direction'); else next.set('direction', value);
+      return next;
+    }, { replace: true });
+  }
+  function setDateFrom(value) {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (value) next.set('from', value); else next.delete('from');
+      return next;
+    }, { replace: true });
+  }
+  function setDateTo(value) {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (value) next.set('to', value); else next.delete('to');
+      return next;
+    }, { replace: true });
+  }
+  function setAsset(value) {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (value) next.set('asset', value); else next.delete('asset');
+      return next;
+    }, { replace: true });
+  }
   const [reportTx, setReportTx] = useState(null); // tx being reported
   const [reportType, setReportType] = useState('other');
   const [reportDesc, setReportDesc] = useState('');
