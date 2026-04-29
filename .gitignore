@@ -23,3 +23,7 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# KYC document uploads — keep directory, ignore contents
+uploads/kyc/*
+!uploads/kyc/.gitkeep

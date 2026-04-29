@@ -126,7 +126,22 @@ Examples:
 
 ---
 
-## Stellar Integration
+## Stellar Protocol Compatibility
+
+AfriPay targets **Stellar Protocol 19+**. Note that the inflation operation was removed in **Protocol 12 (2019)** and is not used anywhere in this codebase. No `setOptions` calls set an `inflationDest`. Any SDK examples referencing inflation are outdated and should be ignored.
+
+---
+
+## Compliance — Asset Clawback
+
+For regulatory compliance (fraud investigations, court orders), AfriPay supports the Stellar **clawback** operation on USDC assets. This allows the asset issuer to reclaim tokens from a user's account when legally required.
+
+- Endpoint: `POST /api/admin/clawback` (admin-only)
+- Requires the issuer account to have `AUTH_CLAWBACK_ENABLED_FLAG` set on-chain
+- All clawback operations are recorded in the audit log with reason, amount, and transaction hash
+- Configure `ISSUER_PUBLIC_KEY` and `ISSUER_ENCRYPTED_SECRET_KEY` in your `.env`
+
+---
 
 ### Wallet Generation
 
@@ -152,12 +167,7 @@ Sender → [approve USDC transfer] → Backend → [sign with keypair]
 
 ---
 
-## Setup
 
-### Prerequisites
-
-- Node.js 18+
-- PostgreSQL 14+
 - A Stellar testnet account (auto-created on registration)
 
 ### 1. Database
@@ -178,19 +188,21 @@ npm run dev
 # Server starts on http://localhost:5000
 ```
 
-### 3. Frontend
+### 2. Docker Compose (Recommended)
 
-```bash
-cd frontend
-npm install
-cp .env.example .env
-npm start
-# App starts on http://localhost:3000
-```
+1. Copy `.env.example` to `.env` and customize:
+   ```
+   cp .env.example .env
+   ```
 
----
+2. Start full stack:
+   ```
+   docker compose up -d --build
+   ```
 
-## Database Migrations
+3. Access:
+   - Frontend: http://localhost:3000
+   - Backend API: http://localhost
 
 AfriPay uses [node-pg-migrate](https://github.com/salsita/node-pg-migrate) for schema version control. All schema changes must be made as numbered migration files inside `database/migrations/` — never by editing `schema.sql` directly.
 
@@ -242,6 +254,52 @@ node-pg-migrate tracks applied migrations in a `pgmigrations` table that it crea
 | DELETE | /api/wallet/contacts/:id  | Yes  | Remove a contact                   |
 | POST   | /api/payments/send        | Yes  | Broadcast payment to Stellar       |
 | GET    | /api/payments/history     | Yes  | Full transaction history           |
+| POST   | /api/wallet/merge         | Yes  | Merge (close) account into another |
+| POST   | /api/support/tickets      | Yes  | Create a support/dispute ticket    |
+| GET    | /api/support/tickets      | Yes  | List user's support tickets        |
+| POST   | /api/admin/clawback       | Admin| Clawback asset for compliance      |
+| GET    | /api/admin/health         | Admin| Full service health diagnostics    |
+| POST   | /api/escrow/create        | Yes  | Create agent escrow (approved agents only) |
+| POST   | /api/escrow/:id/confirm   | Yes  | Agent confirms payout              |
+| POST   | /api/escrow/:id/cancel    | Yes  | Sender cancels escrow              |
+
+---
+
+## Agent Registration and Approval
+
+AfriPay uses a registered agent network for fiat distribution. Only **approved** agents may be used as the `agent_wallet` parameter in `POST /api/escrow/create`.
+
+### Agent Lifecycle
+
+```
+1. Agent applies → POST /api/auth/register (creates a user account)
+2. Agent submits their Stellar wallet address for approval
+3. Admin reviews and approves → INSERT INTO agents (wallet_address, status='approved')
+4. Agent is now eligible to receive escrow assignments
+5. Admin may suspend an agent by setting status='suspended'
+```
+
+### agents Table
+
+| Column           | Type        | Description                              |
+|------------------|-------------|------------------------------------------|
+| id               | uuid        | Primary key                              |
+| user_id          | uuid        | FK to users table                        |
+| wallet_address   | text        | Agent's Stellar public key (unique)      |
+| status           | varchar(20) | `pending` / `approved` / `suspended`     |
+| country          | varchar(10) | ISO country code (optional)              |
+| created_at       | timestamptz | Registration timestamp                   |
+| approved_at      | timestamptz | Admin approval timestamp                 |
+
+### Validation
+
+`POST /api/escrow/create` checks the `agents` table before creating any on-chain escrow:
+
+- If `agent_wallet` is not found with `status = 'approved'`, the request is rejected with HTTP 400:
+  ```json
+  { "error": "Agent is not registered in the AfriPay network" }
+  ```
+- Only after a successful agent lookup does the backend proceed to sign and broadcast the Soroban escrow transaction.
 
 ---
 
@@ -266,6 +324,13 @@ STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
 # AES-256 encryption key for private key storage (must be exactly 32 characters)
 ENCRYPTION_KEY=your_32_character_encryption_key_
 
+# Cache Configuration
+# Balance cache TTL in seconds (default: 30)
+# Time-To-Live for cached wallet balance data. Lower values ensure fresher data but increase load on Horizon.
+# Higher values reduce load but may show stale balances after recent transactions.
+# Cache is automatically invalidated after send, sendBatch, and sendPath operations.
+BALANCE_CACHE_TTL_SECONDS=30
+
 # CORS
 FRONTEND_URL=http://localhost:3000
 ```
@@ -283,6 +348,24 @@ FRONTEND_URL=http://localhost:3000
 - Fraud protection: blocks wallets exceeding 5 transactions in 10 minutes
 - Input validation on all endpoints via `express-validator`
 - CORS restricted to configured frontend origin
+
+---
+
+## Performance & Caching
+
+**Balance Caching with Redis**
+
+Wallet balances are cached in Redis to reduce load on the Stellar Horizon API. The cache behavior is configurable:
+
+- **Configurable TTL**: Set `BALANCE_CACHE_TTL_SECONDS` in your environment (default: 30 seconds)
+- **Automatic Invalidation**: Cache is cleared immediately after:
+  - Standard payments (`POST /api/payments`)
+  - Batch payments (`POST /api/payments/batch`)
+  - Path payments (`POST /api/payments/send-path`)
+- **Fallback Behavior**: If Redis is not configured, balances are fetched live from Horizon on every request
+- **Stale Balance Risk**: In production, ensure the TTL is low enough (15-30 seconds recommended) to prevent users from seeing significantly stale balances after receiving payments
+
+To adjust the cache TTL in production, update the `BALANCE_CACHE_TTL_SECONDS` environment variable without restarting (if using a process manager with hot-reload support).
 
 ---
 
@@ -357,6 +440,11 @@ Contributions are welcome. Please ensure:
 - [Stellar Expert Explorer](https://stellar.expert)
 - [Stellar Discord](https://discord.gg/stellar)
 - [Soroban Smart Contracts](https://soroban.stellar.org)
+
+## Docs
+
+- [Horizon Self-Hosting Guide](docs/horizon-self-hosting.md) — run your own Horizon node in production
+- [Wallet Backup & Recovery](docs/wallet-backup-recovery.md)
 
 ---
 

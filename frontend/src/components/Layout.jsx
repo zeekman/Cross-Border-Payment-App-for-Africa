@@ -1,15 +1,19 @@
 import React from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Send, Download, Clock, User, LogOut, Webhook, Sun, Moon } from 'lucide-react';
+import { LayoutDashboard, Send, Download, Clock, Upload, User, LogOut, Sun, Moon, Bell, BellOff, AlertTriangle, ArrowUpDown } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
+import { usePushNotifications } from '../hooks/usePushNotifications';
+import { useStellarStatus } from '../hooks/useStellarStatus';
+import OfflineBanner from './OfflineBanner';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/send', icon: Send, label: 'Send' },
+  { to: '/batch-payments', icon: Upload, label: 'Batch' },
+  { to: '/swap', icon: ArrowUpDown, label: 'Swap' },
   { to: '/receive', icon: Download, label: 'Receive' },
   { to: '/history', icon: Clock, label: 'History' },
-  { to: '/webhooks', icon: Webhook, label: 'Webhooks' },
   { to: '/profile', icon: User, label: 'Profile' },
 ];
 
@@ -19,6 +23,8 @@ export default function Layout() {
   const { logout } = useAuth();
   const navigate = useNavigate();
   const { theme, toggleTheme } = useTheme();
+  const { supported, subscribed, loading, subscribe, unsubscribe } = usePushNotifications();
+  const { isDegraded, status } = useStellarStatus();
 
   const handleLogout = () => { logout(); navigate('/'); };
 
@@ -27,6 +33,23 @@ export default function Layout() {
       {isTestnet && (
         <div className="bg-yellow-400 text-yellow-900 text-center text-xs font-semibold py-1">
           ⚠️ TESTNET — Do not use real funds
+        </div>
+      )}
+      {/* Offline / back-online banner */}
+      <OfflineBanner />
+      {/* Stellar Network Status Banner */}
+      {isDegraded && (
+        <div className="bg-yellow-500 text-yellow-900 text-center text-xs font-semibold py-2 px-4 flex items-center justify-center gap-2">
+          <AlertTriangle size={14} />
+          <span>Stellar network is experiencing issues. Payments may be delayed.</span>
+          <a
+            href="https://status.stellar.org"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-yellow-800"
+          >
+            Status Page
+          </a>
         </div>
       )}
       {/* Top bar */}
@@ -39,6 +62,16 @@ export default function Layout() {
           <button onClick={toggleTheme} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors" title="Toggle theme">
             {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           </button>
+          {supported && (
+            <button
+              onClick={subscribed ? unsubscribe : subscribe}
+              disabled={loading}
+              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors disabled:opacity-50"
+              title={subscribed ? 'Disable payment notifications' : 'Enable payment notifications'}
+            >
+              {subscribed ? <Bell size={18} className="text-primary-500" /> : <BellOff size={18} />}
+            </button>
+          )}
           <button onClick={handleLogout} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors" title="Logout">
             <LogOut size={18} />
           </button>

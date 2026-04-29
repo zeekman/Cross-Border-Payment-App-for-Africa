@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Soroban Escrow Contract Deployment Script
-# This script builds and deploys the escrow contract to Stellar
+# Soroban Contract Deployment Script
+# Supports: escrow, recurring-payments
+# Usage: [CONTRACT=recurring-payments] STELLAR_NETWORK=testnet SOROBAN_SECRET_KEY=<key> ./deploy.sh
 
 set -e
 
@@ -11,24 +12,86 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Configuration
+# Parse arguments
 NETWORK="${STELLAR_NETWORK:-testnet}"
+CONFIRM_MAINNET=false
+TARGET_CONTRACT="${CONTRACT:-escrow}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --network)
+            NETWORK="$2"
+            shift 2
+            ;;
+        --confirm-mainnet)
+            CONFIRM_MAINNET=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [[ "$NETWORK" != "testnet" && "$NETWORK" != "mainnet" ]]; then
+    echo -e "${RED}Error: --network must be 'testnet' or 'mainnet'${NC}"
+    exit 1
+fi
+
+if [[ "$NETWORK" == "mainnet" && "$CONFIRM_MAINNET" != "true" ]]; then
+    echo -e "${RED}Error: Mainnet deployment requires --confirm-mainnet flag to prevent accidental production deployments.${NC}"
+    exit 1
+fi
+
 CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTRACT_NAME="escrow_contract"
+
+case "$TARGET_CONTRACT" in
+  escrow)
+    CONTRACT_NAME="escrow_contract"
+    CONTRACT_SUBDIR="escrow"
+    ;;
+  recurring-payments)
+    CONTRACT_NAME="recurring_payments_contract"
+    CONTRACT_SUBDIR="recurring-payments"
+    ;;
+  agent-escrow)
+    CONTRACT_NAME="agent_escrow_contract"
+    CONTRACT_SUBDIR="agent-escrow"
+    ;;
+  kyc-attestation)
+    CONTRACT_NAME="kyc_attestation_contract"
+    CONTRACT_SUBDIR="kyc-attestation"
+    ;;
+  fee-distributor)
+    CONTRACT_NAME="fee_distributor_contract"
+    CONTRACT_SUBDIR="fee-distributor"
+    ;;
+  *)
+    echo -e "${RED}Unknown contract: $TARGET_CONTRACT. Valid options: escrow, recurring-payments, agent-escrow, kyc-attestation, fee-distributor${NC}"
+    exit 1
+    ;;
+esac
+
 BUILTIN_CONTRACT_DIR="$HOME/.soroban"
 
-echo -e "${YELLOW}=== Soroban Escrow Contract Deployment ===${NC}"
-echo "Network: $NETWORK"
+echo -e "${YELLOW}=== Soroban ${TARGET_CONTRACT} Contract Deployment ===${NC}"
+echo -e "${YELLOW}>>> DEPLOYING TO NETWORK: ${NETWORK} <<<${NC}"
 echo "Contract Directory: $CONTRACT_DIR"
 
 # Step 1: Check prerequisites
 echo -e "\n${YELLOW}Step 1: Checking prerequisites...${NC}"
 
-if ! command -v soroban &> /dev/null; then
-    echo -e "${RED}Error: soroban CLI is not installed.${NC}"
-    echo "Install from: https://github.com/stellar/rs-soroban-sdk"
+# Support both 'stellar' (new) and 'soroban' (legacy) CLI names
+if command -v stellar &> /dev/null; then
+    SOROBAN_CLI="stellar"
+elif command -v soroban &> /dev/null; then
+    SOROBAN_CLI="soroban"
+else
+    echo -e "${RED}Error: Stellar CLI is not installed.${NC}"
+    echo "Install from: https://developers.stellar.org/docs/tools/developer-tools/cli/install-cli"
     exit 1
 fi
+echo "Using CLI: $SOROBAN_CLI"
 
 if ! command -v cargo &> /dev/null; then
     echo -e "${RED}Error: cargo is not installed.${NC}"
@@ -41,17 +104,17 @@ echo -e "${GREEN}✓ Prerequisites OK${NC}"
 # Step 2: Build the contract
 echo -e "\n${YELLOW}Step 2: Building contract...${NC}"
 
-cd "$CONTRACT_DIR"
+cd "$CONTRACT_DIR/$CONTRACT_SUBDIR"
 
 if [ ! -f "Cargo.toml" ]; then
-    echo -e "${RED}Error: Cargo.toml not found in $CONTRACT_DIR${NC}"
+    echo -e "${RED}Error: Cargo.toml not found in $CONTRACT_DIR/$CONTRACT_SUBDIR${NC}"
     exit 1
 fi
 
 # Build for Soroban target
 cargo build --release --target wasm32-unknown-unknown
 
-WASM_FILE="target/wasm32-unknown-unknown/release/escrow_contract.wasm"
+WASM_FILE="target/wasm32-unknown-unknown/release/${CONTRACT_NAME}.wasm"
 
 if [ ! -f "$WASM_FILE" ]; then
     echo -e "${RED}Error: Contract WASM file not built: $WASM_FILE${NC}"
@@ -65,11 +128,11 @@ echo "WASM file: $WASM_FILE"
 echo -e "\n${YELLOW}Step 3: Optimizing WASM...${NC}"
 
 # Use 'soroban contract optimize' if available, otherwise use wasm-opt
-if soroban contract optimize --help > /dev/null 2>&1; then
-    soroban contract optimize --wasm "$WASM_FILE" --output-wasm "$WASM_FILE"
-    echo -e "${GREEN}✓ WASM optimized with soroban contract optimize${NC}"
+if $SOROBAN_CLI contract optimize --help > /dev/null 2>&1; then
+    $SOROBAN_CLI contract optimize --wasm "$WASM_FILE" --output-wasm "$WASM_FILE"
+    echo -e "${GREEN}✓ WASM optimized${NC}"
 else
-    echo -e "${YELLOW}Note: soroban contract optimize not available, skipping optimization${NC}"
+    echo -e "${YELLOW}Note: contract optimize not available, skipping${NC}"
 fi
 
 # Step 4: Deploy to Stellar Network
@@ -102,20 +165,10 @@ if [ -z "$SOROBAN_SECRET_KEY" ]; then
 fi
 
 # Deploy using soroban CLI
-CONTRACT_ID=$(soroban contract deploy \
+CONTRACT_ID=$($SOROBAN_CLI contract deploy \
     --wasm "$WASM_FILE" \
     --source "$SOROBAN_SECRET_KEY" \
-    --network "$NETWORK" \
-    2>&1 | grep -oP '(?<=Contract ID: )[^ ]+' || true)
-
-if [ -z "$CONTRACT_ID" ]; then
-    # Try alternative parsing for different version outputs
-    CONTRACT_ID=$(soroban contract deploy \
-        --wasm "$WASM_FILE" \
-        --source "$SOROBAN_SECRET_KEY" \
-        --network "$NETWORK" \
-        2>&1 | tail -1 || true)
-fi
+    --network "$NETWORK" 2>&1 | tail -1 || true)
 
 if [ -z "$CONTRACT_ID" ]; then
     echo -e "${RED}Error: Failed to deploy contract${NC}"
@@ -128,8 +181,8 @@ echo "Contract ID: $CONTRACT_ID"
 # Step 5: Save deployment info
 echo -e "\n${YELLOW}Step 5: Saving deployment info...${NC}"
 
-DEPLOYMENT_FILE="${CONTRACT_DIR}/deployments/${NETWORK}_deployment.json"
-mkdir -p "${CONTRACT_DIR}/deployments"
+DEPLOYMENT_FILE="${CONTRACT_DIR}/${CONTRACT_SUBDIR}/deployments/${NETWORK}_deployment.json"
+mkdir -p "${CONTRACT_DIR}/${CONTRACT_SUBDIR}/deployments"
 
 cat > "$DEPLOYMENT_FILE" << EOF
 {
@@ -143,6 +196,21 @@ cat > "$DEPLOYMENT_FILE" << EOF
 EOF
 
 echo -e "${GREEN}✓ Deployment info saved to $DEPLOYMENT_FILE${NC}"
+
+# Step 5b: Write contract ID to .deployed_ids.env for backend configuration
+DEPLOYED_IDS_FILE="${CONTRACT_DIR}/.deployed_ids.env"
+
+# Derive the env var name from the contract name (uppercase + _CONTRACT_ID)
+ENV_VAR_NAME=$(echo "${TARGET_CONTRACT}" | tr '[:lower:]-' '[:upper:]_')_CONTRACT_ID
+
+# Append or update the entry
+if [ -f "$DEPLOYED_IDS_FILE" ] && grep -q "^${ENV_VAR_NAME}=" "$DEPLOYED_IDS_FILE"; then
+    sed -i.bak "s|^${ENV_VAR_NAME}=.*|${ENV_VAR_NAME}=${CONTRACT_ID}|" "$DEPLOYED_IDS_FILE" && rm -f "${DEPLOYED_IDS_FILE}.bak"
+else
+    echo "${ENV_VAR_NAME}=${CONTRACT_ID}" >> "$DEPLOYED_IDS_FILE"
+fi
+
+echo -e "${GREEN}✓ Contract ID written to $DEPLOYED_IDS_FILE${NC}"
 
 # Step 6: Output Stellar Explorer link
 echo -e "\n${YELLOW}Step 6: Verification${NC}"
@@ -160,8 +228,11 @@ echo "  Network: $NETWORK"
 echo "  Contract ID: $CONTRACT_ID"
 echo "  View on Stellar Expert: $EXPLORER_URL"
 echo ""
-echo "Next steps:"
-echo "1. Save the Contract ID for your backend configuration"
-echo "2. Call initialize() with admin address and USDC contract address"
-echo "3. Update backend to use this contract for escrow operations"
+echo -e "${YELLOW}Post-Deployment Checklist:${NC}"
+echo "  1. Source the deployed IDs into your backend .env:"
+echo "       cat contracts/.deployed_ids.env >> backend/.env"
+echo "     Or manually copy: ${ENV_VAR_NAME}=${CONTRACT_ID}"
+echo "  2. Call initialize() with admin address and USDC contract address"
+echo "  3. Restart the backend service to pick up the new contract ID"
+echo "  4. Verify the contract on Stellar Expert: $EXPLORER_URL"
 echo ""

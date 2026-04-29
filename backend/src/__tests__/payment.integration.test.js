@@ -50,11 +50,12 @@ process.env.KYC_THRESHOLD_USD = '100';
 process.env.XLM_USD_RATE      = '0.11';
 
 const express      = require('express');
-const StellarSdk   = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const idempotency  = require('../middleware/idempotency');
 const { send, history } = require('../controllers/paymentController');
-const { body, query: qv, validationResult } = require('express-validator');
+const { query: qv, validationResult } = require('express-validator');
+const paymentSendValidators = require('../validators/paymentSendValidators');
+const { ALLOWED_HISTORY_ASSETS } = require('../utils/historyQuery');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -68,18 +69,7 @@ app.use(express.json());
 app.post(
   '/api/payments/send',
   authMiddleware,
-  [
-    body('recipient_address')
-      .notEmpty().withMessage('Recipient address is required')
-      .custom((value) => {
-        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
-          throw new Error('Invalid Stellar wallet address');
-        }
-        return true;
-      }),
-    body('amount').isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
-    body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES'])
-  ],
+  paymentSendValidators,
   validate,
   idempotency,
   send
@@ -90,7 +80,10 @@ app.get(
   authMiddleware,
   [
     qv('page').optional().isInt({ min: 1 }),
-    qv('limit').optional().isInt({ min: 1, max: 100 })
+    qv('limit').optional().isInt({ min: 1, max: 100 }),
+    qv('from').optional({ values: 'falsy' }).trim().isISO8601(),
+    qv('to').optional({ values: 'falsy' }).trim().isISO8601(),
+    qv('asset').optional({ values: 'falsy' }).trim().isIn(ALLOWED_HISTORY_ASSETS),
   ],
   validate,
   history
@@ -128,29 +121,33 @@ function makeToken(userId = USER_ID) {
 
 /**
  * Happy-path send for LOW-value amounts (no KYC query):
- *   call 1 — wallet lookup → WALLET_ROW
- *   call 2 — fraud check   → count (default '0')
- *   call 3+ — INSERT + anything else → []
+ *   call 1 — wallet lookup   → WALLET_ROW
+ *   call 2 — velocity check  → count (default '0')
+ *   call 3 — daily limit     → total (default '0')
+ *   call 4+ — INSERT + anything else → []
  */
-function mockSendHappyPath({ fraudCount = '0' } = {}) {
+function mockSendHappyPath({ fraudCount = '0', dailyTotal = '0' } = {}) {
   db.query
     .mockResolvedValueOnce({ rows: [WALLET_ROW] })
     .mockResolvedValueOnce({ rows: [{ count: fraudCount }] })
+    .mockResolvedValueOnce({ rows: [{ total: dailyTotal }] })
     .mockResolvedValue({ rows: [] });
 }
 
 /**
  * Happy-path send for HIGH-value amounts (KYC query fires first):
- *   call 1 — KYC check     → verified
- *   call 2 — wallet lookup → WALLET_ROW
- *   call 3 — fraud check   → count (default '0')
- *   call 4+ — INSERT + anything else → []
+ *   call 1 — KYC check       → verified
+ *   call 2 — wallet lookup   → WALLET_ROW
+ *   call 3 — velocity check  → count (default '0')
+ *   call 4 — daily limit     → total (default '0')
+ *   call 5+ — INSERT + anything else → []
  */
-function mockSendHappyPathHighValue({ fraudCount = '0' } = {}) {
+function mockSendHappyPathHighValue({ fraudCount = '0', dailyTotal = '0' } = {}) {
   db.query
     .mockResolvedValueOnce({ rows: [{ kyc_status: 'verified' }] })
     .mockResolvedValueOnce({ rows: [WALLET_ROW] })
     .mockResolvedValueOnce({ rows: [{ count: fraudCount }] })
+    .mockResolvedValueOnce({ rows: [{ total: dailyTotal }] })
     .mockResolvedValue({ rows: [] });
 }
 
@@ -175,6 +172,7 @@ function makeTxRow(overrides = {}) {
     amount:           '10.0000000',
     asset:            'XLM',
     memo:             null,
+    memo_type:        null,
     tx_hash:          FAKE_TX_HASH,
     status:           'completed',
     created_at:       new Date().toISOString(),
@@ -267,6 +265,46 @@ describe('POST /api/payments/send — input validation', () => {
       .post('/api/payments/send')
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ recipient_address: RECIPIENT_KEY, amount: '10', asset: 'BTC' });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when memo_type is id but memo is missing', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: RECIPIENT_KEY, amount: '10', memo_type: 'id' });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when memo_type is id but memo is not numeric', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        recipient_address: RECIPIENT_KEY,
+        amount: '10',
+        memo: 'not-a-number',
+        memo_type: 'id'
+      });
+
+    expect(res.status).toBe(400);
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when memo_type is hash but memo is not 64 hex chars', async () => {
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        recipient_address: RECIPIENT_KEY,
+        amount: '10',
+        memo: 'deadbeef',
+        memo_type: 'hash'
+      });
 
     expect(res.status).toBe(400);
     expect(sendPayment).not.toHaveBeenCalled();
@@ -378,7 +416,28 @@ describe('POST /api/payments/send — success', () => {
       recipientPublicKey: RECIPIENT_KEY,
       amount:             '5',
       asset:              'XLM',
-      memo:               'school fees'
+      memo:               'school fees',
+      memoType:           'text'
+    }));
+  });
+
+  test('calls sendPayment with memoType id for exchange-style memos', async () => {
+    mockSendHappyPath();
+
+    await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({
+        recipient_address: RECIPIENT_KEY,
+        amount: '1',
+        asset: 'XLM',
+        memo: '987654321',
+        memo_type: 'id'
+      });
+
+    expect(sendPayment).toHaveBeenCalledWith(expect.objectContaining({
+      memo: '987654321',
+      memoType: 'id'
     }));
   });
 
@@ -395,12 +454,12 @@ describe('POST /api/payments/send — success', () => {
     );
     expect(insertCall).toBeDefined();
     const params = insertCall[1];
-    // [txId, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash]
+    // [txId, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash]
     expect(params[1]).toBe(SENDER_KEY);
     expect(params[2]).toBe(RECIPIENT_KEY);
     expect(params[3]).toBe('10');
     expect(params[4]).toBe('XLM');
-    expect(params[6]).toBe(FAKE_TX_HASH);
+    expect(params[7]).toBe(FAKE_TX_HASH);
   });
 
   test('stores null memo when memo is not provided', async () => {
@@ -416,6 +475,7 @@ describe('POST /api/payments/send — success', () => {
     );
     expect(insertCall).toBeDefined();
     expect(insertCall[1][5]).toBeNull();
+    expect(insertCall[1][6]).toBeNull();
   });
 });
 
@@ -470,10 +530,11 @@ describe('POST /api/payments/send — business logic', () => {
     stellarErr.response = { data: { extras: { result_codes: { transaction: 'tx_bad_seq' } } } };
     sendPayment.mockRejectedValueOnce(stellarErr);
 
-    // Low-value: wallet → fraud → (sendPayment throws, no INSERT)
+    // Low-value: wallet → velocity → daily-limit → (sendPayment throws, no INSERT)
     db.query
       .mockResolvedValueOnce({ rows: [WALLET_ROW] })
-      .mockResolvedValueOnce({ rows: [{ count: '0' }] });
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] })
+      .mockResolvedValueOnce({ rows: [{ total: '0' }] });
 
     const res = await request(app)
       .post('/api/payments/send')
@@ -493,11 +554,12 @@ describe('POST /api/payments/send — business logic', () => {
 // POST /api/payments/send — fraud protection
 // ===========================================================================
 describe('POST /api/payments/send — fraud protection', () => {
-  test('blocks the 6th transaction within 10 minutes with 429', async () => {
-    // Low-value: wallet → fraud (count=5 → blocked)
+  test('blocks when velocity threshold is met (count=5) with 429', async () => {
+    // Low-value: wallet → velocity (count=5 → blocked, daily-limit not reached)
     db.query
       .mockResolvedValueOnce({ rows: [WALLET_ROW] })
-      .mockResolvedValueOnce({ rows: [{ count: '5' }] });
+      .mockResolvedValueOnce({ rows: [{ count: '5' }] })
+      .mockResolvedValueOnce({ rows: [{ total: '0' }] });
 
     const res = await request(app)
       .post('/api/payments/send')
@@ -514,7 +576,24 @@ describe('POST /api/payments/send — fraud protection', () => {
     expect(insertCall).toBeUndefined();
   });
 
-  test('allows the 5th transaction — count=4 is below threshold', async () => {
+  test('blocks when daily limit is exceeded with 429', async () => {
+    // velocity ok (count=0), daily limit exceeded
+    db.query
+      .mockResolvedValueOnce({ rows: [WALLET_ROW] })
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] })
+      .mockResolvedValueOnce({ rows: [{ total: '999999' }] });
+
+    const res = await request(app)
+      .post('/api/payments/send')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ recipient_address: RECIPIENT_KEY, amount: '1', asset: 'XLM' });
+
+    expect(res.status).toBe(429);
+    expect(res.body.code).toBe('DAILY_LIMIT_EXCEEDED');
+    expect(sendPayment).not.toHaveBeenCalled();
+  });
+
+  test('allows the 4th transaction — count=4 is below threshold', async () => {
     mockSendHappyPath({ fraudCount: '4' });
 
     const res = await request(app)
@@ -526,7 +605,7 @@ describe('POST /api/payments/send — fraud protection', () => {
     expect(sendPayment).toHaveBeenCalledTimes(1);
   });
 
-  test('fraud check queries the correct sender wallet address', async () => {
+  test('velocity check queries the correct sender wallet address', async () => {
     mockSendHappyPath();
 
     await request(app)
@@ -534,14 +613,14 @@ describe('POST /api/payments/send — fraud protection', () => {
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ recipient_address: RECIPIENT_KEY, amount: '1', asset: 'XLM' });
 
-    const fraudCall = db.query.mock.calls.find(([sql]) =>
+    const velocityCall = db.query.mock.calls.find(([sql]) =>
       sql.includes('COUNT(*)') && sql.includes('sender_wallet')
     );
-    expect(fraudCall).toBeDefined();
-    expect(fraudCall[1][0]).toBe(SENDER_KEY);
+    expect(velocityCall).toBeDefined();
+    expect(velocityCall[1][0]).toBe(SENDER_KEY);
   });
 
-  test('fraud check window is scoped to 10 minutes', async () => {
+  test('both fraud checks share the same time window', async () => {
     mockSendHappyPath();
 
     await request(app)
@@ -549,11 +628,17 @@ describe('POST /api/payments/send — fraud protection', () => {
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ recipient_address: RECIPIENT_KEY, amount: '1', asset: 'XLM' });
 
-    const fraudCall = db.query.mock.calls.find(([sql]) =>
+    const velocityCall = db.query.mock.calls.find(([sql]) =>
       sql.includes('COUNT(*)') && sql.includes('sender_wallet')
     );
-    expect(fraudCall).toBeDefined();
-    expect(fraudCall[0]).toMatch(/10 minutes/i);
+    const limitCall = db.query.mock.calls.find(([sql]) =>
+      sql.includes('SUM(amount)') && sql.includes('sender_wallet')
+    );
+
+    expect(velocityCall).toBeDefined();
+    expect(limitCall).toBeDefined();
+    // Both use the same window parameter (index 1 in params array)
+    expect(velocityCall[1][1]).toBe(limitCall[1][1]);
   });
 });
 
@@ -706,6 +791,93 @@ describe('GET /api/payments/history — validation', () => {
       .get('/api/payments/history?limit=101')
       .set('Authorization', `Bearer ${makeToken()}`);
     expect(res.status).toBe(400);
+  });
+
+  test('returns 400 when from is after to', async () => {
+    const res = await request(app)
+      .get('/api/payments/history?from=2024-06-10&to=2024-01-01')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/from must be before/i);
+  });
+
+  test('returns 400 for invalid asset filter', async () => {
+    const res = await request(app)
+      .get('/api/payments/history?asset=BTC')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(400);
+  });
+
+  test('returns 400 for non-ISO from date', async () => {
+    const res = await request(app)
+      .get('/api/payments/history?from=not-a-date')
+      .set('Authorization', `Bearer ${makeToken()}`);
+    expect(res.status).toBe(400);
+  });
+});
+
+// ===========================================================================
+// GET /api/payments/history — date & asset filters (server-side)
+// ===========================================================================
+describe('GET /api/payments/history — filters', () => {
+  test('applies from, to, and asset in SQL when all query params set', async () => {
+    const txRow = makeTxRow({ asset: 'USDC', tx_hash: 'usdc' + FAKE_TX_HASH.slice(4) });
+    db.query
+      .mockResolvedValueOnce({ rows: [{ public_key: SENDER_KEY }] })
+      .mockResolvedValueOnce({ rows: [{ count: '1' }] })
+      .mockResolvedValueOnce({ rows: [txRow] });
+
+    const res = await request(app)
+      .get('/api/payments/history?from=2024-01-01&to=2024-12-31&asset=USDC&page=1&limit=20')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(1);
+    expect(res.body.transactions[0].asset).toBe('USDC');
+
+    const dataCall = db.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('SELECT id') && c[0].includes('FROM transactions'),
+    );
+    expect(dataCall[0]).toMatch(/created_at >=/);
+    expect(dataCall[0]).toMatch(/created_at <=/);
+    expect(dataCall[0]).toMatch(/asset =/);
+    expect(dataCall[1]).toEqual(
+      expect.arrayContaining([SENDER_KEY, expect.any(Date), expect.any(Date), 'USDC', 20, 0]),
+    );
+  });
+
+  test('returns 200 with only from bound (open-ended range to now)', async () => {
+    mockHistoryHappyPath([]);
+
+    const res = await request(app)
+      .get('/api/payments/history?from=2020-01-01')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    const dataCall = db.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('SELECT id') && c[0].includes('FROM transactions'),
+    );
+    expect(dataCall[0]).toMatch(/created_at >=/);
+    expect(dataCall[0]).not.toMatch(/created_at <=/);
+  });
+
+  test('returns 200 with only asset filter', async () => {
+    const rows = [makeTxRow({ asset: 'XLM', tx_hash: 'onlyxlm' + FAKE_TX_HASH.slice(5) })];
+    db.query
+      .mockResolvedValueOnce({ rows: [{ public_key: SENDER_KEY }] })
+      .mockResolvedValueOnce({ rows: [{ count: '1' }] })
+      .mockResolvedValueOnce({ rows });
+
+    const res = await request(app)
+      .get('/api/payments/history?asset=XLM')
+      .set('Authorization', `Bearer ${makeToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.transactions[0].asset).toBe('XLM');
+    const dataCall = db.query.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('SELECT id') && c[0].includes('FROM transactions'),
+    );
+    expect(dataCall[1]).toEqual(expect.arrayContaining([SENDER_KEY, 'XLM', 20, 0]));
   });
 });
 

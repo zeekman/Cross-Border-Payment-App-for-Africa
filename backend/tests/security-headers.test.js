@@ -1,5 +1,11 @@
 jest.mock('../src/db');
-jest.mock('../src/services/stellar');
+jest.mock('../src/services/stellar', () => {
+  const actual = jest.requireActual('../src/services/stellar');
+  return {
+    ...actual,
+    checkHorizonHealth: jest.fn().mockResolvedValue(true),
+  };
+});
 jest.mock('../src/services/email');
 jest.mock('../src/utils/validateEnv', () => jest.fn());
 
@@ -7,8 +13,18 @@ process.env.JWT_SECRET = 'test_secret';
 process.env.FRONTEND_URL = 'http://localhost:3000';
 process.env.STELLAR_NETWORK = 'testnet';
 process.env.ENCRYPTION_KEY = '12345678901234567890123456789012';
+process.env.STELLAR_HORIZON_URL = 'https://horizon-testnet.stellar.org';
 
 const request = require('supertest');
+const db = require('../src/db');
+
+beforeEach(() => {
+  db.query.mockImplementation((sql) => {
+    if (String(sql).includes('SELECT 1')) return Promise.resolve({ rows: [{}] });
+    return Promise.resolve({ rows: [] });
+  });
+});
+
 const app = require('../src/app');
 
 const SECURITY_HEADERS = [
@@ -24,6 +40,24 @@ const ROUTES = [
   { method: 'post', path: '/api/auth/login' },
   { method: 'get',  path: '/health' },
 ];
+
+describe('CORS preflight', () => {
+  test('OPTIONS request returns Access-Control-Max-Age: 86400', async () => {
+    const res = await request(app)
+      .options('/api/auth/login')
+      .set('Origin', 'http://localhost:3000')
+      .set('Access-Control-Request-Method', 'POST');
+    expect(res.headers['access-control-max-age']).toBe('86400');
+  });
+
+  test('OPTIONS request still restricts origin', async () => {
+    const res = await request(app)
+      .options('/api/auth/login')
+      .set('Origin', 'http://evil.com')
+      .set('Access-Control-Request-Method', 'POST');
+    expect(res.headers['access-control-allow-origin']).not.toBe('http://evil.com');
+  });
+});
 
 describe('Security headers', () => {
   test.each(ROUTES)('$method $path has required security headers', async ({ method, path }) => {

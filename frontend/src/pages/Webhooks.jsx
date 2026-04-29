@@ -120,7 +120,7 @@ export default function Webhooks() {
       )}
 
       {loading ? (
-        <div className="flex justify-center py-10">
+        <div className="flex justify-center py-10" role="status" aria-label="Loading">
           <div className="w-6 h-6 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
         </div>
       ) : webhooks.length === 0 ? (
