@@ -153,12 +153,14 @@ impl AgentEscrowContract {
             &amount,
         );
 
-        let id: u64 = env
+        let current_count: u64 = env
             .storage()
             .persistent()
             .get(&DataKey::Counter)
-            .unwrap_or(0)
-            + 1;
+            .unwrap_or(0);
+        // u64::MAX is 18,446,744,073,709,551,615. At one escrow per second,
+        // exhausting the counter would take ~584 billion years.
+        let id = current_count.checked_add(1).expect("Escrow counter overflow");
         env.storage().persistent().set(&DataKey::Counter, &id);
 
         let now = env.ledger().timestamp();
