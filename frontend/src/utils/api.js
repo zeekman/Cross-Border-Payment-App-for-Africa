@@ -1,14 +1,15 @@
 import axios from 'axios';
 import { enqueuePayment } from './offlineDB';
+import { tokenStore } from '../context/AuthContext';
 
 const baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 const api = axios.create({
   baseURL,
-  withCredentials: true,
+  withCredentials: true, // sends httpOnly refresh-token cookie automatically
 });
 
-/** No auth interceptors — used only for POST /auth/refresh to avoid loops */
+/** Separate client for /auth/refresh — avoids triggering the 401 retry loop */
 const refreshClient = axios.create({
   baseURL,
   withCredentials: true,
@@ -48,8 +49,9 @@ function shouldAttemptRefresh(err, config) {
   return true;
 }
 
+// Attach in-memory access token to every request
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token');
+  const token = tokenStore.get();
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
@@ -58,21 +60,19 @@ api.interceptors.request.use((config) => {
  * Offline payment interceptor
  *
  * When the device has no network and the request is POST /payments/send,
- * we enqueue the payload in IndexedDB and resolve with a synthetic
- * { queued: true } response so the UI can show a "queued" confirmation
- * instead of a hard error.
+ * enqueue the payload in IndexedDB and resolve with a synthetic
+ * { queued: true } response so the UI can show a "queued" confirmation.
  *
- * The service worker's Background Sync handler will replay the request
+ * The service worker's Background Sync handler replays the request
  * automatically once connectivity is restored.
  */
 api.interceptors.request.use(async (config) => {
   const isPaymentSend =
     config.method?.toLowerCase() === 'post' &&
-    (config.url?.includes('/payments/send'));
+    config.url?.includes('/payments/send');
 
   if (isPaymentSend && !navigator.onLine) {
     await enqueuePayment(config.data ?? {});
-    // Throw a special sentinel so the response interceptor can surface it
     const offlineErr = new Error('OFFLINE_QUEUED');
     offlineErr.isOfflineQueued = true;
     offlineErr.config = config;
@@ -90,7 +90,8 @@ api.interceptors.response.use(
       return Promise.resolve({
         data: {
           queued: true,
-          message: 'You are offline. Your payment has been queued and will be sent automatically when your connection is restored.',
+          message:
+            'You are offline. Your payment has been queued and will be sent automatically when your connection is restored.',
         },
         status: 202,
         config: err.config,
@@ -106,13 +107,14 @@ api.interceptors.response.use(
           url.includes('/auth/register') ||
           url.includes('/auth/verify-pin');
         if (!silent401) {
-          localStorage.removeItem('token');
+          tokenStore.clear();
           window.location.href = '/login';
         }
       }
       return Promise.reject(err);
     }
 
+    // Queue concurrent requests while a refresh is in flight
     if (isRefreshing) {
       return new Promise((resolve, reject) => {
         failedQueue.push({ resolve, reject });
@@ -130,13 +132,14 @@ api.interceptors.response.use(
     try {
       const { data } = await refreshClient.post('/auth/refresh', {});
       const newToken = data.token;
-      localStorage.setItem('token', newToken);
+      // Store new token in memory only — never in localStorage
+      tokenStore.set(newToken);
       processQueue(null, newToken);
       originalRequest.headers.Authorization = `Bearer ${newToken}`;
       return api.request(originalRequest);
     } catch (refreshErr) {
       processQueue(refreshErr, null);
-      localStorage.removeItem('token');
+      tokenStore.clear();
       window.location.href = '/login';
       return Promise.reject(refreshErr);
     } finally {
