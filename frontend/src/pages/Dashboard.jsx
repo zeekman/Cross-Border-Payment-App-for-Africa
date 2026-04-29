@@ -56,6 +56,8 @@ export default function Dashboard() {
   const [copied, setCopied] = useState(false);
   const [selectedCurrency, setSelectedCurrency] = useState('XLM');
   const [funding, setFunding] = useState(false);
+  const [anchorLoading, setAnchorLoading] = useState(false);
+  const [anchorAction, setAnchorAction] = useState(null);
   const [balanceIncreased, setBalanceIncreased] = useState(false);
   const [fromCache, setFromCache] = useState(false);
   const [showZeroBalances, setShowZeroBalances] = useState(false);
@@ -180,6 +182,8 @@ export default function Dashboard() {
   };
 
   const handleAnchorAction = async (action) => {
+    setAnchorLoading(true);
+    setAnchorAction(action);
     const win = window.open('', 'anchor', 'width=500,height=600');
     try {
       const asset = 'USDC';
@@ -189,6 +193,9 @@ export default function Dashboard() {
     } catch (err) {
       win.close();
       toast.error(err.response?.data?.error || `Failed to ${action}`);
+    } finally {
+      setAnchorLoading(false);
+      setAnchorAction(null);
     }
   };
 
@@ -618,10 +625,13 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 gap-3">
         <button
           onClick={() => handleAnchorAction('deposit')}
-          className="bg-green-500/10 hover:bg-green-500/20 border border-green-500/30 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
+          disabled={anchorLoading}
+          className="bg-green-500/10 hover:bg-green-500/20 disabled:opacity-50 border border-green-500/30 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
         >
           <div className="w-10 h-10 bg-green-500/20 rounded-lg flex items-center justify-center text-green-500">
-            <Plus size={20} />
+            {anchorLoading && anchorAction === 'deposit'
+              ? <div className="w-5 h-5 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
+              : <Plus size={20} />}
           </div>
           <span className="font-semibold text-green-600 dark:text-green-400">
             {t('dashboard.add_money') || 'Add Money'}
@@ -629,10 +639,13 @@ export default function Dashboard() {
         </button>
         <button
           onClick={() => handleAnchorAction('withdraw')}
-          className="bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
+          disabled={anchorLoading}
+          className="bg-blue-500/10 hover:bg-blue-500/20 disabled:opacity-50 border border-blue-500/30 rounded-xl p-4 flex items-center gap-3 shadow-sm transition-all"
         >
           <div className="w-10 h-10 bg-blue-500/20 rounded-lg flex items-center justify-center text-blue-500">
-            <Minus size={20} />
+            {anchorLoading && anchorAction === 'withdraw'
+              ? <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              : <Minus size={20} />}
           </div>
           <span className="font-semibold text-blue-600 dark:text-blue-400">
             {t('dashboard.withdraw') || 'Withdraw'}

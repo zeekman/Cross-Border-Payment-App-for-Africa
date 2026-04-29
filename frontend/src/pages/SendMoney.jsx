@@ -796,6 +796,25 @@ export default function SendMoney() {
                   <p className="text-green-400">
                     Recipient receives ≈ <span className="font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span>
                   </p>
+                  {(() => {
+                    const srcAmt = parseFloat(form.amount);
+                    const dstAmt = parseFloat(pathResult.destinationAmount);
+                    if (!srcAmt || !dstAmt) return null;
+                    const rate = (dstAmt / srcAmt).toPrecision(6);
+                    const impact = form.slippage;
+                    return (
+                      <>
+                        <p className="text-xs text-gray-400">
+                          Rate: 1 {form.asset} ≈ {rate} {form.destination_asset}
+                        </p>
+                        {impact > 1 && (
+                          <p className="text-xs text-yellow-400">
+                            ⚠️ High price impact ({impact}%). Consider splitting into smaller transactions.
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs text-gray-500">Slippage tolerance:</span>
                     {SLIPPAGE_OPTIONS.map(s => (
@@ -823,6 +842,25 @@ export default function SendMoney() {
                   <p className="text-yellow-300 text-xs">
                     You pay approximately <span className="font-semibold">{pathResult.sourceAmount} {form.asset}</span>
                   </p>
+                  {(() => {
+                    const srcAmt = parseFloat(pathResult.sourceAmount);
+                    const dstAmt = parseFloat(form.amount);
+                    if (!srcAmt || !dstAmt) return null;
+                    const rate = (dstAmt / srcAmt).toPrecision(6);
+                    const impact = form.slippage;
+                    return (
+                      <>
+                        <p className="text-xs text-gray-400">
+                          Rate: 1 {form.asset} ≈ {rate} {form.destination_asset}
+                        </p>
+                        {impact > 1 && (
+                          <p className="text-xs text-yellow-400">
+                            ⚠️ High price impact ({impact}%). Consider splitting into smaller transactions.
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs text-gray-500">Max slippage:</span>
                     {SLIPPAGE_OPTIONS.map(s => (

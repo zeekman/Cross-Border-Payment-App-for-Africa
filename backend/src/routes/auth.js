@@ -12,6 +12,8 @@ const {
   verifyPhone,
   getMe,
   updateProfile,
+  changeEmail,
+  verifyEmailChange,
   getActivity,
   setPIN,
   verifyPIN,
@@ -112,6 +114,17 @@ router.post(
 );
 router.get('/me', authMiddleware, getMe);
 router.patch('/me', authMiddleware, updateProfile);
+router.post(
+  '/change-email',
+  authMiddleware,
+  [
+    body('new_email').isEmail().normalizeEmail().withMessage('Valid email required'),
+    body('password').notEmpty().withMessage('Password is required'),
+  ],
+  validate,
+  changeEmail
+);
+router.get('/verify-email-change', verifyEmailChange);
 router.get('/activity', authMiddleware, getActivity);
 router.post('/refresh', refresh);
 router.post('/logout', logout);
