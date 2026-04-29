@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Copy, CheckCheck, Share2 } from 'lucide-react';
+import { ArrowLeft, Copy, CheckCheck, Share2, Link } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
@@ -13,6 +13,8 @@ export default function ReceiveMoney() {
   const { t } = useTranslation();
   const [walletAddress, setWalletAddress] = useState(user?.wallet_address || '');
   const [federationAddress, setFederationAddress] = useState('');
+  const [amount, setAmount] = useState('');
+  const [memo, setMemo] = useState('');
 
   useEffect(() => {
     if (!walletAddress) {
@@ -28,17 +30,22 @@ export default function ReceiveMoney() {
     }
   }, [user, walletAddress]);
 
+  const paymentUri = (() => {
+    if (!walletAddress) return '';
+    const params = new URLSearchParams({ destination: walletAddress });
+    if (amount) params.set('amount', amount);
+    if (memo) params.set('memo', memo);
+    return `web+stellar:pay?${params.toString()}`;
+  })();
+
   const copyAddress = (addr) => {
     navigator.clipboard.writeText(addr);
     toast.success(t('receive.address_copied'));
   };
 
-  const shareAddress = async () => {
-    if (navigator.share) {
-      await navigator.share({ title: 'My AfriPay Wallet', text: walletAddress });
-    } else {
-      copyAddress();
-    }
+  const copyUri = () => {
+    navigator.clipboard.writeText(paymentUri);
+    toast.success('Payment link copied');
   };
 
   return (
@@ -53,12 +60,33 @@ export default function ReceiveMoney() {
       {/* QR Code */}
       <div className="bg-white rounded-2xl p-6 flex items-center justify-center mb-6 mx-auto w-fit">
         {walletAddress ? (
-          <QRCodeSVG value={walletAddress} size={200} level="H" />
+          <QRCodeSVG value={paymentUri || walletAddress} size={200} level="H" />
         ) : (
           <div className="w-48 h-48 flex items-center justify-center" role="status" aria-label="Loading">
             <div className="w-8 h-8 border-2 border-gray-300 border-t-transparent rounded-full animate-spin" />
           </div>
         )}
+      </div>
+
+      {/* Optional amount & memo */}
+      <div className="space-y-2 mb-6">
+        <input
+          type="number"
+          min="0"
+          step="any"
+          placeholder="Amount (optional)"
+          value={amount}
+          onChange={e => setAmount(e.target.value)}
+          className="w-full bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-primary-500"
+        />
+        <input
+          type="text"
+          maxLength={64}
+          placeholder="Memo (optional)"
+          value={memo}
+          onChange={e => setMemo(e.target.value)}
+          className="w-full bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-white text-sm placeholder-gray-500 font-mono focus:outline-none focus:border-primary-500"
+        />
       </div>
 
       {/* Address display */}
@@ -100,6 +128,13 @@ export default function ReceiveMoney() {
           className="bg-primary-500 hover:bg-primary-600 rounded-xl py-3.5 flex items-center justify-center gap-2 text-white font-medium transition-colors"
         >
           <Share2 size={18} /> {t('common.share')}
+        </button>
+        <button
+          onClick={copyUri}
+          disabled={!walletAddress}
+          className="col-span-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 rounded-xl py-3.5 flex items-center justify-center gap-2 text-white font-medium transition-colors"
+        >
+          <Link size={18} /> Share link
         </button>
       </div>
 
