@@ -1,0 +1,8 @@
+feat-pattern: fix ILIKE injection in getUsers search
+
+- Limit search query to 100 chars; return 400 for longer inputs
+- Escape PostgreSQL special pattern chars before ILIKE
+- Fix broken syntax and duplicate exports in adminController.js
+- Fix merge conflict artifacts in stellar.js
+- Clean up duplicate require calls in admin.js routes
+- Add tests verifying 400 on long search, escaping, and percent safety

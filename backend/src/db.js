@@ -6,9 +6,12 @@ const WAITING_ALERT_THRESHOLD = 5;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  // Maximum number of clients in the pool (default: 20)
+  max: parseInt(process.env.DB_POOL_MAX) || 20,
+  // How long a client is allowed to remain idle before being closed (default: 30000ms)
+  idleTimeoutMillis: parseInt(process.env.DB_POOL_IDLE_TIMEOUT_MS) || 30000,
+  // How long to wait for a connection before timing out (default: 5000ms)
+  connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT_MS) || 5000,
 });
 
 // Emitted each time a new physical client is connected to the PostgreSQL server.
@@ -57,6 +60,12 @@ pool.on('error', (err) => {
   });
 });
 
+/**
+ * Executes a SQL query using a client from the pool.
+ * @param {string} text - SQL query string
+ * @param {Array} params - Query parameters
+ * @returns {Promise<Object>} - Query result
+ */
 async function query(text, params) {
   const end = dbQueryDuration.startTimer();
   try {
@@ -69,7 +78,6 @@ async function query(text, params) {
   }
 }
 
-module.exports = { query, pool };
 /**
  * Returns a snapshot of the current pool health metrics.
  * @returns {{ total: number, idle: number, waiting: number }}
@@ -83,7 +91,7 @@ function getPoolStats() {
 }
 
 module.exports = {
-  query: (text, params) => pool.query(text, params),
+  query,
   pool,
   getPoolStats,
 };
