@@ -159,7 +159,9 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::EscrowCounter)
             .unwrap_or(0);
-        let next_id = current_id + 1;
+        // u64::MAX is 18,446,744,073,709,551,615. At one escrow per second,
+        // exhausting the counter would take ~584 billion years.
+        let next_id = current_id.checked_add(1).expect("Escrow counter overflow");
         env.storage()
             .persistent()
             .set(&DataKey::EscrowCounter, &next_id);

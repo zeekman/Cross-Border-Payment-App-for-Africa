@@ -217,6 +217,7 @@ async function send(req, res, next) {
       }
 
       if (kycStatus !== "verified" && estimatedUSD >= KYC_THRESHOLD_USD) {
+        webhook.deliver("payment.failed", { code: "KYC_REQUIRED", error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent." }).catch(() => {});
         return res.status(403).json({
           error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent.",
           kyc_status: kycStatus,
@@ -250,6 +251,7 @@ async function send(req, res, next) {
 
     const overLimit = await dailyLimitExceeded(public_key, amount);
     if (overLimit) {
+      webhook.deliver("payment.failed", { code: "DAILY_LIMIT_EXCEEDED", error: `Daily send limit of ${DAILY_SEND_LIMIT} reached. Try again tomorrow.` }).catch(() => {});
       return res.status(400).json({
         error: `Daily send limit of ${DAILY_SEND_LIMIT} reached. Try again tomorrow.`,
         code: "DAILY_LIMIT_EXCEEDED",
@@ -262,13 +264,15 @@ async function send(req, res, next) {
       checkDailyLimit(public_key, amount, asset),
     ]);
     if (isSuspicious) {
+      webhook.deliver("payment.failed", { code: "FRAUD_BLOCKED", error: "Transaction limit reached. Please wait before sending again." }).catch(() => {});
       return res
         .status(429)
         .json({ error: "Transaction limit reached. Please wait before sending again." });
-    // Fraud protection
+    }
     const fraudCheck = await checkFraud(public_key, amount, asset);
     if (fraudCheck.blocked) {
       await logFraudBlock(public_key, fraudCheck.reason, amount, asset);
+      webhook.deliver("payment.failed", { code: "FRAUD_BLOCKED", error: fraudCheck.reason }).catch(() => {});
       return res.status(429).json({ error: fraudCheck.reason });
     }
 
@@ -279,6 +283,7 @@ async function send(req, res, next) {
       });
     }
     if (limitExceeded) {
+      webhook.deliver("payment.failed", { code: "DAILY_LIMIT_EXCEEDED", error: "Daily send limit reached. Try again later." }).catch(() => {});
       return res
         .status(429)
         .json({ error: "Daily send limit reached. Try again later.", code: "DAILY_LIMIT_EXCEEDED" });
@@ -302,11 +307,6 @@ async function send(req, res, next) {
     const ledger_close_time = await fetchLedgerCloseTime(ledger);
 
     // Save to DB
-    const feeAmount = calculateFee(amount);
-    await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fee_amount)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'completed',$8)`,
-      [txId, public_key, recipient_address, amount, asset, memo || null, transactionHash, feeAmount],
     const txStatus = type === "claimable_balance" ? "pending_claim" : "confirming";
     await db.query(
       `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time)
@@ -372,7 +372,9 @@ async function send(req, res, next) {
     }
 
     if (err.status) {
-      webhook.deliver("payment.failed", { error: err.message }).catch(() => {});
+      const failedPayload = { error: err.message };
+      if (err.payload?.code) failedPayload.code = err.payload.code;
+      webhook.deliver("payment.failed", failedPayload).catch(() => {});
       return res.status(err.status).json({ error: err.message, ...(err.payload || {}) });
     }
     if (err.response?.data) {

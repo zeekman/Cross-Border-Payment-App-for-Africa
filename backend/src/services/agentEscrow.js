@@ -36,6 +36,19 @@ function getRpc() {
   return new StellarSdk.SorobanRpc.Server(rpcUrl);
 }
 
+async function getRecommendedFee(rpc) {
+  try {
+    const stats = await rpc.getFeeStats();
+    const p90 = stats?.sorobanInclusionFee?.p90;
+    if (p90 != null) {
+      return String(p90);
+    }
+    return String(StellarSdk.BASE_FEE * 10);
+  } catch {
+    return String(StellarSdk.BASE_FEE * 10);
+  }
+}
+
 function decryptSecret(encryptedKey) {
   const [ivHex, encrypted] = encryptedKey.split(":");
   const iv = Buffer.from(ivHex, "hex");
@@ -58,9 +71,10 @@ async function invokeContract(encryptedSecretKey, method, args) {
 
   const account = await rpc.getAccount(keypair.publicKey());
   const contract = new StellarSdk.Contract(CONTRACT_ID);
+  const fee = await getRecommendedFee(rpc);
 
   const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: StellarSdk.BASE_FEE,
+    fee,
     networkPassphrase,
   })
     .addOperation(contract.call(method, ...args))
@@ -121,6 +135,7 @@ async function _createEscrow({ encryptedSecretKey, recipient, agent, amount, fee
 
   const account = await rpc.getAccount(sender);
   const contract = new StellarSdk.Contract(CONTRACT_ID);
+  const fee = await getRecommendedFee(rpc);
 
   const args = [
     StellarSdk.nativeToScVal(sender, { type: "address" }),
@@ -131,7 +146,7 @@ async function _createEscrow({ encryptedSecretKey, recipient, agent, amount, fee
   ];
 
   const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: StellarSdk.BASE_FEE,
+    fee,
     networkPassphrase,
   })
     .addOperation(contract.call("create_escrow", ...args))
@@ -177,6 +192,7 @@ async function confirmPayout({ encryptedSecretKey, escrowId }) {
 
   const account = await rpc.getAccount(agent);
   const contract = new StellarSdk.Contract(CONTRACT_ID);
+  const fee = await getRecommendedFee(rpc);
 
   const args = [
     StellarSdk.nativeToScVal(agent, { type: "address" }),
@@ -184,7 +200,7 @@ async function confirmPayout({ encryptedSecretKey, escrowId }) {
   ];
 
   const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: StellarSdk.BASE_FEE,
+    fee,
     networkPassphrase,
   })
     .addOperation(contract.call("confirm_payout", ...args))
@@ -229,6 +245,7 @@ async function cancelEscrow({ encryptedSecretKey, escrowId }) {
 
   const account = await rpc.getAccount(sender);
   const contract = new StellarSdk.Contract(CONTRACT_ID);
+  const fee = await getRecommendedFee(rpc);
 
   const args = [
     StellarSdk.nativeToScVal(sender, { type: "address" }),
@@ -236,7 +253,7 @@ async function cancelEscrow({ encryptedSecretKey, escrowId }) {
   ];
 
   const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: StellarSdk.BASE_FEE,
+    fee,
     networkPassphrase,
   })
     .addOperation(contract.call("cancel_escrow", ...args))
