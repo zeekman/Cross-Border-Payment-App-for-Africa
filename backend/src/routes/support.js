@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
+const rateLimit = require('express-rate-limit');
 const authMiddleware = require('../middleware/auth');
 const { createTicket, listTickets } = require('../controllers/supportController');
 
@@ -8,6 +9,22 @@ const validate = (req, res, next) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   next();
 };
+
+/**
+ * Per-user rate limiter for support ticket creation.
+ * Allows a maximum of 5 tickets per hour per authenticated user.
+ * Returns 429 Too Many Requests with a Retry-After header when exceeded.
+ */
+const ticketCreationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  keyGenerator: (req) => req.user.userId,
+  standardHeaders: true,   // sends RateLimit-* headers
+  legacyHeaders: false,
+  message: {
+    error: 'Too many support tickets created. You may submit up to 5 tickets per hour.',
+  },
+});
 
 router.use(authMiddleware);
 
@@ -37,6 +54,8 @@ router.use(authMiddleware);
  *     responses:
  *       201:
  *         description: Ticket created
+ *       429:
+ *         description: Too many requests – per-user limit of 5 tickets/hour exceeded
  *   get:
  *     summary: List user's support tickets
  *     tags: [Support]
@@ -47,6 +66,7 @@ router.use(authMiddleware);
  *         description: List of tickets
  */
 router.post('/tickets',
+  ticketCreationLimiter,
   [
     body('type').notEmpty().withMessage('type is required'),
     body('description').trim().notEmpty().withMessage('description is required')
