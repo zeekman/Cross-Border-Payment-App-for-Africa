@@ -35,6 +35,7 @@ export default function Profile() {
   const [trustlines, setTrustlines] = useState([]);
   const [newAsset, setNewAsset] = useState('');
   const [trustlineLoading, setTrustlineLoading] = useState(false);
+  const [deleteContactPending, setDeleteContactPending] = useState(null); // { id, name }
   const [showCloseAccount, setShowCloseAccount] = useState(false);
   const [closeDestination, setCloseDestination] = useState('');
   const [closePassword, setClosePassword] = useState('');
@@ -191,8 +192,9 @@ export default function Profile() {
     }
   };
 
-  const deleteContact = async (id) => {
-    if (!window.confirm('Are you sure you want to delete this contact?')) return;
+  const deleteContact = async () => {
+    const { id } = deleteContactPending;
+    setDeleteContactPending(null);
     try {
       await api.delete(`/wallet/contacts/${id}`);
       setContacts(contacts.filter(c => c.id !== id));
@@ -434,7 +436,7 @@ export default function Profile() {
                   )}
                 </div>
                 <button
-                  onClick={() => deleteContact(c.id)}
+                  onClick={() => setDeleteContactPending({ id: c.id, name: c.name })}
                   className="p-1.5 text-gray-500 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
                   aria-label="Delete contact"
                 >
@@ -773,6 +775,31 @@ export default function Profile() {
       >
         <LogOut size={18} /> {t('common.sign_out')}
       </button>
+      {/* Delete contact confirmation dialog */}
+      {deleteContactPending && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="bg-gray-900 rounded-2xl p-6 w-full max-w-sm space-y-4">
+            <p className="text-white font-semibold text-base">
+              Delete {deleteContactPending.name}?
+            </p>
+            <p className="text-gray-400 text-sm">This cannot be undone.</p>
+            <div className="flex gap-3 pt-1">
+              <button
+                onClick={() => setDeleteContactPending(null)}
+                className="flex-1 bg-gray-800 hover:bg-gray-700 text-white text-sm font-medium py-2.5 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={deleteContact}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
