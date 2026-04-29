@@ -340,19 +340,11 @@ async function createClaimableBalance({
   const assetObj = resolveAsset(asset);
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const senderAccount = await withRetry(() => withFallback(s => s.loadAccount(senderPublicKey), logger), { label: 'loadAccount(sender)' });
+  const rawAccount = await withRetry(() => withFallback(s => s.loadAccount(senderPublicKey), logger), { label: 'loadAccount(sender)' });
+  const senderAccount = validateHorizonResponse(AccountResponseSchema, rawAccount, 'loadAccount(sender)');
 
   const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
     fee: await withRetry(() => withFallback(s => s.fetchBaseFee(), logger), { label: 'fetchBaseFee' }),
-  const senderAccount = validateHorizonResponse(
-    AccountResponseSchema,
-    await withRetry(() => withFallback(s => s.loadAccount(senderPublicKey)), { label: 'loadAccount(sender)' }),
-    'loadAccount(sender)'
-  );
-  const senderAccount = await withRetry(() => withFallback(s => s.loadAccount(senderPublicKey), 'loadAccount'), { label: 'loadAccount(sender)' });
-
-  const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
-    fee: await withRetry(() => withFallback(s => s.fetchBaseFee(), 'fetchBaseFee'), { label: 'fetchBaseFee' }),
     networkPassphrase
   })
     .addOperation(StellarSdk.Operation.createClaimableBalance({
@@ -370,10 +362,8 @@ async function createClaimableBalance({
   const transaction = txBuilder.build();
   transaction.sign(senderKeypair);
 
-  const result = await withRetry(() => withFallback(s => s.submitTransaction(transaction), logger), { label: 'submitTransaction' });
-  const rawResult = await withRetry(() => withFallback(s => s.submitTransaction(transaction)), { label: 'submitTransaction' });
+  const rawResult = await withRetry(() => withFallback(s => s.submitTransaction(transaction), logger), { label: 'submitTransaction' });
   const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(claimableBalance)');
-  const result = await withRetry(() => withFallback(s => s.submitTransaction(transaction), 'submitTransaction'), { label: 'submitTransaction' });
   return { transactionHash: result.hash, ledger: result.ledger };
 }
 
@@ -489,10 +479,8 @@ async function _sendPaymentOnce({
       const transaction = txBuilder.build();
       transaction.sign(senderKeypair);
 
-      const result = await withFallback(s => s.submitTransaction(transaction), logger);
-      const rawResult = await withFallback(s => s.submitTransaction(transaction));
+      const rawResult = await withFallback(s => s.submitTransaction(transaction), logger);
       const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(payment)');
-      const result = await withFallback(s => s.submitTransaction(transaction), 'submitTransaction');
       return { transactionHash: result.hash, ledger: result.ledger, type: 'payment' };
     } catch (err) {
       if (isBadSeq(err) && attempt < MAX_SEQ_RETRIES - 1) {
@@ -695,6 +683,12 @@ async function issueAsset(recipientPublicKey, amount) {
       destination: recipientPublicKey,
       asset: afriAsset,
       amount: String(amount)
+    }))
+    .setTimeout(30)
+    .build();
+  transaction.sign(distributionKeypair);
+  return await server.submitTransaction(transaction);
+}
 // ---------------------------------------------------------------------------
 // Fee estimate
 // ---------------------------------------------------------------------------
@@ -1059,15 +1053,7 @@ async function getStellarStats() {
   }
 }
 
-module.exports = { 
-  createWallet, 
-  getBalance, 
-  sendPayment, 
-  getTransactions, 
-  decryptPrivateKey,
-  issueAsset,
-  getAssetInfo,
-  getStellarStats
+
   tx.sign(ownerKeypair);
   const rawResult = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addSigner)' });
   const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(addSigner)');
@@ -1119,14 +1105,8 @@ async function removeAccountSigner({ ownerPublicKey, encryptedSecretKey, signerP
 async function mergeAccount({ sourcePublicKey, encryptedSecretKey, destinationPublicKey }) {
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const sourceKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const sourceAccount = validateHorizonResponse(
-    AccountResponseSchema,
-    await withRetry(() => withFallback(s => s.loadAccount(sourcePublicKey)), { label: 'loadAccount(merge)' }),
-    'loadAccount(merge)'
-  const sourceAccount = await withRetry(
-    () => withFallback(s => s.loadAccount(sourcePublicKey), 'loadAccount'),
-    { label: 'loadAccount(merge)' }
-  );
+  const rawAccount = await withRetry(() => withFallback(s => s.loadAccount(sourcePublicKey)), { label: 'loadAccount(merge)' });
+  const sourceAccount = validateHorizonResponse(AccountResponseSchema, rawAccount, 'loadAccount(merge)');
 
   const tx = new StellarSdk.TransactionBuilder(sourceAccount, {
     fee: await withRetry(() => withFallback(s => s.fetchBaseFee(), 'fetchBaseFee'), { label: 'fetchBaseFee' }),
@@ -1139,8 +1119,6 @@ async function mergeAccount({ sourcePublicKey, encryptedSecretKey, destinationPu
   tx.sign(sourceKeypair);
   const rawResult = await withRetry(
     () => withFallback(s => s.submitTransaction(tx)),
-  const result = await withRetry(
-    () => withFallback(s => s.submitTransaction(tx), 'submitTransaction'),
     { label: 'submitTransaction(merge)' }
   );
   const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(merge)');
@@ -1157,14 +1135,8 @@ async function clawbackAsset({ issuerPublicKey, encryptedIssuerSecretKey, fromPu
   const assetObj = resolveAsset(asset);
   const secretKey = decryptPrivateKey(encryptedIssuerSecretKey);
   const issuerKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const issuerAccount = validateHorizonResponse(
-    AccountResponseSchema,
-    await withRetry(() => withFallback(s => s.loadAccount(issuerPublicKey)), { label: 'loadAccount(clawback)' }),
-    'loadAccount(clawback)'
-  const issuerAccount = await withRetry(
-    () => withFallback(s => s.loadAccount(issuerPublicKey), 'loadAccount'),
-    { label: 'loadAccount(clawback)' }
-  );
+  const rawAccount = await withRetry(() => withFallback(s => s.loadAccount(issuerPublicKey)), { label: 'loadAccount(clawback)' });
+  const issuerAccount = validateHorizonResponse(AccountResponseSchema, rawAccount, 'loadAccount(clawback)');
 
   const tx = new StellarSdk.TransactionBuilder(issuerAccount, {
     fee: await withRetry(() => withFallback(s => s.fetchBaseFee(), 'fetchBaseFee'), { label: 'fetchBaseFee' }),
@@ -1181,8 +1153,6 @@ async function clawbackAsset({ issuerPublicKey, encryptedIssuerSecretKey, fromPu
   tx.sign(issuerKeypair);
   const rawResult = await withRetry(
     () => withFallback(s => s.submitTransaction(tx)),
-  const result = await withRetry(
-    () => withFallback(s => s.submitTransaction(tx), 'submitTransaction'),
     { label: 'submitTransaction(clawback)' }
   );
   const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(clawback)');
@@ -1382,11 +1352,8 @@ module.exports = {
   setAccountFlags,
   findReceivePath,
   sendStrictReceivePathPayment,
-<<<<<<< feat/bump-sequence-recovery
   isBadSeq,
   recoverSequence,
   withSequenceRecovery,
-=======
   validateNetworkPassphrase,
->>>>>>> main
 };
