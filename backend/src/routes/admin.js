@@ -3,14 +3,12 @@ const { body, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const isAdmin = require('../middleware/isAdmin');
-const { getStats, getUsers, getTransactions, getStellarNetworkStats } = require('../controllers/adminController');
 const { issueTokens } = require('../controllers/assetController');
-const { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC } = require('../controllers/adminController');
-const { getStats, getUsers, getTransactions, clawback, approveKYC, revokeKYC, setWalletFlags } = require('../controllers/adminController');
 const {
   getStats,
   getUsers,
   getTransactions,
+  getStellarNetworkStats,
   clawback,
   approveKYC,
   revokeKYC,
