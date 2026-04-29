@@ -180,12 +180,14 @@ export default function Dashboard() {
   };
 
   const handleAnchorAction = async (action) => {
+    const win = window.open('', 'anchor', 'width=500,height=600');
     try {
       const asset = 'USDC';
       const endpoint = action === 'deposit' ? '/anchor/deposit' : '/anchor/withdraw';
       const res = await api.post(endpoint, { asset });
-      window.open(res.data.url, 'anchor', 'width=500,height=600');
+      win.location.href = res.data.url;
     } catch (err) {
+      win.close();
       toast.error(err.response?.data?.error || `Failed to ${action}`);
     }
   };
