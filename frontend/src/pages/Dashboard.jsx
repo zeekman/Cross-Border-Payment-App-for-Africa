@@ -52,6 +52,7 @@ export default function Dashboard() {
 
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [selectedCurrency, setSelectedCurrency] = useState('XLM');
   const [funding, setFunding] = useState(false);
@@ -82,7 +83,14 @@ export default function Dashboard() {
 
   const { isConnected, isReconnecting, error: streamError } = usePaymentStream(wallet?.public_key, handlePayment);
 
-  const loadDashboard = useCallback(async () => {
+  const loadDashboard = useCallback(async (isRefresh = false) => {
+    // Initial load shows full skeleton; manual refresh shows spinner on button only
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+
     if (!navigator.onLine) {
       try {
         const [cachedWallets, cachedHistory] = await Promise.all([
@@ -101,6 +109,7 @@ export default function Dashboard() {
         // IndexedDB unavailable
       } finally {
         setLoading(false);
+        setRefreshing(false);
       }
       return;
     }
@@ -142,6 +151,7 @@ export default function Dashboard() {
       }
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 

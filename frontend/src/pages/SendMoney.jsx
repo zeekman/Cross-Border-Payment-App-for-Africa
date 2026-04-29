@@ -63,6 +63,36 @@ export default function SendMoney() {
 
   const isCrossAsset = form.destination_asset && form.destination_asset !== form.asset;
 
+  // Initial/clean state used for reset and dirty-check
+  const cleanForm = {
+    recipient_address: searchParams.get('to') || '',
+    amount: searchParams.get('amount') || '',
+    asset: searchParams.get('asset') || 'XLM',
+    memo: searchParams.get('memo') || '',
+    destination_asset: '',
+    slippage: DEFAULT_SLIPPAGE,
+    memo_type: 'text',
+    fee_priority: 'standard',
+    private_note: '',
+  };
+
+  /** Clears all user-entered fields back to their URL-seeded defaults. */
+  const resetForm = () => {
+    setForm(cleanForm);
+    setConfirmed(false);
+    setFeeXLM(null);
+    setPathResult(null);
+    setMemoRequired(false);
+    setContractSimData(null);
+  };
+
+  /** True when the user has entered data beyond the URL-seeded defaults. */
+  const formIsDirty =
+    form.recipient_address !== cleanForm.recipient_address ||
+    form.amount !== cleanForm.amount ||
+    form.memo !== cleanForm.memo ||
+    (form.private_note || '') !== '';
+
   // Multi-wallet state
   const [wallets, setWallets] = useState([]);
   const [selectedWalletId, setSelectedWalletId] = useState(searchParams.get('wallet_id') || null);
@@ -84,6 +114,16 @@ export default function SendMoney() {
   useEffect(() => {
     api.get('/payments/fee-stats').then((r) => setFeeStats(r.data)).catch(() => { });
   }, []);
+
+  // Warn the user before closing/refreshing the tab when the form has data
+  useBeforeUnload(
+    React.useCallback(
+      (e) => {
+        if (formIsDirty) e.preventDefault();
+      },
+      [formIsDirty]
+    )
+  );
 
   useEffect(() => {
     api.get('/wallet/list').then((r) => {
@@ -353,6 +393,7 @@ export default function SendMoney() {
         wallet_id: selectedWallet?.id || undefined,
       });
       toast.success('Payment sent via Ledger!');
+      resetForm();
       navigate('/dashboard');
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to submit Ledger transaction');
@@ -397,6 +438,7 @@ export default function SendMoney() {
             txHash: res.data.transaction.tx_hash
           }).catch(() => { });
         }
+        resetForm();
         navigate('/dashboard');
       } else {
         const m = form.memo.trim();
@@ -425,6 +467,7 @@ export default function SendMoney() {
       // Offline queue — the api interceptor returns { queued: true }
       if (res.data?.queued) {
         toast.success('You\'re offline. Payment queued — it will send automatically when you reconnect.', { duration: 5000 });
+        resetForm();
         navigate('/dashboard');
         return;
       }
@@ -437,6 +480,7 @@ export default function SendMoney() {
       }
 
       toast.success(t('send.success'));
+      resetForm();
       navigate('/dashboard');
     } catch (err) {
       toast.error(err.response?.data?.error || t('send.error'));
@@ -449,7 +493,13 @@ export default function SendMoney() {
 
   return (
     <div className="px-4 py-6 max-w-lg mx-auto pb-safe" style={{ paddingBottom: keyboardOpen ? 'max(1.5rem, env(safe-area-inset-bottom))' : '1.5rem' }}>
-      <button onClick={() => navigate(-1)} className="text-gray-400 hover:text-white mb-6 flex items-center gap-1">
+      <button
+        onClick={() => {
+          if (formIsDirty && !window.confirm('You have unsaved changes. Leave this page?')) return;
+          navigate(-1);
+        }}
+        className="text-gray-400 hover:text-white mb-6 flex items-center gap-1"
+      >
         <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
