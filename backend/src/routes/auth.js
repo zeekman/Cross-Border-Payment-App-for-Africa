@@ -1,7 +1,15 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
-const { register, login, getMe, setPIN, verifyPIN } = require('../controllers/authController');
-const { register, login, verifyEmail, getMe } = require('../controllers/authController');
+const {
+  register,
+  login,
+  refresh,
+  logout,
+  verifyEmail,
+  getMe,
+  setPIN,
+  verifyPIN,
+} = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
 
 const validate = (req, res, next) => {
@@ -14,7 +22,7 @@ router.post('/register',
   [
     body('full_name').trim().notEmpty().withMessage('Full name is required'),
     body('email').isEmail().normalizeEmail(),
-    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   ],
   validate,
   register
@@ -23,29 +31,28 @@ router.post('/register',
 router.post('/login',
   [
     body('email').isEmail().normalizeEmail(),
-    body('password').notEmpty()
+    body('password').notEmpty(),
   ],
   validate,
   login
 );
+
+router.post('/refresh', refresh);
+router.post('/logout', logout);
 
 router.get('/verify-email', verifyEmail);
 router.get('/me', authMiddleware, getMe);
 
 router.post('/set-pin',
   authMiddleware,
-  [
-    body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')
-  ],
+  [body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')],
   validate,
   setPIN
 );
 
 router.post('/verify-pin',
   authMiddleware,
-  [
-    body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')
-  ],
+  [body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')],
   validate,
   verifyPIN
 );

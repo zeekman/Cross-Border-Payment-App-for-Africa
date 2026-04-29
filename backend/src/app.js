@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const cookieParser = require('cookie-parser');
 
 const requestId = require('./middleware/requestId');
 
@@ -17,6 +18,7 @@ const logger = require('./utils/logger');
 const app = express();
 
 app.use(requestId);
+app.use(cookieParser());
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
