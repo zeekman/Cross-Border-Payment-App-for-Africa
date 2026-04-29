@@ -15,9 +15,19 @@ export default function Register() {
   const [showPINSetup, setShowPINSetup] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [secretKey, setSecretKey] = useState('');
+  const [showSecretKey, setShowSecretKey] = useState(false);
+  const [secretKeyError, setSecretKeyError] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (showImport && secretKey) {
+      // Validate Stellar secret key: starts with 'S', 56 chars, base32
+      const isValid = /^S[A-Z2-7]{55}$/.test(secretKey);
+      if (!isValid) {
+        setSecretKeyError('Invalid Stellar secret key. It must start with S and be 56 characters.');
+        return;
+      }
+    }
     setLoading(true);
     try {
       const payload = { ...form };
@@ -109,7 +119,7 @@ export default function Register() {
           <div className="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
             <button
               type="button"
-              onClick={() => { setShowImport(v => !v); setSecretKey(''); }}
+              onClick={() => { setShowImport(v => !v); setSecretKey(''); setSecretKeyError(''); setShowSecretKey(false); }}
               className="w-full flex items-center justify-between px-4 py-3 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
             >
               <span>Already have a Stellar wallet? Import it</span>
@@ -118,15 +128,28 @@ export default function Register() {
             {showImport && (
               <div className="px-4 pb-4 space-y-2 bg-gray-50 dark:bg-gray-800/50">
                 <p className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/30 rounded-lg p-2">
-                  ⚠ Your secret key will be encrypted and stored securely. Never share it with anyone.
+                  ⚠️ Never share your secret key.
                 </p>
-                <input
-                  type="password"
-                  placeholder="Stellar secret key (starts with S…)"
-                  value={secretKey}
-                  onChange={e => setSecretKey(e.target.value)}
-                  className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-white placeholder-gray-400 font-mono text-sm focus:outline-none focus:border-primary-500 transition-colors"
-                />
+                <div className="relative">
+                  <input
+                    type={showSecretKey ? 'text' : 'password'}
+                    placeholder="Stellar secret key (starts with S…)"
+                    value={secretKey}
+                    onChange={e => { setSecretKey(e.target.value); setSecretKeyError(''); }}
+                    className={`w-full bg-white dark:bg-gray-800 border rounded-xl px-4 py-3 text-gray-900 dark:text-white placeholder-gray-400 font-mono text-sm focus:outline-none focus:border-primary-500 transition-colors pr-12 ${secretKeyError ? 'border-red-500' : 'border-gray-200 dark:border-gray-700'}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSecretKey(v => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-white transition-colors"
+                    aria-label={showSecretKey ? 'Hide secret key' : 'Show secret key'}
+                  >
+                    {showSecretKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+                {secretKeyError && (
+                  <p className="text-xs text-red-500">{secretKeyError}</p>
+                )}
               </div>
             )}
           </div>

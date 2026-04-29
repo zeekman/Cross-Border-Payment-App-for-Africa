@@ -847,6 +847,67 @@ async function updateProfile(req, res, next) {
   }
 }
 
+async function changeEmail(req, res, next) {
+  try {
+    const { new_email, password } = req.body;
+    const userId = req.user.userId;
+
+    const result = await db.query('SELECT password_hash, email FROM users WHERE id = $1', [userId]);
+    const user = result.rows[0];
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const isValid = await bcrypt.compare(password, user.password_hash);
+    if (!isValid) return res.status(401).json({ error: 'Invalid password' });
+
+    const existing = await db.query('SELECT id FROM users WHERE email = $1 AND id != $2', [new_email, userId]);
+    if (existing.rows.length > 0) return res.status(409).json({ error: 'Email already in use' });
+
+    const { raw, hashed } = generateVerificationToken();
+    const expiresAt = new Date(Date.now() + TOKEN_TTL_MS);
+
+    await db.query(
+      `UPDATE users SET pending_email = $1, pending_email_token = $2, pending_email_token_expires_at = $3 WHERE id = $4`,
+      [new_email, hashed, expiresAt, userId]
+    );
+
+    await sendVerificationEmail(new_email, raw);
+
+    audit.log(userId, 'email_change_requested', req.ip, req.headers['user-agent'], { new_email });
+    res.json({ message: 'Verification email sent to new address. Check your inbox to confirm the change.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function verifyEmailChange(req, res, next) {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'Token is required' });
+
+    const hashed = crypto.createHash('sha256').update(token).digest('hex');
+    const result = await db.query(
+      `SELECT id, pending_email, pending_email_token_expires_at FROM users WHERE pending_email_token = $1`,
+      [hashed]
+    );
+
+    const user = result.rows[0];
+    if (!user) return res.status(400).json({ error: 'Invalid or expired token' });
+    if (new Date(user.pending_email_token_expires_at) < new Date()) {
+      return res.status(400).json({ error: 'Token has expired' });
+    }
+
+    await db.query(
+      `UPDATE users SET email = pending_email, pending_email = NULL, pending_email_token = NULL, pending_email_token_expires_at = NULL WHERE id = $1`,
+      [user.id]
+    );
+
+    audit.log(user.id, 'email_changed', req.ip, req.headers['user-agent'], { new_email: user.pending_email });
+    res.json({ message: 'Email address updated successfully.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getActivity(req, res, next) {
   try {
     const result = await db.query(
@@ -870,6 +931,8 @@ module.exports = {
   verifyPhone,
   getMe,
   updateProfile,
+  changeEmail,
+  verifyEmailChange,
   getActivity,
   setPIN,
   verifyPIN,
