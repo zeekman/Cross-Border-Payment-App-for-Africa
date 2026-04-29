@@ -174,7 +174,7 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs));
  * /health:
  *   get:
  *     summary: Public liveness probe
- *     description: Returns only the overall status. Use /api/admin/health for full diagnostics.
+ *     description: Returns the overall status and pool utilization. Use /api/admin/health for full diagnostics.
  *     tags: [Health]
  *     responses:
  *       200:
@@ -187,13 +187,22 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs));
  *                 status:
  *                   type: string
  *                   enum: [ok, degraded]
+ *                 pool:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     idle: { type: integer }
+ *                     waiting: { type: integer }
  *       503:
  *         description: Service is degraded
  */
 app.get('/health', async (req, res) => {
   try {
-    const { status } = await runHealthChecks();
-    res.status(status === 'ok' ? 200 : 503).json({ status });
+    const health = await runHealthChecks();
+    res.status(health.status === 'ok' ? 200 : 503).json({
+      status: health.status,
+      pool: health.pool,
+    });
   } catch {
     res.status(503).json({ status: 'degraded' });
   }
