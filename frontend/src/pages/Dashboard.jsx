@@ -281,6 +281,23 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Stream disconnected banner — shows when not connected and not actively reconnecting */}
+      {!isConnected && !isReconnecting && streamError && (
+        <div
+          role="alert"
+          aria-live="polite"
+          className="flex items-center justify-between bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-red-400 text-sm"
+        >
+          <span>Live updates paused — pull to refresh</span>
+          <button
+            onClick={() => loadDashboard()}
+            className="text-xs bg-red-500/20 hover:bg-red-500/30 px-3 py-1 rounded-lg transition-colors"
+          >
+            Refresh
+          </button>
+        </div>
+      )}
+
       {/* Greeting */}
       <div className="flex items-center justify-between">
         <div>
@@ -289,13 +306,39 @@ export default function Dashboard() {
             {user?.full_name?.split(' ')[0]} 👋
           </h2>
         </div>
-        <button
-          onClick={() => loadDashboard()}
-          className="text-gray-400 hover:text-white"
-          aria-label="Refresh dashboard"
-        >
-          <RefreshCw size={18} />
-        </button>
+        <div className="flex items-center gap-3">
+          {/* Stream connection status indicator */}
+          <span
+            aria-label={
+              isReconnecting
+                ? 'Live updates: reconnecting'
+                : isConnected
+                ? 'Live updates: connected'
+                : 'Live updates: disconnected'
+            }
+            title={
+              isReconnecting
+                ? 'Reconnecting to live updates…'
+                : isConnected
+                ? 'Live updates active'
+                : 'Live updates paused'
+            }
+            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+              isReconnecting
+                ? 'bg-orange-400 animate-pulse'
+                : isConnected
+                ? 'bg-green-400'
+                : 'bg-red-400'
+            }`}
+          />
+          <button
+            onClick={() => loadDashboard()}
+            className="text-gray-400 hover:text-white"
+            aria-label="Refresh dashboard"
+          >
+            <RefreshCw size={18} />
+          </button>
+        </div>
       </div>
 
       {/* Wallet Selector */}
