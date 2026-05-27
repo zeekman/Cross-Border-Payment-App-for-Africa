@@ -435,6 +435,46 @@ async function verifyEmail(req, res, next) {
   }
 }
 
+async function resendVerificationEmail(req, res, next) {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const result = await db.query(
+      `SELECT id, email_verified, token_expires_at FROM users WHERE email = $1`,
+      [email]
+    );
+
+    const user = result.rows[0];
+    if (!user) {
+      // Return generic response for security (don't reveal if email exists)
+      return res.json({ message: 'If an account with this email exists, you will receive a verification email shortly.' });
+    }
+
+    // If email is already verified, no need to resend
+    if (user.email_verified) {
+      return res.json({ message: 'This email is already verified. You can log in now.' });
+    }
+
+    // Generate new verification token
+    const { raw, hashed } = generateVerificationToken();
+    const expiresAt = new Date(Date.now() + TOKEN_TTL_MS);
+
+    await db.query(
+      `UPDATE users SET verification_token = $1, token_expires_at = $2 WHERE id = $3`,
+      [hashed, expiresAt, user.id]
+    );
+
+    await sendVerificationEmail(email, raw);
+
+    res.json({ message: 'Verification email sent successfully' });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function verifyPhone(req, res, next) {
   try {
     const { otp } = req.body;
@@ -928,6 +968,7 @@ module.exports = {
   refresh,
   logout,
   verifyEmail,
+  resendVerificationEmail,
   verifyPhone,
   getMe,
   updateProfile,

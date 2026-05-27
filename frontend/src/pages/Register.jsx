@@ -52,9 +52,8 @@ export default function Register() {
       const refCode = searchParams.get('ref');
       if (refCode) payload.referral_code = refCode;
       await register(payload);
-      toast.success(t('register.success'));
-      setShowPINSetup(true);
-      navigate('/login');
+      // Navigate to verification success screen with email
+      navigate('/verify-email-pending', { state: { email: form.email } });
     } catch (err) {
       toast.error(err.response?.data?.error || t('register.error'));
     } finally {

@@ -6,6 +6,7 @@ const {
   refresh,
   logout,
   verifyEmail,
+  resendVerificationEmail,
   getMe,
   setPIN,
   verifyPIN,
@@ -105,6 +106,12 @@ router.post('/refresh', refresh);
 router.post('/logout', logout);
 
 router.get('/verify-email', verifyEmail);
+router.post(
+  '/resend-verification-email',
+  [body('email').isEmail().normalizeEmail().withMessage('Valid email required')],
+  validate,
+  resendVerificationEmail
+);
 router.post(
   '/verify-phone',
   authMiddleware,
