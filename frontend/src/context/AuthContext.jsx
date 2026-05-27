@@ -51,6 +51,11 @@ export function AuthProvider({ children }) {
     return res.data;
   };
 
+  const resendVerificationEmail = async (email) => {
+    const res = await api.post('/auth/resend-verification-email', { email });
+    return res.data;
+  };
+
   const logout = async () => {
     try {
       await api.post('/auth/logout');
@@ -64,7 +69,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, resendVerificationEmail, logout }}>
       {children}
     </AuthContext.Provider>
   );

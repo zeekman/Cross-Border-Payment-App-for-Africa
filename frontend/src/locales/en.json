@@ -13,6 +13,8 @@
     "sign_out": "Sign Out",
     "no_transactions": "No transactions found",
     "see_all": "See all",
+    "or": "Or",
+    "error": "Error",
     "rates_disclaimer": "Exchange rates are approximate and may be cached. Live prices refresh about every minute."
   },
   "welcome": {
@@ -69,6 +71,20 @@
     "back_to_login": "Back to sign in",
     "missing_token": "This reset link is invalid or incomplete. Request a new one from the login page.",
     "error_generic": "Something went wrong. Please try again."
+  },
+  "verifyEmail": {
+    "success_title": "Check your email!",
+    "check_email": "We've sent a verification link to:",
+    "check_spam": "If you don't see it, check your spam folder.",
+    "description": "Click the link in the email to verify your address and unlock your account.",
+    "resend_button": "Resend verification email",
+    "sending": "Sending...",
+    "resent_sent": "Email sent!",
+    "resent_success": "Verification email sent successfully",
+    "resent_error": "Failed to resend verification email",
+    "go_to_login": "Already verified? Go to login",
+    "didnt_receive": "Didn't receive the email?",
+    "contact_support": "Contact support"
   },
   "dashboard": {
     "greeting": "Good day,",

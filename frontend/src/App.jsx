@@ -7,6 +7,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import Welcome from "./pages/Welcome";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+import RegistrationSuccess from "./pages/RegistrationSuccess";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import Dashboard from "./pages/Dashboard";
@@ -81,6 +82,14 @@ export default function App() {
                 element={
                   <PublicRoute>
                     <Register />
+                  </PublicRoute>
+                }
+              />
+              <Route
+                path="/verify-email-pending"
+                element={
+                  <PublicRoute>
+                    <RegistrationSuccess />
                   </PublicRoute>
                 }
               />
