@@ -134,7 +134,8 @@
     "pin_max_attempts": "Kokarin da yawa ba su nasara ba. Sai batta sannan.",
     "pin_attempts_remaining": "{{remaining}} kokarin da suka rage",
     "pin_verify_button": "Tabbatar da Aika",
-    "pin_security_note": "Ba a aiko PIN nka ko ajiya shi a saerve namu ba"
+    "pin_security_note": "Ba a aiko PIN nka ko ajiya shi a saerve namu ba",
+    "pin_phishing_warning": "Shigar da PIN nka ne kawai idan kai ne ka fara wannan aiki. AfriPay ba zai taɓa neman PIN nka ta hanyar hira ko imel ba."
   },
   "receive": {
     "title": "Karɓi Kuɗi",

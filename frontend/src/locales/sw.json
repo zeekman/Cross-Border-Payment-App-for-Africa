@@ -134,7 +134,8 @@
     "pin_max_attempts": "Majaribio mengi yameshindwa. Jaribu baadaye.",
     "pin_attempts_remaining": "{{remaining}} majaribio yanayobasisa",
     "pin_verify_button": "Thibitisha na Tuma",
-    "pin_security_note": "PIN yako haisogezwi kwa au haikufikiwa kwenye seva yetu"
+    "pin_security_note": "PIN yako haisogezwi kwa au haikufikiwa kwenye seva yetu",
+    "pin_phishing_warning": "Ingiza PIN yako tu ikiwa wewe ulianzisha hatua hii. AfriPay haitakuomba PIN yako kupitia gumzo au barua pepe."
   },
   "receive": {
     "title": "Pokea Pesa",
