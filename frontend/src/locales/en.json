@@ -134,7 +134,8 @@
     "pin_max_attempts": "Too many failed attempts. Please try again later.",
     "pin_attempts_remaining": "{{remaining}} attempts remaining",
     "pin_verify_button": "Verify & Send",
-    "pin_security_note": "Your PIN is never sent to or stored on our servers"
+    "pin_security_note": "Your PIN is never sent to or stored on our servers",
+    "pin_phishing_warning": "Only enter your PIN if you initiated this action. AfriPay will never ask for your PIN via chat or email."
   },
   "receive": {
     "title": "Receive Money",

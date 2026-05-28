@@ -70,21 +70,35 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
 
         {/* Content */}
         <div className="px-6 py-6">
-          {/* Transaction Details */}
-          <div className="bg-gray-800 rounded-lg p-4 mb-6">
-            <p className="text-xs text-gray-500 mb-3">{t('auth.confirming_transaction')}</p>
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="text-gray-400 text-sm">{t('send.confirm_amount')}</span>
-                <span className="text-white font-semibold">{amount}</span>
-              </div>
-              {recipient && (
+          {/* Transaction Summary — only shown when amount is provided */}
+          {amount && (
+            <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 mb-4">
+              <p className="text-xs text-gray-500 uppercase tracking-wide mb-3">{t('auth.confirming_transaction')}</p>
+              <div className="space-y-2">
                 <div className="flex justify-between items-center">
-                  <span className="text-gray-400 text-sm">{t('send.confirm_to')}</span>
-                  <span className="text-gray-300 text-xs font-mono">{recipient.slice(0, 16)}...</span>
+                  <span className="text-gray-400 text-sm">{t('send.confirm_amount')}</span>
+                  <span className="text-white font-bold text-base">{amount}</span>
                 </div>
-              )}
+                {recipient && (
+                  <div className="flex justify-between items-start gap-4">
+                    <span className="text-gray-400 text-sm shrink-0">{t('send.confirm_to')}</span>
+                    <span className="text-gray-300 text-xs font-mono text-right break-all">
+                      {recipient.length > 24
+                        ? `${recipient.slice(0, 8)}…${recipient.slice(-8)}`
+                        : recipient}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
+          )}
+
+          {/* Anti-phishing notice */}
+          <div className="flex items-start gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-3 py-2.5 mb-5">
+            <AlertCircle size={15} className="text-yellow-400 shrink-0 mt-0.5" />
+            <p className="text-yellow-300 text-xs leading-snug">
+              {t('auth.pin_phishing_warning') || 'Only enter your PIN if you initiated this action. AfriPay will never ask for your PIN via chat or email.'}
+            </p>
           </div>
 
           <form onSubmit={handleVerify} className="space-y-4">
