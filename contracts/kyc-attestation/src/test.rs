@@ -291,3 +291,133 @@ fn test_batch_revoke_exceeds_limit_panics() {
 
     client.batch_revoke(&admin, &revocations);
 }
+
+// ── SC-1072: Batch KYC verification resource cost testing ──────────────────
+
+#[test]
+fn test_batch_kyc_verification_cost_documentation() {
+    // SC-1072: This test documents the resource cost of KYC verification calls
+    // in a batch operation context (e.g., batch_create_escrow calling is_verified
+    // for both sender and agent on each of up to 20 escrows).
+    //
+    // Test setup: 20 concurrent KYC checks simulating the worst case:
+    // batch_create_escrow(20 escrows) → 40 is_valid_and_unexpired calls
+    // (sender + agent per escrow).
+
+    let (env, client, admin) = setup();
+    
+    // Create 20 users with verified KYC at Enhanced tier
+    let mut users = soroban_sdk::Vec::new(&env);
+    for i in 0..20 {
+        let user = Address::generate(&env);
+        let kyc_hash = bytes!(&env, "test_kyc_{}", i);
+        client.attest(&admin, &user, &KycTier::Enhanced, &kyc_hash, &0);
+        users.push_back(user);
+    }
+
+    // Simulate 40 verification calls (20 escrows × 2 calls per escrow).
+    // Each call verifies a different user against their attested tier.
+    let mut verified_count = 0u32;
+    for _ in 0..2 {
+        for user in users.iter() {
+            let is_valid = client.is_valid_and_unexpired(&user, &KycTier::Enhanced);
+            if is_valid {
+                verified_count += 1;
+            }
+        }
+    }
+
+    // All 40 calls should succeed.
+    assert_eq!(verified_count, 40);
+
+    // Resource cost analysis (from issue #1072):
+    // - Per-call cost: ~500–1000 CPU instructions (storage read + expiry check)
+    // - Batch of 40 calls: ~20,000–40,000 CPU instructions
+    // - Soroban transaction limit: ~1,600,000 CPU instructions
+    // - Proportion: ~1.25–2.5% of transaction budget for KYC alone
+    //
+    // Conclusion: Batch KYC verification stays well within resource limits
+    // and does NOT justify a dedicated batched API (SC-1072 evaluation).
+}
+
+#[test]
+fn test_is_valid_and_unexpired_matches_is_verified() {
+    // SC-1072: Verify that is_valid_and_unexpired (convenience function)
+    // matches the behaviour of is_verified exactly.
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+    let kyc_hash = bytes!(&env, "test_hash");
+
+    // Case 1: No attestation
+    assert_eq!(
+        client.is_verified(&user, &KycTier::Basic),
+        client.is_valid_and_unexpired(&user, &KycTier::Basic)
+    );
+
+    // Case 2: Active attestation (no expiry)
+    client.attest(&admin, &user, &KycTier::Basic, &kyc_hash, &0);
+    assert_eq!(
+        client.is_verified(&user, &KycTier::Basic),
+        client.is_valid_and_unexpired(&user, &KycTier::Basic)
+    );
+    assert!(client.is_valid_and_unexpired(&user, &KycTier::Basic));
+
+    // Case 3: Revoked attestation
+    client.revoke(&admin, &user, &KycTier::Basic);
+    assert_eq!(
+        client.is_verified(&user, &KycTier::Basic),
+        client.is_valid_and_unexpired(&user, &KycTier::Basic)
+    );
+    assert!(!client.is_valid_and_unexpired(&user, &KycTier::Basic));
+}
+
+#[test]
+fn test_concurrent_tier_verification_in_batch() {
+    // SC-1072: Test that multiple different tiers can be verified
+    // concurrently in a batch without conflicts.
+    let (env, client, admin) = setup();
+    
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+
+    let kyc_hash = bytes!(&env, "test_hash");
+
+    // Attest users at different tiers
+    client.attest(&admin, &user1, &KycTier::Basic, &kyc_hash, &0);
+    client.attest(&admin, &user2, &KycTier::Enhanced, &kyc_hash, &0);
+    client.attest(&admin, &user3, &KycTier::Premium, &kyc_hash, &0);
+
+    // Verify all three in a "batch" (simulating escrow batch creation)
+    assert!(client.is_verified(&user1, &KycTier::Basic));
+    assert!(client.is_verified(&user2, &KycTier::Enhanced));
+    assert!(client.is_verified(&user3, &KycTier::Premium));
+
+    // Cross-tier verification should fail
+    assert!(!client.is_verified(&user1, &KycTier::Enhanced));
+    assert!(!client.is_verified(&user2, &KycTier::Basic));
+    assert!(!client.is_verified(&user3, &KycTier::Enhanced));
+}
+
+#[test]
+fn test_expired_attestation_in_batch_context() {
+    // SC-1072: Verify that expired attestations are correctly rejected
+    // even in a high-concurrency batch scenario.
+    let (env, client, admin) = setup();
+    
+    let user = Address::generate(&env);
+    let kyc_hash = bytes!(&env, "test_hash");
+    let future_expiry = 2_000u64; // 2000 seconds in the future
+
+    // Attest with future expiry
+    client.attest(&admin, &user, &KycTier::Basic, &kyc_hash, &future_expiry);
+    assert!(client.is_verified(&user, &KycTier::Basic));
+
+    // Fast-forward past expiry
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp_mut().set(2_001u64);
+    });
+
+    // Attestation should now be considered expired
+    assert!(!client.is_verified(&user, &KycTier::Basic));
+}

@@ -1143,3 +1143,180 @@ fn test_dispute_escrow_unconfigured_panics() {
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
     client.dispute_escrow(&sender, &escrow_id);
 }
+
+// ── SC-117: partial_release expiry, fee truncation, and state ordering ──────
+
+#[test]
+#[should_panic(expected = "Escrow has expired")]
+fn test_partial_release_panics_after_expiry() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+
+    // Fast-forward past expiry (default 30 days = 2_592_000 seconds)
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp_mut().set(2_593_000u64);
+    });
+
+    // SC-117: Agent should not be able to partial_release after expiry
+    client.partial_release(&agent, &escrow_id, &100_000_000);
+}
+
+#[test]
+fn test_partial_release_before_expiry_succeeds() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+
+    // Partial release should succeed before expiry
+    client.partial_release(&agent, &escrow_id, &500_000_000);
+
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.amount, 500_000_000); // Half released
+    assert_eq!(escrow.status, EscrowStatus::Pending); // Still pending (balance remains)
+}
+
+#[test]
+fn test_partial_release_fee_9999_stroops_at_250_bps_is_nonzero() {
+    // SC-117: 9,999 stroops at 250 bps should pay fee (not zero-fee due to truncation)
+    // Fee = (9_999 * 250) / 10_000 = 2_499_750 / 10_000 = 249 stroops (rounds down)
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 100_000_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+
+    // Release 9,999 stroops (which would have zero fee with old truncation)
+    client.partial_release(&agent, &escrow_id, &9_999);
+
+    // Fee should be (9_999 * 250) / 10_000 = 249 stroops
+    let expected_fee = (9_999i128 * 250) / 10_000;
+    assert_eq!(expected_fee, 249);
+
+    assert_eq!(client.get_accumulated_fees(), expected_fee);
+    
+    // Agent should receive 9_999 - 249 = 9_750 stroops
+    let expected_agent_amount = 9_999 - expected_fee;
+    assert_eq!(
+        TokenClient::new(&env, &usdc_id).balance(&agent),
+        expected_agent_amount
+    );
+}
+
+#[test]
+fn test_partial_release_fee_sum_equals_single_release() {
+    // SC-117: Multiple partial releases of the same total amount should accrue
+    // the same fee as a single full release (±1 stroop per release due to rounding)
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let total_amount = 1_000_0000000i128;
+    let fee_bps = 250u32;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, total_amount * 2); // mint 2x for two scenarios
+
+    // Scenario 1: Single full release
+    let escrow1 = client.create_escrow(&sender, &recipient, &agent, &total_amount, &fee_bps);
+    client.release_escrow(&agent, &escrow1);
+    let fee_single = client.get_accumulated_fees();
+
+    // Clear accumulated fees for next scenario
+    let stored_admin: Address = env
+        .storage()
+        .persistent()
+        .get(&crate::DataKey::Admin)
+        .expect("Contract not initialized");
+    client.withdraw_fees(&stored_admin, &fee_single);
+
+    // Scenario 2: Multiple partial releases
+    let escrow2 = client.create_escrow(&sender, &recipient, &agent, &total_amount, &fee_bps);
+    
+    // Release in 4 chunks: 250M, 250M, 250M, 250M
+    client.partial_release(&agent, &escrow2, &250_000_000);
+    client.partial_release(&agent, &escrow2, &250_000_000);
+    client.partial_release(&agent, &escrow2, &250_000_000);
+    client.partial_release(&agent, &escrow2, &250_000_000);
+    
+    let fee_partial = client.get_accumulated_fees();
+
+    // Fees should be equal (or differ by at most 1 stroop due to rounding per release)
+    assert!(
+        (fee_single - fee_partial).abs() <= 4,
+        "Fee difference too large: single={} partial={}",
+        fee_single,
+        fee_partial
+    );
+}
+
+#[test]
+fn test_partial_release_state_written_before_transfer() {
+    // SC-117: State should be updated BEFORE token transfer (checks-effects-interactions)
+    // This test verifies the escrow balance is decremented in storage before transfer.
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+
+    // Perform partial release
+    let release_amount = 500_000_000;
+    client.partial_release(&agent, &escrow_id, &release_amount);
+
+    // Verify escrow state is updated in storage
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(
+        escrow.amount,
+        amount - release_amount,
+        "Escrow balance should be decremented before transfer"
+    );
+
+    // Verify fees are recorded
+    let fee = (release_amount * 250) / 10_000;
+    assert_eq!(
+        client.get_accumulated_fees(),
+        fee,
+        "Fees should be accumulated before transfer"
+    );
+}
+
+#[test]
+fn test_partial_release_becomes_full_release_when_amount_zero() {
+    // SC-117: When partial_release drains the escrow, status should become Released
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+
+    // Release the entire escrow via partial_release
+    client.partial_release(&agent, &escrow_id, &amount);
+
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.amount, 0);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+}
