@@ -489,7 +489,15 @@ impl EscrowContract {
             panic!("Escrow has expired");
         }
 
-        let fee_amount = (escrow.amount / 10000).saturating_mul(escrow.release_fee_bps as i128);
+        // SC-117: Fix fee truncation by using checked arithmetic.
+        // Old: (amount / 10000).saturating_mul(bps) — truncates for amounts < 10_000.
+        // New: (amount * bps) / 10_000 — rounds down in platform's favour.
+        let fee_amount = escrow
+            .amount
+            .checked_mul(escrow.release_fee_bps as i128)
+            .expect("fee calc overflow")
+            .checked_div(10_000)
+            .expect("fee calc underflow");
         let agent_amount = escrow.amount.checked_sub(fee_amount).expect("fee exceeds escrow amount");
         if agent_amount <= 0 {
             panic!("fee cannot exceed 100% of escrow");
@@ -675,11 +683,23 @@ impl EscrowContract {
         if escrow.status != EscrowStatus::Pending {
             panic!("Escrow is not in pending state");
         }
+        // Expiry guard: expired escrows cannot be released by the agent.
+        // SC-117: This check was missing, allowing agents to release after expiry.
+        if env.ledger().timestamp() >= escrow.expires_at {
+            panic!("Escrow has expired");
+        }
         if amount > escrow.amount {
             panic!("Release amount exceeds escrow balance");
         }
 
-        let fee_amount = (amount / 10000).saturating_mul(escrow.release_fee_bps as i128);
+        // SC-117: Fix fee truncation by using checked arithmetic.
+        // Old: (amount / 10000).saturating_mul(bps) — truncates for amounts < 10_000.
+        // New: (amount * bps) / 10_000 — rounds down in platform's favour.
+        let fee_amount = amount
+            .checked_mul(escrow.release_fee_bps as i128)
+            .expect("fee calc overflow")
+            .checked_div(10_000)
+            .expect("fee calc underflow");
         let agent_amount = amount.checked_sub(fee_amount).expect("fee exceeds release amount");
         if agent_amount <= 0 {
             panic!("fee cannot exceed 100% of escrow");
@@ -691,12 +711,9 @@ impl EscrowContract {
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
-        token::Client::new(&env, &usdc_address).transfer(
-            &env.current_contract_address(),
-            &escrow.agent,
-            &agent_amount,
-        );
-
+        // SC-117: Checks-Effects-Interactions: write state BEFORE token transfers.
+        // Soroban prevents re-entrancy by disallowing cross-contract calls that
+        // re-enter the same contract instance within a single transaction invocation.
         let current_fees: i128 = env
             .storage()
             .persistent()
@@ -714,6 +731,13 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+
+        // External calls after state is committed (Interactions step).
+        token::Client::new(&env, &usdc_address).transfer(
+            &env.current_contract_address(),
+            &escrow.agent,
+            &agent_amount,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "PartialRelease"),),
