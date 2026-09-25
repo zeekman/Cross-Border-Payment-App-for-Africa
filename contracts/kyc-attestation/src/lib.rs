@@ -11,7 +11,7 @@
 //! - `attest` and `revoke` — admin only
 //! - `is_verified`         — public
 
-use soroban_sdk::{contract, contractimpl, contracttype, bytes, Address, Bytes, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Symbol};
 
 mod test;
 
@@ -35,15 +35,6 @@ pub enum DataKey {
 }
 
 // ── Domain types ──────────────────────────────────────────────────────────────
-
-/// Supported KYC tiers for attestation records.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[contracttype]
-pub enum KycTier {
-    Basic,
-    Standard,
-    Premium,
-}
 
 /// On-chain KYC attestation record.
 #[derive(Clone)]
@@ -143,7 +134,7 @@ impl KycAttestationContract {
             .persistent()
             .set(&DataKey::Attestation(user.clone()), &record);
         env.storage().persistent().set(
-            &DataKey::AttestationByTier(user.clone(), KycTier::Basic),
+            &DataKey::AttestationByTier(user.clone(), tier.clone()),
             &record,
         );
 
@@ -179,7 +170,7 @@ impl KycAttestationContract {
             .persistent()
             .set(&DataKey::Attestation(user.clone()), &record);
         env.storage().persistent().set(
-            &DataKey::AttestationByTier(user.clone(), KycTier::Basic),
+            &DataKey::AttestationByTier(user.clone(), tier.clone()),
             &record,
         );
 
