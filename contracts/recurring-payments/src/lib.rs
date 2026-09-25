@@ -344,7 +344,7 @@ impl RecurringPaymentsContract {
     /// - `now` in `[next_payment_at, next_payment_at + grace_period_secs]`
     ///                                                    → payment executed normally and resets `consecutive_misses` to 0
     /// - `now > next_payment_at + grace_period_secs`      → miss recorded, `consecutive_misses` incremented by 1,
-    ///   `PaymentMissed` emitted.
+    ///   `PaymentMissed` emitted, schedule state persisted, and function returns early.
     ///
     /// Consecutive Miss Threshold & Auto-Cancellation:
     /// - When `consecutive_misses >= max_missed_executions`, the schedule is automatically cancelled
@@ -352,7 +352,6 @@ impl RecurringPaymentsContract {
     /// - If `consecutive_misses < max_missed_executions`, the schedule's `next_payment_at` is skipped
     ///   forward across elapsed intervals to prevent a deadlock, remaining `Active` until the next window.
     /// - A subsequent successful execution before reaching `max_missed_executions` resets the consecutive miss counter to 0.
-    /// - Both branches panic `"Execution window and grace period have both passed"`.
     pub fn execute_payment(env: Env, executor: Address, schedule_id: u64) {
         executor.require_auth();
 
@@ -411,7 +410,7 @@ impl RecurringPaymentsContract {
                 },
             );
 
-            panic!("Execution window and grace period have both passed");
+            return;
         }
 
         // ── Normal execution path ─────────────────────────────────────────────

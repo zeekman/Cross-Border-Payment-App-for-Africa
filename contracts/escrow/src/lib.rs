@@ -1124,6 +1124,8 @@ impl EscrowContract {
         );
 
         first_id
+    }
+
     /// Set the KYC contract address. Only admin may call this.
     /// Pass a zero address (all bytes 0) to disable KYC checking.
     pub fn set_kyc_contract(env: Env, admin: Address, kyc_contract: Address) {

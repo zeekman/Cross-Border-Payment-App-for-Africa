@@ -33,6 +33,17 @@ use soroban_sdk::{
     Vec,
 };
 
+// ── KYC Tier enum ────────────────────────────────────────────────────────────────
+// Replicated from kyc-attestation contract for type safety in cross-contract calls.
+#[derive(Clone, Copy)]
+#[contracttype]
+#[repr(u32)]
+pub enum KycTier {
+    Basic = 0,
+    Enhanced = 1,
+    Business = 2,
+}
+
 #[contracttype]
 pub struct AllowanceValue {
     pub amount: i128,
@@ -803,10 +814,11 @@ impl LoyaltyTokenContract {
 
         if let Some(kyc_addr) = kyc_contract {
             // Cross-contract call to kyc-attestation contract
+            // Pass both user address and KYC tier (Basic as default)
             let kyc_client = env.invoke_contract::<bool>(
                 &kyc_addr,
                 &Symbol::new(env, "is_verified"),
-                soroban_sdk::vec![env, from.clone().into_val(env)],
+                soroban_sdk::vec![env, from.clone().into_val(env), KycTier::Basic.into_val(env)],
             );
 
             if !kyc_client {
@@ -816,7 +828,7 @@ impl LoyaltyTokenContract {
             let kyc_client_to = env.invoke_contract::<bool>(
                 &kyc_addr,
                 &Symbol::new(env, "is_verified"),
-                soroban_sdk::vec![env, to.clone().into_val(env)],
+                soroban_sdk::vec![env, to.clone().into_val(env), KycTier::Basic.into_val(env)],
             );
 
             if !kyc_client_to {
