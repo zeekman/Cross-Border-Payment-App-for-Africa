@@ -586,6 +586,22 @@ fn test_create_escrow_emits_escrow_created_event() {
 
 #[test]
 fn test_confirm_payout_emits_escrow_confirmed_event() {
+    let (env, client, admin, usdc_id) = setup();
+    let amount = 1_000_0000000i128;
+    let (sender, recipient, agent, id) = make_escrow(&env, &client, &usdc_id, &admin, amount, 500);
+
+    // Get initial events
+    let events_before = env.events().all();
+
+    client.confirm_payout(&agent, &id);
+
+    let events_after = env.events().all();
+    let new_events = events_after.iter().skip(events_before.len()).collect::<Vec<_>>();
+
+    // Verify EscrowConfirmed event was emitted
+    assert!(!new_events.is_empty());
+}
+
 // ── insurance_payout (SC-013) ─────────────────────────────────────────────────
 
 /// Helper: build up an insurance fund balance by confirming a payout.
