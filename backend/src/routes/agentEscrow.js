@@ -30,6 +30,7 @@ const isValidAmount = (v) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 router.get(
   "/",

@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const multer = require('multer');
 const authMiddleware = require('../middleware/auth');
+const { readLimiter } = require('../middleware/rateLimiter');
 const { importContacts, getImportTemplate } = require('../controllers/contactsController');
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,7 @@ function csvUploadMiddleware(req, res, next) {
 }
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * GET /api/contacts/import/template

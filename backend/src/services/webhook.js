@@ -198,9 +198,10 @@ async function deliver(event, data) {
     throw new Error(`Unknown webhook event "${event}" — add it to services/webhookEvents.js`);
   }
   const { rows } = await db.query(
-    `SELECT id, url, secret, previous_secret, previous_secret_expires_at
-     FROM webhooks WHERE active = true AND $1 = ANY(events)`,
-    [event]
+    `SELECT id, user_id, url, secret, previous_secret, previous_secret_expires_at
+     FROM webhooks
+     WHERE active = true AND user_id = $2 AND $1 = ANY(events)`,
+    [event, userId]
   );
 
   if (!rows.length) return;

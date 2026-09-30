@@ -44,7 +44,7 @@ async function checkClaimableBalanceExpiry() {
 
   for (const row of expired) {
     logger.info('Claimable balance expired', { balanceId: row.balance_id });
-    webhook.deliver('claimable_balance.expired', {
+    webhook.deliver('claimable_balance.expired', row.user_id, {
       id: row.id,
       balance_id: row.balance_id,
       asset: row.asset,
@@ -70,7 +70,7 @@ async function checkClaimableBalanceExpiry() {
   );
 
   for (const row of expiringSoon) {
-    webhook.deliver('claimable_balance.expiring_soon', {
+    webhook.deliver('claimable_balance.expiring_soon', row.user_id, {
       id: row.id,
       balance_id: row.balance_id,
       asset: row.asset,

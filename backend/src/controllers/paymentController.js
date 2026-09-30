@@ -365,7 +365,7 @@ async function send(req, res, next) {
 
       if (estimatedUSD >= KYC_THRESHOLD_USD) {
         if (kycStatus === "expired") {
-          webhook.deliver("payment.failed", { code: "KYC_EXPIRED", error: "Your identity document has expired. Please re-verify to continue." }).catch(() => {});
+          webhook.deliver("payment.failed", req.user.userId, { code: "KYC_EXPIRED", error: "Your identity document has expired. Please re-verify to continue." }).catch(() => {});
           return res.status(403).json({
             error: "Your identity document has expired. Please re-verify to continue.",
             kyc_status: kycStatus,
@@ -373,7 +373,7 @@ async function send(req, res, next) {
           });
         }
         if (kycStatus !== "verified") {
-          webhook.deliver("payment.failed", { code: "KYC_REQUIRED", error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent." }).catch(() => {});
+          webhook.deliver("payment.failed", req.user.userId, { code: "KYC_REQUIRED", error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent." }).catch(() => {});
           return res.status(403).json({
             error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent.",
             kyc_status: kycStatus,
@@ -529,9 +529,9 @@ async function send(req, res, next) {
     }
 
     const txData = { id: txId, tx_hash: txResult.transactionHash, ledger: txResult.ledger, amount, asset, sender: public_key, recipient: recipient_address, type: txResult.type };
-    webhook.deliver("payment.sent", txData).catch(() => {});
+    webhook.deliver("payment.sent", req.user.userId, txData).catch(() => {});
     if (txResult.type !== "claimable_balance") {
-      webhook.deliver("payment.received", txData).catch(() => {});
+      webhook.deliver("payment.received", req.user.userId, txData).catch(() => {});
     }
 
     // Fire-and-forget email notifications
@@ -582,7 +582,7 @@ async function send(req, res, next) {
     // Do not persist a failed transaction here; let caller decide and avoid
     // creating records when Stellar submission fails during business logic.
     if (err.status === 400 || err.status === 500) {
-      webhook.deliver('payment.failed', { error: err.message }).catch(() => {});
+      webhook.deliver('payment.failed', req.user.userId, { error: err.message }).catch(() => {});
       return res.status(err.status).json({ error: err.message });
     }
     // Issue #243: Insert a failed transaction record when sendPayment throws
@@ -598,12 +598,12 @@ async function send(req, res, next) {
     if (err.status) {
       const failedPayload = { error: err.message };
       if (err.payload?.code) failedPayload.code = err.payload.code;
-      webhook.deliver("payment.failed", failedPayload).catch(() => {});
+      webhook.deliver("payment.failed", req.user.userId, failedPayload).catch(() => {});
       return res.status(err.status).json({ error: err.message, ...(err.payload || {}) });
     }
     if (err.response?.data) {
       const extras = err.response.data?.extras;
-      webhook.deliver("payment.failed", { error: "Transaction failed", details: extras }).catch(() => {});
+      webhook.deliver("payment.failed", req.user.userId, { error: "Transaction failed", details: extras }).catch(() => {});
       return res.status(400).json({ error: "Transaction failed", details: extras });
     }
     next(err);
@@ -705,8 +705,8 @@ async function sendBatch(req, res, next) {
         result.id = txId;
         if (result.status === "success") {
           const txData = { id: txId, tx_hash: transactionHash, ledger, amount: result.amount, asset, sender: public_key, recipient: result.recipient_address, type: "payment" };
-          webhook.deliver("payment.sent", txData).catch(() => {});
-          webhook.deliver("payment.received", txData).catch(() => {});
+          webhook.deliver("payment.sent", req.user.userId, txData).catch(() => {});
+          webhook.deliver("payment.received", req.user.userId, txData).catch(() => {});
         }
       }));
 
@@ -939,8 +939,8 @@ async function sendPath(req, res, next) {
     await cache.del(`balance:${public_key}`);
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, sender: public_key, recipient: recipient_address };
-    webhook.deliver("payment.sent", txData).catch(() => {});
-    webhook.deliver("payment.received", txData).catch(() => {});
+    webhook.deliver("payment.sent", req.user.userId, txData).catch(() => {});
+    webhook.deliver("payment.received", req.user.userId, txData).catch(() => {});
 
     res.json({
       message: "Path payment sent successfully",
@@ -1052,8 +1052,8 @@ async function sendStrictReceivePath(req, res, next) {
     pollTransactionConfirmation(txId, transactionHash).catch(() => {});
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, sender: public_key, recipient: recipient_address };
-    webhook.deliver("payment.sent", txData).catch(() => {});
-    webhook.deliver("payment.received", txData).catch(() => {});
+    webhook.deliver("payment.sent", req.user.userId, txData).catch(() => {});
+    webhook.deliver("payment.received", req.user.userId, txData).catch(() => {});
 
     res.json({
       message: "Strict receive path payment sent successfully",
@@ -1351,7 +1351,7 @@ async function cancelPendingEscrow(req, res, next) {
     });
 
     // 9. Fire webhook event (non-blocking)
-    webhook.deliver("escrow.cancelled", {
+    webhook.deliver("escrow.cancelled", req.user.userId, {
       escrow_id: id,
       contract_escrow_id: escrow.contract_escrow_id,
       tx_hash: cancelTxHash,

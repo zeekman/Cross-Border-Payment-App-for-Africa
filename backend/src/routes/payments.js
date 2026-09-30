@@ -3,6 +3,7 @@ const { body, query, validationResult } = require("express-validator");
 const rateLimit = require("express-rate-limit");
 const StellarSdk = require("@stellar/stellar-sdk");
 const authMiddleware = require("../middleware/auth");
+const { readLimiter, paymentLimiter } = require("../middleware/rateLimiter");
 const idempotency = require("../middleware/idempotency");
 const paymentSendValidators = require("../validators/paymentSendValidators");
 const paymentBatchValidators = require("../validators/paymentBatchValidators");
@@ -53,6 +54,7 @@ const validate = (req, res, next) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 const estimateFeesLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -102,7 +104,7 @@ router.get("/fee-rate", getFeeRate);
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.post("/send", paymentSendValidators, validate, idempotency, send);
+router.post("/send", paymentLimiter, paymentSendValidators, validate, idempotency, send);
 
 /**
  * POST /api/payments/batch

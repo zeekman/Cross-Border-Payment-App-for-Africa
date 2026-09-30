@@ -1,9 +1,11 @@
 const router = require('express').Router();
 const authMiddleware = require('../middleware/auth');
+const { readLimiter } = require('../middleware/rateLimiter');
 const { subscribe, unsubscribe, getSubscriptionHealth } = require('../controllers/notificationController');
 const { listNotifications, markAsRead, markAllAsRead, getUnreadCount } = require('../controllers/notificationInboxController');
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger

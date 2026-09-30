@@ -136,7 +136,7 @@ describe('deliverWithRetry() — success on first attempt', () => {
     mockHttpStatus(200);
     db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
 
-    const promise = deliver('payment.sent', { amount: '10' });
+    const promise = deliver('payment.sent', 'user-1', { amount: '10' });
     await runTimers();
     await promise;
 
@@ -150,7 +150,7 @@ describe('deliverWithRetry() — success on first attempt', () => {
       mockHttpStatus(status);
       db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
 
-      const promise = deliver('payment.sent', {});
+      const promise = deliver('payment.sent', 'user-1', {});
       await runTimers();
       await promise;
 
@@ -180,7 +180,7 @@ describe('deliverWithRetry() — retries before succeeding', () => {
 
     db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
 
-    const promise = deliver('payment.sent', {});
+    const promise = deliver('payment.sent', 'user-1', {});
     await runTimers();
     await promise;
 
@@ -205,7 +205,7 @@ describe('deliverWithRetry() — retries before succeeding', () => {
 
     db.query.mockResolvedValue({ rows: [{ url: 'https://hooks.example.com/cb', secret: 'x' }] });
 
-    const promise = deliver('payment.received', {});
+    const promise = deliver('payment.received', 'user-1', {});
     await runTimers();
     await promise;
 
@@ -227,7 +227,7 @@ describe('deliverWithRetry() — permanent failure after max retries', () => {
     mockNetworkError('ECONNREFUSED');
     db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
 
-    const promise = deliver('payment.failed', { txId: 'abc' });
+    const promise = deliver('payment.failed', 'user-1', { txId: 'abc' });
     await runTimers();
     await promise;
 
@@ -238,7 +238,7 @@ describe('deliverWithRetry() — permanent failure after max retries', () => {
     mockNetworkError('ETIMEDOUT');
     db.query.mockResolvedValue({ rows: [{ url: 'https://hooks.example.com/pay', secret: 'sec' }] });
 
-    const promise = deliver('payment.sent', { amount: '50' });
+    const promise = deliver('payment.sent', 'user-1', { amount: '50' });
     await runTimers();
     await promise;
 
@@ -256,7 +256,7 @@ describe('deliverWithRetry() — permanent failure after max retries', () => {
     mockHttpStatus(500);
     db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
 
-    const promise = deliver('payment.failed', {});
+    const promise = deliver('payment.failed', 'user-1', {});
     await runTimers();
     await promise;
 
@@ -268,7 +268,7 @@ describe('deliverWithRetry() — permanent failure after max retries', () => {
     mockNetworkError('ECONNREFUSED');
     db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
 
-    const promise = deliver('payment.sent', {});
+    const promise = deliver('payment.sent', 'user-1', {});
     await runTimers();
     await expect(promise).resolves.toBeUndefined();
   });
@@ -277,7 +277,7 @@ describe('deliverWithRetry() — permanent failure after max retries', () => {
     mockNetworkError('ECONNREFUSED');
     db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
 
-    const promise = deliver('payment.sent', {});
+    const promise = deliver('payment.sent', 'user-1', {});
     await runTimers();
     await promise;
 
@@ -294,13 +294,13 @@ describe('deliver() — fan-out to multiple subscribers', () => {
     mockHttpStatus(200);
     db.query.mockResolvedValue({ rows: [] });
 
-    const promise = deliver('payment.sent', {});
+    const promise = deliver('payment.sent', 'user-1', {});
     await runTimers();
     await promise;
 
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('WHERE active = true'),
-      ['payment.sent']
+      ['payment.sent', 'user-1']
     );
   });
 
@@ -316,7 +316,7 @@ describe('deliver() — fan-out to multiple subscribers', () => {
 
     const postSpy = jest.spyOn(require('https'), 'request');
 
-    const promise = deliver('payment.received', { amount: '100' });
+    const promise = deliver('payment.received', 'user-1', { amount: '100' });
     await runTimers();
     await promise;
 
@@ -328,7 +328,7 @@ describe('deliver() — fan-out to multiple subscribers', () => {
   test('delivers to zero subscribers without error when none match', async () => {
     db.query.mockResolvedValue({ rows: [] });
 
-    const promise = deliver('payment.sent', {});
+    const promise = deliver('payment.sent', 'user-1', {});
     await runTimers();
     await expect(promise).resolves.toBeUndefined();
   });
@@ -352,7 +352,7 @@ describe('deliver() — fan-out to multiple subscribers', () => {
 
     db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
 
-    const promise = deliver('payment.sent', {});
+    const promise = deliver('payment.sent', 'user-1', {});
     await runTimers();
     await promise;
 
@@ -381,12 +381,12 @@ describe('deliver() — fan-out to multiple subscribers', () => {
     });
 
     db.query.mockResolvedValueOnce({ rows: [{ url: 'https://example.com/hook', secret: 'secret-A' }] });
-    const p1 = deliver('payment.sent', { amount: '10' });
+    const p1 = deliver('payment.sent', 'user-1', { amount: '10' });
     await runTimers();
     await p1;
 
     db.query.mockResolvedValueOnce({ rows: [{ url: 'https://example.com/hook', secret: 'secret-B' }] });
-    const p2 = deliver('payment.sent', { amount: '10' });
+    const p2 = deliver('payment.sent', 'user-1', { amount: '10' });
     await runTimers();
     await p2;
 
@@ -417,7 +417,7 @@ describe('deliver() — fan-out to multiple subscribers', () => {
 
     db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
 
-    const promise = deliver('payment.sent', { txId: 'xyz-123' });
+    const promise = deliver('payment.sent', 'user-1', { txId: 'xyz-123' });
     await runTimers();
     await promise;
 

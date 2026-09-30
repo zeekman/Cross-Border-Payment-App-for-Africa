@@ -9,7 +9,7 @@ const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
 const { generateSecret, verifyToken, generateBackupCodes, useBackupCode } = require('../services/twofa');
 const { sendVerificationEmail, sendPasswordResetEmail, sendBackupCodeWarningEmail, sendEmailChangeRequestedNotice } = require('../services/email');
-const { generateSecret, verifyToken, generateBackupCodes, useBackupCode, hashBackupCode, verifyBackupCode } = require('../services/twofa');
+const { generateSecret, verifyToken, getTokenCounter, generateBackupCodes, useBackupCode, hashBackupCode, verifyBackupCode } = require('../services/twofa');
 const {
   COOKIE_NAME,
   COOKIE_OPTIONS,
@@ -39,11 +39,45 @@ const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — email verification tok
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const PHONE_OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const WEBAUTHN_CHALLENGE_TTL_SECONDS = 5 * 60; // 5 minutes
+const LOCKOUT_DURATION_MINUTES = 15;
+const MAX_FAILED_ATTEMPTS = 5;
+const ATTEMPT_WINDOW_MINUTES = 15;
 
 const FORGOT_PASSWORD_MESSAGE = {
   message:
     'If an account exists for this email, you will receive password reset instructions shortly.',
 };
+
+async function recordFailedAuthAttempt(userId, req) {
+  const attemptWindowMs = ATTEMPT_WINDOW_MINUTES * 60 * 1000;
+  const lockoutDurationMs = LOCKOUT_DURATION_MINUTES * 60 * 1000;
+  const result = await db.query(
+    `UPDATE users
+     SET failed_login_attempts = CASE
+       WHEN last_failed_attempt_at IS NULL
+            OR (EXTRACT(EPOCH FROM (NOW() - last_failed_attempt_at)) * 1000) > $1
+       THEN 1 ELSE failed_login_attempts + 1 END,
+       last_failed_attempt_at = NOW(),
+       locked_until = CASE
+         WHEN (CASE
+           WHEN last_failed_attempt_at IS NULL
+                OR (EXTRACT(EPOCH FROM (NOW() - last_failed_attempt_at)) * 1000) > $1
+           THEN 1 ELSE failed_login_attempts + 1 END) >= $2
+         THEN NOW() + ($3 * INTERVAL '1 millisecond')
+         ELSE locked_until END
+     WHERE id = $4
+     RETURNING failed_login_attempts, locked_until`,
+    [attemptWindowMs, MAX_FAILED_ATTEMPTS, lockoutDurationMs, userId]
+  );
+  const updated = result.rows[0];
+  if (!updated) return null;
+  audit.log(userId, 'login_failure', req.ip, req.headers['user-agent'], {
+    failed_attempts: updated.failed_login_attempts,
+    attempts_remaining: Math.max(0, MAX_FAILED_ATTEMPTS - updated.failed_login_attempts),
+    reason: 'invalid_2fa',
+  });
+  return updated;
+}
 
 function generateVerificationToken() {
   const raw = crypto.randomBytes(32).toString('hex');
@@ -323,9 +357,29 @@ async function login(req, res, next) {
           }
         }
         if (!matchedId) {
-          return res.status(401).json({ error: 'BACKUP_CODE_USED' });
+          const failed = await recordFailedAuthAttempt(user.id, req);
+          if (failed?.locked_until && new Date(failed.locked_until) > new Date()) {
+            return res.status(423).json({
+              error: `Account locked due to too many failed login attempts. Try again after ${new Date(failed.locked_until).toISOString()}`,
+              locked_until: new Date(failed.locked_until).toISOString(),
+            });
+          }
+          return res.status(401).json({ error: 'Invalid backup code' });
         }
-        await db.query(`UPDATE totp_backup_codes SET used_at = NOW() WHERE id = $1`, [matchedId]);
+        const consumed = await db.query(
+          `UPDATE totp_backup_codes SET used_at = NOW() WHERE id = $1 AND used_at IS NULL RETURNING id`,
+          [matchedId]
+        );
+        if (!consumed.rows.length) {
+          const failed = await recordFailedAuthAttempt(user.id, req);
+          if (failed?.locked_until && new Date(failed.locked_until) > new Date()) {
+            return res.status(423).json({
+              error: `Account locked due to too many failed login attempts. Try again after ${new Date(failed.locked_until).toISOString()}`,
+              locked_until: new Date(failed.locked_until).toISOString(),
+            });
+          }
+          return res.status(401).json({ error: 'Invalid backup code' });
+        }
         const remaining = await db.query(
           `SELECT COUNT(*) AS count FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`,
           [user.id]

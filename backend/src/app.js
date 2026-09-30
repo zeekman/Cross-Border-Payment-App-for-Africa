@@ -10,6 +10,7 @@ const metricsMiddleware = require('./middleware/metricsMiddleware');
 const { registry } = require('./utils/metrics');
 const rateLimit = require('express-rate-limit');
 const rateLimiters = require('./middleware/rateLimiter');
+
 const { getHealth: getLedgerHealth } = require('./services/ledgerListener');
 
 const authRoutes = require('./routes/auth');
@@ -52,6 +53,8 @@ const logger = require('./utils/logger');
 const { runHealthChecks, runDeepHealthChecks } = require('./services/health');
 
 const app = express();
+const trustedProxies = (process.env.TRUSTED_PROXIES || '').split(',').map((value) => value.trim()).filter(Boolean);
+app.set('trust proxy', trustedProxies.length ? trustedProxies : false);
 
 // Trust the configured number of proxy hops (e.g. TRUST_PROXY=1 behind a single load balancer)
 // so req.ip reflects the real client address for the admin IP allow-list and rate limiting.
@@ -123,10 +126,6 @@ app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avat
 // Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set)
 app.use('/api/auth/login', rateLimiters.authLimiter);
 app.use('/api/auth/register', rateLimiters.authLimiter);
-app.use('/api/payments/send', rateLimiters.paymentLimiter);
-app.use('/api/wallet/export-key', rateLimiters.exportKeyLimiter);
-app.use('/api/admin', rateLimiters.adminLimiter);
-app.use('/api', rateLimiters.readLimiter);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/wallet', geoRestriction, walletRoutes);
