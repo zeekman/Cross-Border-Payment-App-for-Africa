@@ -737,7 +737,7 @@ export default function SendMoney() {
       // Offline queue — the api interceptor returns { queued: true }
       if (res.data?.queued) {
         toast.success(
-          "You're offline. Payment queued — it will send automatically when you reconnect.",
+          "You're offline. Payment queued — you'll be asked to confirm it with your PIN when you reconnect.",
           { duration: 5000 }
         );
         resetForm();

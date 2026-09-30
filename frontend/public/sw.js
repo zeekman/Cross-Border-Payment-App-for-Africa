@@ -4,7 +4,8 @@
  * Responsibilities:
  *  1. Web Push notifications (existing)
  *  2. Offline caching of app shell + API responses (Workbox strategies)
- *  3. Background Sync — replay queued payment requests when connectivity returns
+ *  3. Drain the legacy Background Sync payment queue (payments are no longer
+ *     replayed from the SW — see FE-137)
  *
  * Workbox is loaded from the CDN so we don't need to eject CRA.
  * The SW is registered manually via workbox-window in src/serviceWorker.js.
@@ -21,7 +22,7 @@ const { registerRoute } = workbox.routing;
 const { CacheFirst, NetworkFirst, StaleWhileRevalidate } = workbox.strategies;
 const { ExpirationPlugin } = workbox.expiration;
 const { CacheableResponsePlugin } = workbox.cacheableResponse;
-const { BackgroundSyncPlugin, Queue } = workbox.backgroundSync;
+const { Queue } = workbox.backgroundSync;
 
 // ─── Cache names ─────────────────────────────────────────────────────────────
 const SHELL_CACHE   = 'afripay-shell-v1';
@@ -81,54 +82,20 @@ registerRoute(
   })
 );
 
-// ─── Background Sync — payment queue ─────────────────────────────────────────
-// Any POST to /payments/send that fails while offline is stored in the queue
-// and replayed automatically when the network comes back.
-const paymentQueue = new Queue(SYNC_TAG, {
-  maxRetentionTime: 24 * 60,   // keep for 24 hours (minutes)
-  onSync: async ({ queue }) => {
-    let entry;
-    while ((entry = await queue.shiftRequest())) {
-      try {
-        await fetch(entry.request.clone());
-        // Notify all open clients that a queued payment was replayed
-        const clients = await self.clients.matchAll({ type: 'window' });
-        clients.forEach((client) =>
-          client.postMessage({ type: 'PAYMENT_SYNCED' })
-        );
-      } catch {
-        // Network still down — put it back and stop
-        await queue.unshiftRequest(entry);
-        throw new Error('Replay failed — network still unavailable');
-      }
-    }
-  },
-});
+// ─── Legacy Background Sync queue — drain, never replay (FE-137) ─────────────
+// Earlier versions captured failed POST /payments/send requests here and
+// replayed them automatically on reconnect — with whatever Authorization
+// header they were captured with and without the user re-confirming. Payments
+// are now queued in the app (utils/offlineDB.js), bound to the user who made
+// them, and only sent after that user confirms with their PIN. Any requests
+// still sitting in the old queue are discarded instead of being replayed.
+const discardLegacyPayments = async ({ queue }) => {
+  while (await queue.shiftRequest()) { /* drop */ }
+};
+const legacyPaymentQueue = new Queue(SYNC_TAG, { onSync: discardLegacyPayments });
 
-// Intercept POST /payments/send — if the fetch fails, enqueue it
-self.addEventListener('fetch', (event) => {
-  const { request } = event;
-  if (
-    request.method === 'POST' &&
-    request.url.includes('/payments/send')
-  ) {
-    const bgSyncLogic = async () => {
-      try {
-        return await fetch(request.clone());
-      } catch {
-        await paymentQueue.pushRequest({ request });
-        // Return a synthetic "queued" response so the UI can react
-        return new Response(
-          JSON.stringify({ queued: true, message: 'Payment queued for when you are back online.' }),
-          {
-            status: 202,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-      }
-    };
-    event.respondWith(bgSyncLogic());
-  }
+self.addEventListener('activate', (event) => {
+  event.waitUntil(discardLegacyPayments({ queue: legacyPaymentQueue }).catch(() => {}));
 });
 
 // ─── Web Push (existing) ─────────────────────────────────────────────────────

@@ -35,7 +35,7 @@ import { useTranslation } from 'react-i18next';
 import { usePullToRefresh } from '../hooks/usePullToRefresh';
 import PINSetupModal from '../components/PINSetupModal';
 import { usePushNotifications } from '../hooks/usePushNotifications';
-import { getQueueCount } from '../utils/offlineDB';
+import { getQueueCountForUser } from '../utils/offlineDB';
 
 // FE-129: IS_TESTNET is now sourced from the shared network config module so
 // that Dashboard and every other Stellar-aware file agree on the same value.
@@ -278,11 +278,11 @@ export default function Dashboard() {
   useEffect(() => {
     loadDashboard();
     if (!isOnline) {
-      getQueueCount()
+      getQueueCountForUser(user?.id)
         .then(setQueueCount)
         .catch(() => {});
     }
-  }, [loadDashboard, isOnline]);
+  }, [loadDashboard, isOnline, user?.id]);
 
   const copyAddress = async () => {
     if (!wallet?.public_key) return;

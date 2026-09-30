@@ -81,6 +81,9 @@ const PAYMENT = {
   asset: 'XLM',
 };
 
+// Queued payments must have an owner (FE-137)
+const OWNER = { userId: 'user-1' };
+
 // ─── Setup / Teardown ─────────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -139,7 +142,7 @@ async function runSyncQueue(mockPost) {
 describe('offline queue idempotency', () => {
   test('enqueuePayment assigns idempotency key at queue time', async () => {
     const { enqueuePayment: eq, getQueuedPayments: gqp } = require('../offlineDB');
-    await eq(PAYMENT);
+    await eq(PAYMENT, OWNER);
 
     const items = await gqp();
     expect(items).toHaveLength(1);
@@ -148,7 +151,7 @@ describe('offline queue idempotency', () => {
 
   test('idempotency key is stable across multiple getQueuedPayments calls', async () => {
     const { enqueuePayment: eq, getQueuedPayments: gqp } = require('../offlineDB');
-    await eq(PAYMENT);
+    await eq(PAYMENT, OWNER);
 
     const [first]  = await gqp();
     const [second] = await gqp();
@@ -160,7 +163,7 @@ describe('offline queue idempotency', () => {
     const { enqueuePayment: eq, getQueuedPayments: gqp, updateQueuedPaymentStatus: uqps } =
       require('../offlineDB');
 
-    await eq(PAYMENT);
+    await eq(PAYMENT, OWNER);
     const [item]      = await gqp();
     const originalKey = item.idempotencyKey;
 
@@ -175,7 +178,7 @@ describe('offline queue idempotency', () => {
     const { enqueuePayment: eq, getQueuedPayments: gqp } = require('../offlineDB');
 
     // Phase 1: queue while offline
-    await eq(PAYMENT);
+    await eq(PAYMENT, OWNER);
     const [queued]       = await gqp();
     const idempotencyKey = queued.idempotencyKey;
     expect(idempotencyKey).toBeTruthy();
@@ -217,8 +220,8 @@ describe('offline queue idempotency', () => {
       () => `aaaaaaaa-aaaa-4aaa-aaaa-${String(counter++).padStart(12, '0')}`,
     );
 
-    await eq({ ...PAYMENT, amount: '10' });
-    await eq({ ...PAYMENT, amount: '20' });
+    await eq({ ...PAYMENT, amount: '10' }, OWNER);
+    await eq({ ...PAYMENT, amount: '20' }, OWNER);
 
     const [a, b] = await gqp();
     expect(a.idempotencyKey).not.toBe(b.idempotencyKey);

@@ -83,6 +83,39 @@ export async function getCacheEntry(key) {
 // ─── Payment queue helpers ────────────────────────────────────────────────────
 
 /**
+ * Queued payments older than this are never replayed (FE-137). Exchange rates
+ * and balances drift, so a payment the user intended hours ago must not be
+ * executed silently days later.
+ */
+export const QUEUE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Id of the currently logged-in user. Set by AuthContext on login / session
+ * restore and cleared on logout, so the api.js offline interceptor can stamp
+ * each queued payment with its owner without importing React context.
+ */
+let _queueOwnerId = null;
+
+/** @param {string|number|null} userId */
+export function setQueueOwner(userId) {
+  _queueOwnerId = userId ?? null;
+}
+
+/** @returns {string|number|null} */
+export function getQueueOwner() {
+  return _queueOwnerId;
+}
+
+function isExpired(entry, now = Date.now()) {
+  const expiresAt = entry.expiresAt ?? (entry.createdAt + QUEUE_TTL_MS);
+  return !Number.isFinite(expiresAt) || expiresAt <= now;
+}
+
+function isOwnedBy(entry, userId) {
+  return userId != null && entry.userId != null && String(entry.userId) === String(userId);
+}
+
+/**
  * Add a payment to the offline queue.
  *
  * An idempotency key is generated **once** at queue time and stored alongside
@@ -91,15 +124,27 @@ export async function getCacheEntry(key) {
  * idempotency middleware can deduplicate the request and prevent duplicate
  * payments.
  *
- * @param {{ recipient_address: string, amount: string, asset: string, memo?: string, memo_type?: string }} payload
+ * Every entry is bound to the user (and wallet) that created it so it can only
+ * ever be replayed by that same user (FE-137). Queuing without a known owner
+ * is refused rather than creating an entry any later session could send.
+ *
+ * @param {{ recipient_address: string, amount: string, asset: string, memo?: string, memo_type?: string, wallet_id?: string }} payload
+ * @param {{ userId?: string|number }} [options] - defaults to the current queue owner
  * @returns {Promise<IDBValidKey>} The auto-incremented id of the new queue entry
  */
-export async function enqueuePayment(payload) {
+export async function enqueuePayment(payload, { userId = _queueOwnerId } = {}) {
+  if (userId == null) {
+    throw new Error('Cannot queue an offline payment without a logged-in user');
+  }
   const db = await getDB();
+  const createdAt = Date.now();
   return db.add('queue', {
     payload,
+    userId,
+    walletId: payload?.wallet_id ?? null,
     idempotencyKey: generateUUID(), // assigned once, never regenerated on replay
-    createdAt: Date.now(),
+    createdAt,
+    expiresAt: createdAt + QUEUE_TTL_MS,
     status: 'pending',   // 'pending' | 'syncing' | 'failed'
   });
 }
@@ -129,6 +174,52 @@ export async function getQueuedPayments() {
 }
 
 /**
+ * Return the non-expired queued payments that belong to `userId`, oldest
+ * first. Entries from other users, entries without an owner (queued before
+ * FE-137) and expired entries are never returned, so they can't be replayed.
+ *
+ * @param {string|number} userId
+ * @returns {Promise<Array>}
+ */
+export async function getQueuedPaymentsForUser(userId) {
+  if (userId == null) return [];
+  const now = Date.now();
+  const items = await getQueuedPayments();
+  return items.filter((item) => isOwnedBy(item, userId) && !isExpired(item, now));
+}
+
+/**
+ * Number of replayable queued payments for `userId`.
+ * @param {string|number} userId
+ * @returns {Promise<number>}
+ */
+export async function getQueueCountForUser(userId) {
+  return (await getQueuedPaymentsForUser(userId)).length;
+}
+
+/**
+ * Delete expired entries, entries with no owner, and — when `userId` is given —
+ * entries that belong to any other user. Called when a user session starts so
+ * a previous user's pending payments never linger on a shared device.
+ *
+ * @param {string|number} [userId]
+ * @returns {Promise<number>} number of entries removed
+ */
+export async function purgeStaleQueuedPayments(userId) {
+  const db = await getDB();
+  const now = Date.now();
+  const items = await getQueuedPayments();
+  const stale = items.filter(
+    (item) =>
+      isExpired(item, now) ||
+      item.userId == null ||
+      (userId != null && !isOwnedBy(item, userId))
+  );
+  await Promise.all(stale.map((item) => db.delete('queue', item.id)));
+  return stale.length;
+}
+
+/**
  * Remove a queued payment by its auto-incremented id.
  * @param {number} id
  */
@@ -138,7 +229,8 @@ export async function removeQueuedPayment(id) {
 }
 
 /**
- * Clear every entry in the payment queue (e.g. after a successful bulk sync).
+ * Clear every entry in the payment queue (e.g. on logout, so the next user of
+ * the device never inherits pending payments).
  */
 export async function clearPaymentQueue() {
   const db = await getDB();

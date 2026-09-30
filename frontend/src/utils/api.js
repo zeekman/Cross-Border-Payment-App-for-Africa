@@ -113,16 +113,26 @@ api.interceptors.request.use(
  * enqueue the payload in IndexedDB and resolve with a synthetic
  * { queued: true } response so the UI can show a "queued" confirmation.
  *
- * The service worker's Background Sync handler replays the request
- * automatically once connectivity is restored.
+ * The entry is bound to the logged-in user (FE-137). Nothing is replayed
+ * automatically: when connectivity returns, OfflineBanner asks that same user
+ * to review the queued payments and re-confirm with their PIN.
  */
 api.interceptors.request.use(async (config) => {
   const isPaymentSend =
     config.method?.toLowerCase() === 'post' &&
-    config.url?.includes('/payments/send');
+    /\/payments\/send\/?$/.test(config.url || '');
 
   if (isPaymentSend && !navigator.onLine) {
-    await enqueuePayment(config.data ?? {});
+    try {
+      await enqueuePayment(config.data ?? {});
+    } catch {
+      // No logged-in owner — refuse to queue rather than store an orphan entry.
+      return Promise.reject({
+        isOfflineError: true,
+        message: 'No internet connection',
+        config,
+      });
+    }
     const offlineErr = new Error('OFFLINE_QUEUED');
     offlineErr.isOfflineQueued = true;
     offlineErr.config = config;
@@ -150,7 +160,7 @@ api.interceptors.response.use(
         data: {
           queued: true,
           message:
-            'You are offline. Your payment has been queued and will be sent automatically when your connection is restored.',
+            'You are offline. Your payment has been queued. When your connection is restored you will be asked to confirm it with your PIN before it is sent.',
         },
         status: 202,
         config: err.config,
