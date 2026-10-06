@@ -1,4 +1,4 @@
-﻿-- Issue #244: Confirm composite indexes on transactions table
+-- Issue #244: Confirm composite indexes on transactions table
 -- for efficient history queries filtered by wallet + date.
 --
 -- These indexes support the two most common WHERE patterns in

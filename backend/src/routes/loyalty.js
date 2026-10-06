@@ -1,9 +1,11 @@
 const router = require("express").Router();
 const authMiddleware = require("../middleware/auth");
+const { readLimiter } = require("../middleware/rateLimiter");
 const isAdmin = require("../middleware/isAdmin");
 const { balance, redeem, history, mint } = require("../controllers/loyaltyController");
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger

@@ -13,7 +13,8 @@
     "sign_out": "Se déconnecter",
     "no_transactions": "Aucune transaction trouvée",
     "see_all": "Voir tout",
-    "rates_disclaimer": "Les taux sont approximatifs et peuvent être mis en cache. Actualisation environ chaque minute."
+    "rates_disclaimer": "Les taux sont approximatifs et peuvent être mis en cache. Actualisation environ chaque minute.",
+    "close": "Fermer"
   },
   "welcome": {
     "tagline": "Paiements transfrontaliers rapides et sécurisés propulsés par la blockchain Stellar",
@@ -39,7 +40,8 @@
     "have_account": "Vous avez déjà un compte ?",
     "sign_in": "Se connecter",
     "success": "Compte créé ! Votre portefeuille est prêt.",
-    "error": "Échec de l'inscription"
+    "error": "Échec de l'inscription",
+    "verify_email_notice": "Vérifiez votre e-mail pour confirmer votre compte."
   },
   "login": {
     "title": "Bon retour",
@@ -52,7 +54,14 @@
     "no_account": "Vous n'avez pas de compte ?",
     "create_one": "En créer un",
     "error": "Échec de la connexion",
-    "forgot_password": "Mot de passe oublié ?"
+    "forgot_password": "Mot de passe oublié ?",
+    "rate_limited": "Trop de tentatives. Veuillez patienter.",
+    "remember_device": "Se souvenir de cet appareil",
+    "totp_title": "Authentification à deux facteurs",
+    "totp_label": "Code d'authentification",
+    "totp_hint": "Entrez le code à 6 chiffres de votre application d'authentification.",
+    "totp_error": "Code d'authentification invalide",
+    "try_again_in": "Réessayez dans {{seconds}} s"
   },
   "passwordReset": {
     "forgot_title": "Réinitialiser le mot de passe",
@@ -78,7 +87,9 @@
     "recent_activity": "Activité récente",
     "no_transactions": "Aucune transaction. Envoyez votre premier paiement !",
     "to": "À",
-    "from": "De"
+    "from": "De",
+    "add_money": "Ajouter de l'argent",
+    "withdraw": "Retirer"
   },
   "send": {
     "title": "Envoyer de l'argent",
@@ -92,6 +103,34 @@
     "camera_permission_denied": "Accès à la caméra refusé. Vérifiez vos autorisations.",
     "camera_not_found": "Aucune caméra trouvée sur cet appareil",
     "camera_error": "Impossible d'accéder à la caméra",
+    "camera_access_denied": "Accès caméra refusé. Entrez l'adresse du portefeuille manuellement ci-dessous.",
+    "no_camera_detected": "Aucune caméra détectée. Entrez l'adresse du portefeuille manuellement ci-dessous.",
+    "enter_address": "Entrer l'adresse",
+    "manual_entry_prompt": "Veuillez entrer l'adresse du portefeuille manuellement ci-dessous.",
+    "enter_stellar_address": "Entrez l'adresse Stellar (G...)",
+    "address_entered": "Adresse saisie avec succès !",
+    "manual_entry_hint": "Entrez une adresse Stellar valide de 56 caractères",
+    "request_camera_access": "Demander l'accès à la caméra",
+    "camera_permission_granted": "Accès à la caméra accordé !",
+    "camera_permission_denied_persistent": "Accès caméra refusé. Veuillez l'activer dans les paramètres du navigateur.",
+    "permission_fix_title": "Comment activer la caméra :",
+    "permission_instructions_label": "Étapes pour rétablir la permission caméra",
+    "permission_ios_safari_step1": "Ouvrez l'application Réglages de l'iPhone",
+    "permission_ios_safari_step2": "Faites défiler jusqu'à Safari → Caméra",
+    "permission_ios_safari_step3": "Sélectionnez « Autoriser », puis revenez à cette page",
+    "permission_ios_pwa_step1": "Ouvrez l'application Réglages de l'iPhone",
+    "permission_ios_pwa_step2": "Faites défiler jusqu'à AfriPay → Caméra",
+    "permission_ios_pwa_step3": "Appuyez sur « Autoriser », puis rouvrez l'application",
+    "permission_android_chrome_step1": "Appuyez sur l'icône de cadenas dans la barre d'adresse",
+    "permission_android_chrome_step2": "Appuyez sur Autorisations → Caméra → Autoriser",
+    "permission_android_chrome_step3": "Actualisez cette page et réessayez",
+    "permission_android_pwa_step1": "Ouvrez Paramètres Android → Applications → AfriPay",
+    "permission_android_pwa_step2": "Appuyez sur Autorisations → Caméra → Autoriser",
+    "permission_android_pwa_step3": "Rouvrez l'application et réessayez",
+    "permission_chrome_step1": "Cliquez sur l'icône de caméra ou de cadenas dans la barre d'adresse",
+    "permission_chrome_step2": "Réglez Caméra sur « Autoriser » et actualisez la page",
+    "permission_firefox_step1": "Cliquez sur l'icône de cadenas dans la barre d'adresse",
+    "permission_firefox_step2": "Réglez la permission Caméra sur « Autoriser » et rechargez",
     "amount": "Montant",
     "memo": "Mémo (facultatif)",
     "memo_placeholder": "Texte, ID numérique ou 64 car. hex…",
@@ -109,10 +148,31 @@
     "confirm_amount": "Montant :",
     "confirm_memo": "Mémo :",
     "confirm_memo_type": "Type :",
+    "confirm_fee": "Frais :",
     "review": "Vérifier le paiement",
     "confirm_send": "Confirmer et envoyer",
     "success": "Paiement envoyé avec succès !",
     "error": "Échec de la transaction"
+  },
+  "receive": {
+    "federation_label": "Adresse fédérée"
+  },
+  "analytics": {
+    "title": "Analytique",
+    "error": "Impossible de charger les analytiques",
+    "no_data": "Aucune donnée disponible"
+  },
+  "request": {
+    "title": "Demander un paiement",
+    "create": "Créer une demande",
+    "created": "Demande créée",
+    "error": "Impossible de créer la demande"
+  },
+  "scheduled": {
+    "title": "Paiements programmés",
+    "created": "Paiement programmé créé",
+    "deleted": "Paiement programmé supprimé",
+    "none": "Aucun paiement programmé"
   },
   "auth": {
     "setup_pin_title": "Définir le code PIN de transaction",
@@ -130,46 +190,6 @@
     "pin_confirm_button": "Confirmer le code PIN",
     "verify_pin_title": "Vérifier la transaction",
     "confirming_transaction": "Confirmez cette transaction :",
-    "pin_verified": "Code PIN vérifié ! Envoi du paiement...",
-    "pin_max_attempts": "Trop de tentatives échouées. Réessayez plus tard.",
-    "pin_attempts_remaining": "{{remaining}} tentatives restantes",
-    "pin_verify_button": "Vérifier et envoyer",
-    "pin_security_note": "Votre code PIN n'est jamais envoyé ni stocké sur nos serveurs"
-  },
-  "receive": {
-    "title": "Recevoir de l'argent",
-    "subtitle": "Partagez votre adresse de portefeuille ou QR code pour recevoir des paiements",
-    "address_label": "Votre adresse de portefeuille Stellar",
-    "warning": "Envoyez uniquement XLM ou des actifs Stellar à cette adresse",
-    "address_copied": "Adresse copiée !"
-  },
-  "history": {
-    "title": "Historique",
-    "filter_all": "tout",
-    "filter_sent": "envoyés",
-    "filter_received": "reçus",
-    "to": "À :",
-    "from": "De :",
-    "export_csv": "Exporter CSV",
-    "search_placeholder": "Rechercher mémo, adresse ou montant",
-    "date_from": "Date de début",
-    "date_to": "Date de fin",
-    "asset_label": "Actif",
-    "asset_all": "Tous les actifs",
-    "load_error": "Échec du chargement des transactions",
-    "load_more": "Charger plus",
-    "loading_more": "Chargement..."
-  },
-  "profile": {
-    "title": "Profil",
-    "member": "Membre AfriPay",
-    "frequent_contacts": "Contacts fréquents",
-    "no_contacts": "Aucun contact pour l'instant",
-    "contact_name_placeholder": "Nom du contact",
-    "contact_address_placeholder": "G... adresse du portefeuille",
-    "contact_added": "Contact ajouté",
-    "contact_error": "Échec de l'ajout du contact",
-    "address_copied": "Adresse copiée !",
-    "language": "Langue"
+    "pin_verified": "Code PIN vérifié ! Envoi du paiement..."
   }
 }

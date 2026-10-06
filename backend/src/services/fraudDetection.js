@@ -16,7 +16,7 @@ async function loadRules() {
   if (cached) return cached;
 
   const { rows } = await db.query(
-    `SELECT id, name, rule_type, parameters FROM fraud_rules WHERE is_active = true`
+    `SELECT id, name, rule_type, parameters, mode FROM fraud_rules WHERE is_active = true`
   );
   await cache.set(RULES_CACHE_KEY, rows, RULES_CACHE_TTL);
   return rows;
@@ -119,16 +119,30 @@ async function checkFraud(walletAddress, amount, asset, paymentId = null) {
       continue;
     }
 
-    const outcome = result.triggered ? 'blocked' : 'passed';
+    // BE-033: shadow-mode rules are evaluated and logged exactly like active
+    // rules, but never actually block — `would_block` records what the rule
+    // *would* have decided, so a false-positive rate can be computed before
+    // promoting the rule to 'active'. See getShadowRuleReport().
+    const isShadow = rule.mode === 'shadow';
+    const outcome = isShadow
+      ? (result.triggered ? 'shadow_blocked' : 'shadow_passed')
+      : (result.triggered ? 'blocked' : 'passed');
+
     // Log to audit table (fire-and-forget)
     db.query(
-      `INSERT INTO fraud_checks (rule_name, rule_type, outcome, payment_id, wallet_address, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+      `INSERT INTO fraud_checks (rule_name, rule_type, outcome, payment_id, wallet_address, metadata, rule_mode, would_block)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [rule.name, rule.rule_type, outcome, paymentId || null, walletAddress,
-       JSON.stringify({ amount, asset, ...result })]
+       JSON.stringify({ amount, asset, ...result }), rule.mode || 'active', result.triggered]
     ).catch(e => logger.warn('fraud_checks insert failed', { error: e.message }));
 
     if (result.triggered) {
+      if (isShadow) {
+        logger.info('Shadow fraud rule would have blocked transaction', {
+          rule: rule.name, walletAddress, message: result.message,
+        });
+        continue;
+      }
       return { blocked: true, rule: rule.name, message: result.message };
     }
   }
@@ -172,6 +186,41 @@ async function logFraudBlock(walletAddress, reason, amount, asset) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Shadow-mode reporting (BE-033)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare shadow-rule outcomes against real traffic, so an admin can decide
+ * whether a rule is safe to promote from 'shadow' to 'active' mode.
+ * Returns per-rule counts and would-be false-positive rate is left to the
+ * caller/report UI to interpret against known-legitimate transactions —
+ * this returns the raw trigger rate for that purpose.
+ */
+async function getShadowRuleReport(sinceDays = 7) {
+  const { rows } = await db.query(
+    `SELECT rule_name,
+            COUNT(*) FILTER (WHERE would_block = true) AS would_block_count,
+            COUNT(*) FILTER (WHERE would_block = false) AS would_pass_count,
+            COUNT(*) AS total_evaluations
+     FROM fraud_checks
+     WHERE rule_mode = 'shadow' AND created_at > NOW() - ($1 * INTERVAL '1 day')
+     GROUP BY rule_name
+     ORDER BY rule_name`,
+    [sinceDays]
+  );
+
+  return rows.map((r) => ({
+    rule_name: r.rule_name,
+    would_block_count: parseInt(r.would_block_count, 10),
+    would_pass_count: parseInt(r.would_pass_count, 10),
+    total_evaluations: parseInt(r.total_evaluations, 10),
+    would_block_rate: r.total_evaluations > 0
+      ? parseInt(r.would_block_count, 10) / parseInt(r.total_evaluations, 10)
+      : 0,
+  }));
+}
+
 module.exports = {
   checkFraud,
   checkVelocity,
@@ -179,4 +228,5 @@ module.exports = {
   logFraudBlock,
   loadRules,
   invalidateRulesCache,
+  getShadowRuleReport,
 };

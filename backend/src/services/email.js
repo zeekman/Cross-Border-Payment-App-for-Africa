@@ -204,6 +204,17 @@ async function sendPaymentRequestExpiredEmail(email, amount, asset) {
   });
 }
 
+async function sendEmailChangeRequestedNotice(currentEmail, newEmail, ip, userAgent) {
+  return enqueueEmail({
+    to: currentEmail,
+    subject: 'AfriPay: Your account email is being changed',
+    html: `<p>A request was made to change the email address on your AfriPay account to <strong>${newEmail}</strong>.</p>
+           <p>This change will not take effect until <strong>${newEmail}</strong> is verified — your account still uses this address until then.</p>
+           <p>Request details: IP ${ip || 'unknown'}, device: ${userAgent || 'unknown'}.</p>
+           <p>If you did not request this change, please contact support immediately and change your password.</p>`,
+  });
+}
+
 async function sendBackupCodeWarningEmail(email, remaining) {
   return enqueueEmail({
     to: email,
@@ -237,4 +248,5 @@ module.exports = {
   sendPaymentRequestExpiredEmail,
   sendBackupCodeWarningEmail,
   sendKycExpiryReminderEmail,
+  sendEmailChangeRequestedNotice,
 };

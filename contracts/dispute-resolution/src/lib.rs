@@ -85,6 +85,9 @@ pub enum DataKey {
     UserDisputes(Address),
     /// Total number of disputes opened (for admin pagination).
     TotalDisputes,
+    /// Address of the escrow contract authorised to push funds into disputes
+    /// via [`open_escrow_dispute`]. Set by the admin during setup.
+    EscrowContract,
 }
 
 // ── Domain types ──────────────────────────────────────────────────────────────
@@ -338,6 +341,111 @@ impl DisputeResolutionContract {
             }
             user_disputes.push_back(id);
             env.storage().persistent().set(&DataKey::UserDisputes(user), &user_disputes);
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "DisputeOpened"),),
+            EvtDisputeOpened {
+                dispute_id: id,
+                sender,
+                recipient,
+                amount,
+                deadline,
+            },
+        );
+
+        id
+    }
+
+    /// Open a dispute backed by funds held in an escrow contract.
+    ///
+    /// Cross-contract hook called by the escrow contract (see
+    /// `contracts/escrow`). The escrow has already transferred `amount` USDC
+    /// into this contract's custody; this function records the dispute so the
+    /// normal resolution/appeal/expiry flow applies. The adjudicated winner is
+    /// paid directly from the locked funds.
+    ///
+    /// Unlike [`open_dispute`], no filing fee is charged: the escrow contract
+    /// transfers only the disputed `amount`, and only the registered escrow
+    /// contract may call this function.
+    ///
+    /// # Arguments
+    /// * `escrow_contract` — The calling escrow contract. Must be the immediate
+    ///                       caller and match the registered escrow contract.
+    /// * `sender`          — Original escrow sender.
+    /// * `recipient`       — Intended escrow recipient.
+    /// * `amount`          — USDC amount (in stroops) already transferred.
+    pub fn open_escrow_dispute(
+        env: Env,
+        escrow_contract: Address,
+        sender: Address,
+        recipient: Address,
+        amount: i128,
+    ) -> u64 {
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+        if env.caller() != escrow_contract {
+            panic!("unauthorized: caller is not the escrow contract");
+        }
+        let trusted_escrow: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EscrowContract)
+            .expect("escrow contract not set");
+        if escrow_contract != trusted_escrow {
+            panic!("unauthorized: escrow contract not registered");
+        }
+
+        let id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Counter)
+            .unwrap_or(0)
+            + 1;
+        env.storage().persistent().set(&DataKey::Counter, &id);
+
+        let now = env.ledger().timestamp();
+        let deadline = now + RESOLUTION_DEADLINE_SECS;
+
+        let dispute = Dispute {
+            id,
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            amount,
+            status: DisputeStatus::Open,
+            opened_at: now,
+            deadline,
+            sender_evidence: Bytes::new(&env),
+            recipient_evidence: Bytes::new(&env),
+            appeal_deadline: 0,
+            resolved_for_recipient: false,
+        };
+        env.storage().persistent().set(&DataKey::Dispute(id), &dispute);
+
+        let total_disputes: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalDisputes)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalDisputes, &(total_disputes + 1));
+
+        // Index the dispute under both parties for pagination.
+        for user in [sender.clone(), recipient.clone()] {
+            let mut user_disputes: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::UserDisputes(user.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+            if user_disputes.len() >= 1000 {
+                user_disputes.remove(0);
+            }
+            user_disputes.push_back(id);
+            env.storage()
+                .persistent()
+                .set(&DataKey::UserDisputes(user), &user_disputes);
         }
 
         env.events().publish(
@@ -788,6 +896,28 @@ impl DisputeResolutionContract {
             panic!("unauthorized: caller is not admin");
         }
         env.storage().persistent().set(&DataKey::SuperArbitrator, &super_arbitrator);
+    }
+
+    /// Register the escrow contract authorised to open disputes via
+    /// [`open_escrow_dispute`]. Admin only.
+    ///
+    /// # Arguments
+    /// * `admin`          — Must match the admin address set during `initialize`.
+    /// * `escrow_contract` — The escrow contract address.
+    pub fn set_escrow_contract(env: Env, admin: Address, escrow_contract: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().persistent().get(&DataKey::Admin).unwrap();
+        if admin != stored_admin {
+            panic!("unauthorized: caller is not admin");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscrowContract, &escrow_contract);
+    }
+
+    /// Return the registered escrow contract address, or None if not set.
+    pub fn get_escrow_contract(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::EscrowContract)
     }
 
     // ── Multi-arbitrator panel ────────────────────────────────────────────────

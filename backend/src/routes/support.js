@@ -3,6 +3,7 @@ const router = require('express').Router();
 const { body, param, validationResult } = require('express-validator');
 const rateLimit = require('express-rate-limit');
 const authMiddleware = require('../middleware/auth');
+const { readLimiter } = require('../middleware/rateLimiter');
 const supportUpload = require('../middleware/supportUpload');
 const { createTicket, listTickets, getAttachment } = require('../controllers/supportController');
 
@@ -28,6 +29,7 @@ const ticketCreationLimiter = rateLimit({
 });
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger

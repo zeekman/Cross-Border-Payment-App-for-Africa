@@ -3,6 +3,49 @@ const { v4: uuidv4 } = require('uuid');
 const StellarSdk = require('@stellar/stellar-sdk');
 const db = require('../db');
 const logger = require('../utils/logger');
+const { registry } = require('../utils/metrics');
+const client = require('prom-client');
+
+// ---------------------------------------------------------------------------
+// BE-035: Backpressure documentation and metrics.
+//
+// Behavior under exhaustion: `acquire()` does NOT fail immediately. It
+// queues internally via a bounded poll loop — it keeps retrying the
+// SELECT ... FOR UPDATE SKIP LOCKED check-out every POLL_INTERVAL_MS, for up
+// to CHANNEL_POOL_ACQUIRE_TIMEOUT_MS (default 5000ms), before giving up.
+// This means bursts that exceed the pool size do NOT immediately surface as
+// user-facing send failures — callers effectively wait in a short queue for
+// a channel account to free up. If the burst is sustained long enough that
+// no account frees up within the timeout, `acquire()` throws
+// CHANNEL_POOL_EXHAUSTED, which callers should map to a 503 with a
+// Retry-After hint rather than a generic 500.
+// ---------------------------------------------------------------------------
+const POLL_INTERVAL_MS = 200;
+
+const channelPoolExhaustionTotal = new client.Counter({
+  name: 'afripay_channel_pool_exhaustion_total',
+  help: 'Total times channel account pool acquire() timed out without finding a free account',
+  registers: [registry],
+});
+
+const channelPoolWaitSeconds = new client.Histogram({
+  name: 'afripay_channel_pool_wait_seconds',
+  help: 'Time spent waiting to acquire a channel account from the pool',
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 8],
+  registers: [registry],
+});
+
+const channelPoolAvailable = new client.Gauge({
+  name: 'afripay_channel_pool_available',
+  help: 'Number of currently available (unchecked-out) channel accounts',
+  registers: [registry],
+});
+
+const channelPoolTotal = new client.Gauge({
+  name: 'afripay_channel_pool_total',
+  help: 'Total number of channel accounts configured in the pool',
+  registers: [registry],
+});
 
 const ALGORITHM = 'aes-256-cbc';
 
@@ -61,13 +104,17 @@ function decryptSystemSecret(encryptedKey) {
 /**
  * Acquire a free channel account from the pool.
  * Uses SELECT FOR UPDATE SKIP LOCKED to atomically check out a free account.
- * Waits up to 5 seconds before throwing CHANNEL_POOL_EXHAUSTED.
+ *
+ * Backpressure (BE-035): under exhaustion this does NOT fail immediately —
+ * it polls/waits up to CHANNEL_POOL_ACQUIRE_TIMEOUT_MS (default 5000ms,
+ * configurable) before throwing CHANNEL_POOL_EXHAUSTED. Callers should map
+ * that error to an HTTP 503 with a Retry-After hint.
  *
  * @returns {Promise<{ id: string, address: string, secret: string }>}
  */
 async function acquire() {
   const start = Date.now();
-  const timeoutMs = 5000;
+  const timeoutMs = parseInt(process.env.CHANNEL_POOL_ACQUIRE_TIMEOUT_MS || '5000', 10);
 
   while (Date.now() - start < timeoutMs) {
     const client = await db.pool.connect();
@@ -90,7 +137,8 @@ async function acquire() {
           [account.id]
         );
         await client.query('COMMIT');
-        
+
+        channelPoolWaitSeconds.observe((Date.now() - start) / 1000);
         const secret = decryptSecret(account.stellar_secret_encrypted);
         return {
           id: account.id,
@@ -106,11 +154,41 @@ async function acquire() {
       client.release();
     }
 
-    // Wait 200ms before retrying
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Wait before retrying (bounded queue-with-timeout backpressure)
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 
-  throw new Error('CHANNEL_POOL_EXHAUSTED');
+  channelPoolExhaustionTotal.inc();
+  channelPoolWaitSeconds.observe((Date.now() - start) / 1000);
+  logger.error('Channel account pool exhausted - no account freed up within timeout', {
+    waitedMs: Date.now() - start,
+  });
+  const err = new Error('CHANNEL_POOL_EXHAUSTED');
+  err.status = 503;
+  err.retryAfterSeconds = 5;
+  throw err;
+}
+
+/**
+ * Report current pool utilization (available vs total). Intended to be
+ * polled periodically (e.g. from a metrics-refresh interval) to keep the
+ * channelPoolAvailable/channelPoolTotal gauges current for alerting on
+ * sustained exhaustion.
+ *
+ * @returns {Promise<{ available: number, total: number }>}
+ */
+async function getPoolStats() {
+  const { rows } = await db.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE is_available = true) AS available,
+       COUNT(*) AS total
+     FROM channel_accounts`
+  );
+  const available = parseInt(rows[0].available, 10);
+  const total = parseInt(rows[0].total, 10);
+  channelPoolAvailable.set(available);
+  channelPoolTotal.set(total);
+  return { available, total };
 }
 
 /**
@@ -232,6 +310,7 @@ module.exports = {
   acquire,
   release,
   fundChannelPool,
+  getPoolStats,
   encryptSecret,
   decryptSecret,
 };

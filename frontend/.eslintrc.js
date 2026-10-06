@@ -26,7 +26,20 @@ module.exports = {
     'no-console': 'warn',
     'import/prefer-default-export': 'off',
     'no-use-before-define': 'off',
+    // Use ConfirmModal (via useConfirm) instead of native dialogs.
+    'no-restricted-globals': ['error', 'confirm', 'alert'],
+    'no-restricted-properties': [
+      'error',
+      { object: 'window', property: 'confirm', message: 'Use useConfirm() instead.' },
+      { object: 'window', property: 'alert', message: 'Use toast instead.' },
+    ],
   },
+  overrides: [
+    {
+      files: ['**/*.test.js', '**/*.test.jsx', '**/__tests__/**'],
+      rules: { 'no-restricted-properties': 'off', 'no-restricted-globals': 'off' },
+    },
+  ],
   settings: {
     react: {
       version: 'detect',

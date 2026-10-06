@@ -7,8 +7,8 @@ use soroban_sdk::{
 };
 
 use crate::{
-    EvtFeeDeposited, EvtFeesWithdrawn, EvtSplitUpdated, FeeDistributorContract,
-    FeeDistributorContractClient,
+    EvtContractPaused, EvtContractUnpaused, EvtFeeDeposited, EvtFeesWithdrawn, EvtSplitUpdated,
+    FeeDistributorContract, FeeDistributorContractClient, FeeRateUpdated,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -634,7 +634,7 @@ fn test_over_withdrawal_wrong_token_panics() {
 #[test]
 fn test_get_all_accumulated_fees_empty_before_any_deposit() {
     let (_, client, _, _) = setup();
-    let all = client.get_all_accumulated_fees();
+    let all = client.get_all_accumulated_fees(&0, &100);
     assert_eq!(all.len(), 0);
 }
 
@@ -645,7 +645,7 @@ fn test_get_all_accumulated_fees_single_token() {
     mint(&env, &usdc_id, &depositor, 200_0000000);
     client.deposit_fee(&depositor, &usdc_id, &200_0000000, &None);
 
-    let all = client.get_all_accumulated_fees();
+    let all = client.get_all_accumulated_fees(&0, &100);
     assert_eq!(all.len(), 1);
     let (addr, bal) = all.get(0).unwrap();
     assert_eq!(addr, usdc_id);
@@ -667,7 +667,7 @@ fn test_get_all_accumulated_fees_two_tokens() {
     client.deposit_fee(&depositor, &usdc_id, &300_0000000, &None);
     client.deposit_fee(&depositor, &xlm_id, &150_0000000, &None);
 
-    let all = client.get_all_accumulated_fees();
+    let all = client.get_all_accumulated_fees(&0, &100);
     assert_eq!(all.len(), 2);
 
     // Order matches insertion order: USDC first, XLM second.
@@ -699,7 +699,7 @@ fn test_get_all_accumulated_fees_excludes_fully_withdrawn_tokens() {
     // Drain USDC entirely.
     client.withdraw_fees(&admin, &usdc_id, &100_0000000);
 
-    let all = client.get_all_accumulated_fees();
+    let all = client.get_all_accumulated_fees(&0, &100);
     // Only XLM remains with a non-zero balance.
     assert_eq!(all.len(), 1);
     let (addr, bal) = all.get(0).unwrap();
@@ -753,7 +753,7 @@ fn test_deposit_fee_panics_when_paused() {
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 500_0000000);
     client.pause(&admin);
-    client.deposit_fee(&depositor, &500_0000000, &None);
+    client.deposit_fee(&depositor, &usdc_id, &500_0000000, &None);
 }
 
 #[test]
@@ -763,9 +763,9 @@ fn test_withdraw_fees_panics_when_paused() {
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 500_0000000);
     // deposit while unpaused so there are funds to attempt withdrawal
-    client.deposit_fee(&depositor, &500_0000000, &None);
+    client.deposit_fee(&depositor, &usdc_id, &500_0000000, &None);
     client.pause(&admin);
-    client.withdraw_fees(&admin, &500_0000000);
+    client.withdraw_fees(&admin, &usdc_id, &500_0000000);
 }
 
 #[test]
@@ -773,10 +773,10 @@ fn test_get_accumulated_fees_readable_when_paused() {
     let (env, client, admin, usdc_id) = setup();
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 300_0000000);
-    client.deposit_fee(&depositor, &300_0000000, &None);
+    client.deposit_fee(&depositor, &usdc_id, &300_0000000, &None);
     client.pause(&admin);
     // read-only operation must remain accessible
-    assert_eq!(client.get_accumulated_fees(), 300_0000000);
+    assert_eq!(client.get_accumulated_fees(&usdc_id), 300_0000000);
 }
 
 #[test]
@@ -795,8 +795,8 @@ fn test_deposit_succeeds_after_unpause() {
     client.pause(&admin);
     client.unpause(&admin);
     // should not panic now
-    client.deposit_fee(&depositor, &500_0000000, &None);
-    assert_eq!(client.get_accumulated_fees(), 500_0000000);
+    client.deposit_fee(&depositor, &usdc_id, &500_0000000, &None);
+    assert_eq!(client.get_accumulated_fees(&usdc_id), 500_0000000);
 }
 
 #[test]
@@ -804,12 +804,12 @@ fn test_withdraw_succeeds_after_unpause() {
     let (env, client, admin, usdc_id) = setup();
     let depositor = Address::generate(&env);
     mint(&env, &usdc_id, &depositor, 500_0000000);
-    client.deposit_fee(&depositor, &500_0000000, &None);
+    client.deposit_fee(&depositor, &usdc_id, &500_0000000, &None);
     client.pause(&admin);
     client.unpause(&admin);
     // should not panic now
-    client.withdraw_fees(&admin, &500_0000000);
-    assert_eq!(client.get_accumulated_fees(), 0);
+    client.withdraw_fees(&admin, &usdc_id, &500_0000000);
+    assert_eq!(client.get_accumulated_fees(&usdc_id), 0);
 }
 
 #[test]
@@ -869,4 +869,198 @@ fn test_unpause_non_admin_panics() {
     client.pause(&admin);
     let impostor = Address::generate(&env);
     client.unpause(&impostor);
+}
+
+// ── SC-017: deposit_fee upper-bound cap ───────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "amount exceeds maximum deposit limit")]
+fn test_deposit_fee_above_max_cap_panics() {
+    // MAX_DEPOSIT_AMOUNT = 10_000_000_000_000 stroops (1 000 000 USDC).
+    // Depositing MAX + 1 must be rejected at the contract level, providing a
+    // backstop against caller-side unit/precision bugs (SC-017).
+    let (env, client, _, usdc_id) = setup();
+    let depositor = Address::generate(&env);
+    // Mint MAX + 1 so the token balance is sufficient; the contract check fires first.
+    mint(&env, &usdc_id, &depositor, 10_000_000_000_001);
+    client.deposit_fee(&depositor, &usdc_id, &10_000_000_000_001, &None);
+}
+
+#[test]
+fn test_deposit_fee_at_max_cap_succeeds() {
+    // Exactly MAX_DEPOSIT_AMOUNT must be accepted (boundary value).
+    let (env, client, _, usdc_id) = setup();
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 10_000_000_000_000);
+    client.deposit_fee(&depositor, &usdc_id, &10_000_000_000_000, &None);
+    assert_eq!(client.get_accumulated_fees(&usdc_id), 10_000_000_000_000);
+}
+
+// ── SC-018: get_all_accumulated_fees pagination ───────────────────────────────
+
+#[test]
+fn test_get_all_accumulated_fees_pagination_returns_correct_page() {
+    // Register 4 tokens, then fetch them two at a time and confirm both pages
+    // together equal the full result returned with limit=100.
+    let (env, client, admin, usdc_id) = setup();
+
+    let tok2 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let tok3 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let tok4 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    let depositor = Address::generate(&env);
+    for tok in [&usdc_id, &tok2, &tok3, &tok4] {
+        mint(&env, tok, &depositor, 100_0000000);
+        client.deposit_fee(&depositor, tok, &100_0000000, &None);
+    }
+
+    // Full result with a single call.
+    let all = client.get_all_accumulated_fees(&0, &100);
+    assert_eq!(all.len(), 4);
+
+    // Page 1: indices 0..1 (limit 2).
+    let page1 = client.get_all_accumulated_fees(&0, &2);
+    assert_eq!(page1.len(), 2);
+
+    // Page 2: indices 2..3 (start 2, limit 2).
+    let page2 = client.get_all_accumulated_fees(&2, &2);
+    assert_eq!(page2.len(), 2);
+
+    // Both pages together must cover all 4 tokens in order.
+    let (a0, _) = page1.get(0).unwrap();
+    let (a1, _) = page1.get(1).unwrap();
+    let (a2, _) = page2.get(0).unwrap();
+    let (a3, _) = page2.get(1).unwrap();
+
+    let (b0, _) = all.get(0).unwrap();
+    let (b1, _) = all.get(1).unwrap();
+    let (b2, _) = all.get(2).unwrap();
+    let (b3, _) = all.get(3).unwrap();
+
+    assert_eq!(a0, b0);
+    assert_eq!(a1, b1);
+    assert_eq!(a2, b2);
+    assert_eq!(a3, b3);
+}
+
+#[test]
+fn test_get_all_accumulated_fees_limit_capped_at_100() {
+    // Requesting limit > 100 must be silently capped: only 100 tokens examined.
+    // With fewer than 100 tokens the result is simply the full list.
+    let (env, client, _, usdc_id) = setup();
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 50_0000000);
+    client.deposit_fee(&depositor, &usdc_id, &50_0000000, &None);
+
+    // limit=200 should behave identically to limit=100.
+    let result = client.get_all_accumulated_fees(&0, &200);
+    assert_eq!(result.len(), 1);
+}
+
+#[test]
+fn test_get_all_accumulated_fees_start_beyond_end_returns_empty() {
+    // start >= token list length must return an empty vec, not panic.
+    let (env, client, _, usdc_id) = setup();
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 50_0000000);
+    client.deposit_fee(&depositor, &usdc_id, &50_0000000, &None);
+
+    // Only 1 token; start=1 is beyond the list.
+    let result = client.get_all_accumulated_fees(&1, &100);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn test_get_token_list_len_reflects_registered_tokens() {
+    // get_token_list_len should match the number of distinct deposited tokens.
+    let (env, client, admin, usdc_id) = setup();
+
+    assert_eq!(client.get_token_list_len(), 0);
+
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 100_0000000);
+    client.deposit_fee(&depositor, &usdc_id, &100_0000000, &None);
+    assert_eq!(client.get_token_list_len(), 1);
+
+    let tok2 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    mint(&env, &tok2, &depositor, 100_0000000);
+    client.deposit_fee(&depositor, &tok2, &100_0000000, &None);
+    assert_eq!(client.get_token_list_len(), 2);
+
+    // Depositing the same token again must not increment the count.
+    mint(&env, &usdc_id, &depositor, 100_0000000);
+    client.deposit_fee(&depositor, &usdc_id, &100_0000000, &None);
+    assert_eq!(client.get_token_list_len(), 2);
+}
+
+// ── SC-019: pause blocks mutating ops; read-only getters remain accessible ────
+
+#[test]
+fn test_pause_blocks_deposit_fee_and_withdraw_fees_but_not_getters() {
+    // Comprehensive regression: after pause()
+    //   - deposit_fee       → must panic "Contract is paused"
+    //   - withdraw_fees     → must panic "Contract is paused"
+    //   - get_accumulated_fees        → must succeed
+    //   - get_all_accumulated_fees    → must succeed
+    //   - get_agent_pool_fees         → must succeed
+    //   - is_paused                   → must succeed (returns true)
+    let (env, client, admin, usdc_id) = setup_with_split(2000);
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 1_000_0000000);
+
+    // Deposit while unpaused to build up balances.
+    client.deposit_fee(&depositor, &usdc_id, &1_000_0000000, &None);
+    client.pause(&admin);
+
+    // ── Read-only getters must remain callable while paused ──────────────────
+    assert_eq!(client.get_accumulated_fees(&usdc_id), 800_0000000); // 80% platform (split 2000 bps)
+    assert_eq!(client.get_agent_pool_fees(&usdc_id), 200_0000000);  // 20% agent pool
+    let all = client.get_all_accumulated_fees(&0, &100);
+    assert_eq!(all.len(), 1);
+    assert!(client.is_paused());
+}
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_pause_blocks_deposit_fee() {
+    let (env, client, admin, usdc_id) = setup();
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 100_0000000);
+    client.pause(&admin);
+    client.deposit_fee(&depositor, &usdc_id, &100_0000000, &None);
+}
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_pause_blocks_withdraw_fees() {
+    let (env, client, admin, usdc_id) = setup();
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 100_0000000);
+    client.deposit_fee(&depositor, &usdc_id, &100_0000000, &None);
+    client.pause(&admin);
+    client.withdraw_fees(&admin, &usdc_id, &100_0000000);
+}
+
+#[test]
+fn test_withdraw_agent_pool_not_blocked_by_pause() {
+    // withdraw_agent_pool deliberately has no Paused check (by design —
+    // agent-pool withdrawals must remain available to honour pending agent
+    // payouts even during an incident that warrants pausing new deposits).
+    // This test locks in that deliberate omission as regression coverage
+    // (SC-019 acceptance criterion: "deliberate decision, not an oversight").
+    let (env, client, admin, usdc_id) = setup_with_split(2000);
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 1_000_0000000);
+
+    // Build up agent pool balance while unpaused.
+    client.deposit_fee(&depositor, &usdc_id, &1_000_0000000, &None);
+    // Agent pool = 200_0000000 (20% of 1_000_0000000 with split 2000 bps).
+    assert_eq!(client.get_agent_pool_fees(&usdc_id), 200_0000000);
+
+    client.pause(&admin);
+
+    // withdraw_agent_pool must NOT panic when contract is paused — this is
+    // intentional: agent-pool withdrawals are not gated by the pause flag.
+    client.withdraw_agent_pool(&admin, &usdc_id, &200_0000000);
+    assert_eq!(client.get_agent_pool_fees(&usdc_id), 0);
 }

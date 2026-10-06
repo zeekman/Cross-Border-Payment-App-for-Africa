@@ -9,6 +9,28 @@ Breaking changes are marked **[BREAKING]**.
 
 ## [Unreleased]
 
+### Security — backend routes (`backend/src/routes/wallet.js`)
+
+#### Fixed: `GET /api/wallet/signers` bypassed admin/owner authorization (BE-001, issue #948)
+
+`GET /api/wallet/signers` was registered twice — once with no authorization
+middleware, then again correctly guarded by `isAdminOrOwner()`. Express
+dispatches to the first matching registration for a given method+path, so the
+unprotected copy always won and the protected copy was dead code. Any
+authenticated user (not just an account admin/owner) could call the endpoint.
+
+- **Introduced:** 2026-03-28 (`3ef2d463`, initial multisig support), when the
+  route existed only in its unprotected form.
+- **Regressed to dead-code duplicate:** 2026-05-31 (`3e08fc16`), when
+  `isAdminOrOwner()` protection was added as a second registration instead of
+  replacing the first.
+- **Fixed:** 2026-08-29 — removed the unprotected registration; only the
+  `isAdminOrOwner()`-guarded route is now reachable.
+- **Exposure window:** 2026-03-28 through 2026-08-29.
+- A duplicate-route CI check (`backend/scripts/check-duplicate-routes.js`)
+  now fails the build on any (method, path) registered more than once in a
+  router file, so this class of bug can't silently regress again.
+
 ### Changed — agent-escrow contract (`contracts/agent-escrow`)
 
 #### **[BREAKING]** Standardized Soroban event topic scheme

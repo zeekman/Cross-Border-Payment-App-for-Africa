@@ -14,7 +14,12 @@ const {
   PathPageSchema,
   validateHorizonResponse,
 } = require('../utils/horizonSchemas');
-const { horizonRequestDuration } = require('../utils/metrics');
+const {
+  horizonRequestDuration,
+  horizonFallbackActive,
+  horizonFallbackDurationSeconds,
+  horizonFallbackAlertsTotal,
+} = require('../utils/metrics');
 
 const isTestnet = process.env.STELLAR_NETWORK !== 'mainnet';
 const networkPassphrase = isTestnet
@@ -66,9 +71,111 @@ function isNetworkError(err) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// BE-036: Alert when Horizon fallback has been active for longer than expected.
+//
+// `fallbackActivatedAt` tracks when we most recently *started* a continuous
+// run of successful fallback-node usage. It is cleared as soon as a request
+// succeeds on the primary again, so "duration on fallback" reflects the
+// current continuous activation, not lifetime fallback usage. A periodic
+// checker compares that duration against a configurable threshold and logs
+// an alert (rate-limited) when it's exceeded — this is what lets operators
+// notice "we've been degraded for 20 minutes" rather than discovering it via
+// a harder-to-diagnose downstream incident.
+// ---------------------------------------------------------------------------
+let fallbackActivatedAt = null;
+let lastFallbackAlertAt = null;
+
+const FALLBACK_ALERT_THRESHOLD_MS =
+  parseInt(process.env.HORIZON_FALLBACK_ALERT_THRESHOLD_MS || '', 10) || 15 * 60 * 1000; // 15 min default
+const FALLBACK_ALERT_REPEAT_MS =
+  parseInt(process.env.HORIZON_FALLBACK_ALERT_REPEAT_MS || '', 10) || 15 * 60 * 1000; // don't spam more than every 15 min
+
+function markFallbackActive() {
+  if (!fallbackActivatedAt) fallbackActivatedAt = Date.now();
+  horizonFallbackActive.set(1);
+}
+
+function markPrimaryHealthy() {
+  fallbackActivatedAt = null;
+  lastFallbackAlertAt = null;
+  horizonFallbackActive.set(0);
+  horizonFallbackDurationSeconds.set(0);
+}
+
+/**
+ * Current continuous fallback-activation duration in ms, or 0 if on primary.
+ */
+function getFallbackDurationMs() {
+  return fallbackActivatedAt ? Date.now() - fallbackActivatedAt : 0;
+}
+
+/**
+ * Returns the current Horizon endpoint status for health checks / dashboards.
+ */
+function getHorizonEndpointStatus() {
+  const durationMs = getFallbackDurationMs();
+  return {
+    node: fallbackActivatedAt ? 'fallback' : 'primary',
+    fallbackConfigured: Boolean(fallbackServer),
+    fallbackActiveDurationMs: durationMs,
+    fallbackActivatedAt: fallbackActivatedAt ? new Date(fallbackActivatedAt).toISOString() : null,
+    alertThresholdMs: FALLBACK_ALERT_THRESHOLD_MS,
+    alertExceeded: durationMs > FALLBACK_ALERT_THRESHOLD_MS,
+  };
+}
+
+/**
+ * Periodic check (intended to be called on an interval, e.g. every minute)
+ * that alerts when fallback has been continuously active longer than the
+ * configured threshold. Re-alerts at most once per FALLBACK_ALERT_REPEAT_MS
+ * to avoid log/alert spam while the condition persists.
+ */
+function checkFallbackDuration() {
+  horizonFallbackDurationSeconds.set(getFallbackDurationMs() / 1000);
+
+  if (!fallbackActivatedAt) return false;
+
+  const durationMs = getFallbackDurationMs();
+  if (durationMs <= FALLBACK_ALERT_THRESHOLD_MS) return false;
+
+  const now = Date.now();
+  if (lastFallbackAlertAt && now - lastFallbackAlertAt < FALLBACK_ALERT_REPEAT_MS) return false;
+
+  lastFallbackAlertAt = now;
+  horizonFallbackAlertsTotal.inc();
+  logger.error('ALERT: Horizon fallback node has been active longer than expected', {
+    fallbackUrl,
+    activeDurationMs: durationMs,
+    thresholdMs: FALLBACK_ALERT_THRESHOLD_MS,
+  });
+  return true;
+}
+
+let fallbackDurationCheckTimer = null;
+
+/**
+ * Start the periodic fallback-duration checker. Safe to call multiple times
+ * (no-op if already started). Exported so app startup can wire it in.
+ */
+function startFallbackDurationMonitor(intervalMs = 60 * 1000) {
+  if (fallbackDurationCheckTimer) return fallbackDurationCheckTimer;
+  fallbackDurationCheckTimer = setInterval(checkFallbackDuration, intervalMs);
+  if (typeof fallbackDurationCheckTimer.unref === 'function') fallbackDurationCheckTimer.unref();
+  return fallbackDurationCheckTimer;
+}
+
+function stopFallbackDurationMonitor() {
+  if (fallbackDurationCheckTimer) {
+    clearInterval(fallbackDurationCheckTimer);
+    fallbackDurationCheckTimer = null;
+  }
+}
+
 /**
  * Execute fn(server) with automatic failover to the fallback node on network errors only.
- * Records Horizon call duration via Prometheus.
+ * Records Horizon call duration via Prometheus, and tracks fallback activation
+ * duration for BE-036 alerting.
  */
 async function withFallback(fn, operation = 'unknown') {
   const end = horizonRequestDuration.startTimer({ operation });
@@ -76,6 +183,7 @@ async function withFallback(fn, operation = 'unknown') {
     const result = await fn(server);
     end({ success: 'true' });
     logger.debug('Horizon request succeeded', { node: 'primary', url: primaryUrl });
+    markPrimaryHealthy();
     return result;
   } catch (primaryErr) {
     if (!isNetworkError(primaryErr) || !fallbackServer) {
@@ -91,6 +199,8 @@ async function withFallback(fn, operation = 'unknown') {
       const result = await fn(fallbackServer);
       end({ success: 'true' });
       logger.info('Horizon request succeeded on fallback node', { url: fallbackUrl });
+      markFallbackActive();
+      checkFallbackDuration();
       return result;
     } catch (fallbackErr) {
       end({ success: 'false' });
@@ -247,6 +357,18 @@ function resolveAsset(asset) {
   return new StellarSdk.Asset(asset, issuer);
 }
 
+/**
+ * Get the Stellar Asset Contract (SAC) address for a given asset.
+ * This derives the contract address from the asset code and issuer.
+ * 
+ * @param {string} asset - Asset code (e.g., 'USDC', 'XLM')
+ * @returns {string} SAC contract address
+ */
+function getAssetContractAddress(asset) {
+  const assetObj = resolveAsset(asset);
+  return assetObj.contractId(networkPassphrase);
+}
+
 async function checkTrustline(recipientPublicKey, assetObj) {
   let recipientAccount;
   try {
@@ -292,8 +414,19 @@ function buildStellarMemo(memo, memoType = 'text') {
   const type = (memoType || 'text').toLowerCase();
 
   switch (type) {
-    case 'text':
-      return StellarSdk.Memo.text(memo.slice(0, 28));
+    case 'text': {
+      // Issue #1163: Stellar text memos are limited to 28 bytes (not characters).
+      // Reject memos that exceed this limit instead of silently truncating them,
+      // which corrupts exchange deposit memos and makes encrypt_memo unusable.
+      const memoBytes = Buffer.byteLength(memo, 'utf8');
+      if (memoBytes > 28) {
+        throw memoValidationError(
+          `Text memo exceeds 28 bytes (${memoBytes} bytes). ` +
+          `Use memo_type=hash for longer memos like encrypted data.`
+        );
+      }
+      return StellarSdk.Memo.text(memo);
+    }
     case 'id': {
       if (!/^\d+$/.test(memo)) throw memoValidationError('Memo ID must be a numeric string');
       try {
@@ -1508,6 +1641,10 @@ module.exports = {
   fetchFeeStats,
   feeForPriority,
   checkHorizonHealth,
+  getHorizonEndpointStatus,
+  checkFallbackDuration,
+  startFallbackDurationMonitor,
+  stopFallbackDurationMonitor,
   findPaymentPath,
   sendPathPayment,
   validateBatchRecipient,
@@ -1533,5 +1670,6 @@ module.exports = {
   withSequenceRecovery,
   validateNetworkPassphrase,
   getAssetMetadataByCodeAndIssuer,
+  getAssetContractAddress,
   initMultisigApproval,
 };

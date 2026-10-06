@@ -20,7 +20,7 @@ const { mintPoints, redeemPoints, getBalance } = require("../services/loyaltyTok
 async function balance(req, res, next) {
   try {
     const walletResult = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -47,7 +47,7 @@ async function balance(req, res, next) {
 async function redeem(req, res, next) {
   try {
     const walletResult = await db.query(
-      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -117,7 +117,7 @@ async function mint(req, res, next) {
     }
 
     const walletResult = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1 LIMIT 1',
+      'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
       [user_id],
     );
     if (!walletResult.rows[0]) {

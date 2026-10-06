@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Plus, Webhook, Copy, CheckCheck, Eye, EyeOff, RefreshCw, ChevronDown, ChevronUp, Clock } from 'lucide-react';
+import { Plus, Webhook, Copy, CheckCheck, RefreshCw, ChevronDown, ChevronUp, Clock } from 'lucide-react';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
 
@@ -38,7 +38,7 @@ function DeliveryLog({ webhookId }) {
 
   useEffect(() => {
     if (expanded) loadDeliveries();
-  }, [expanded, webhookId]);
+  }, [expanded, webhookId]); // eslint-disable-line react-hooks/exhaustive-deps -- loader only depends on webhookId
 
   return (
     <div className="border-t border-gray-700 pt-2 mt-2">
@@ -120,16 +120,24 @@ export default function Webhooks() {
   const [form, setForm] = useState({ url: '', events: [] });
   const [submitting, setSubmitting] = useState(false);
   const [revealedSecret, setRevealedSecret] = useState(null);
+  const [rotateConfirm, setRotateConfirm] = useState(null);
+  const [rotating, setRotating] = useState(null);
   const revealTimerRef = useRef(null);
   const [copied, setCopied] = useState(null);
 
   useEffect(() => {
     api.get('/webhooks')
-      .then(r => setWebhooks(r.data.webhooks))
+      .then(r => setWebhooks(r.data.webhooks.map(({ secret: _secret, ...webhook }) => webhook)))
       .catch(() => toast.error('Failed to load webhooks'))
       .finally(() => setLoading(false));
     return () => clearTimeout(revealTimerRef.current);
   }, []);
+
+  const revealSecretOnce = (webhookId, secret, overlapHours = null) => {
+    clearTimeout(revealTimerRef.current);
+    setRevealedSecret({ id: webhookId, secret, overlapHours });
+    revealTimerRef.current = setTimeout(() => setRevealedSecret(null), 30000);
+  };
 
   const toggleEvent = (event) => {
     setForm(f => ({
@@ -151,8 +159,9 @@ export default function Webhooks() {
     setSubmitting(true);
     try {
       const { data } = await api.post('/webhooks', form);
-      setWebhooks(prev => [data, ...prev]);
-      setRevealedSecret(data.id);
+      const { secret, ...webhook } = data;
+      setWebhooks(prev => [webhook, ...prev]);
+      revealSecretOnce(data.id, secret);
       setForm({ url: '', events: [] });
       setShowForm(false);
       toast.success('Webhook created — save your secret now, it won\'t be shown again');
@@ -164,9 +173,25 @@ export default function Webhooks() {
   };
 
   const copySecret = (id, secret) => {
-    navigator.clipboard.writeText(secret);
+    navigator.clipboard.writeText(secret).catch(() => toast.error('Failed to copy secret'));
     setCopied(id);
     setTimeout(() => setCopied(null), 2000);
+  };
+
+  const rotateSecret = async (webhookId) => {
+    setRotating(webhookId);
+    try {
+      const { data } = await api.post(`/webhooks/${webhookId}/rotate-secret`);
+      const { secret, rotation_overlap_hours: overlapHours, ...webhook } = data;
+      setWebhooks(prev => prev.map(wh => wh.id === webhookId ? webhook : wh));
+      revealSecretOnce(webhookId, secret, overlapHours);
+      setRotateConfirm(null);
+      toast.success(`Secret rotated. The old secret works for ${data.rotation_overlap_hours || 24} hours. Save the new secret now.`);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to rotate secret');
+    } finally {
+      setRotating(null);
+    }
   };
 
   return (
@@ -253,27 +278,39 @@ export default function Webhooks() {
                   <span key={ev} className="text-xs bg-gray-800 text-gray-300 font-mono px-2 py-0.5 rounded-lg">{ev}</span>
                 ))}
               </div>
-              {wh.secret && (
+              {(wh.secret || wh.secret_masked) && (
                 <div className="bg-gray-800 rounded-xl px-3 py-2 flex items-center gap-2">
                   <span className="text-xs text-gray-400 shrink-0">Secret:</span>
                   <span className="text-xs font-mono text-yellow-400 flex-1 truncate">
-                    {revealedSecret === wh.id ? wh.secret : '••••••••••••••••'}
+                    {revealedSecret?.id === wh.id ? revealedSecret.secret : (wh.secret_masked || '****')}
                   </span>
                   <button onClick={() => {
-                    if (revealedSecret === wh.id) {
-                      clearTimeout(revealTimerRef.current);
-                      setRevealedSecret(null);
-                    } else {
-                      setRevealedSecret(wh.id);
-                      clearTimeout(revealTimerRef.current);
-                      revealTimerRef.current = setTimeout(() => setRevealedSecret(null), 30000);
-                    }
-                  }} className="text-gray-500 hover:text-gray-300 shrink-0">
-                    {revealedSecret === wh.id ? <EyeOff size={14} /> : <Eye size={14} />}
+                    setRotateConfirm(wh.id);
+                  }} disabled={rotating === wh.id} className="text-gray-500 hover:text-gray-300 shrink-0 flex items-center gap-1 text-xs">
+                    <RefreshCw size={14} className={rotating === wh.id ? 'animate-spin' : ''} /> Rotate
                   </button>
-                  <button onClick={() => copySecret(wh.id, wh.secret)} className="text-gray-500 hover:text-gray-300 shrink-0">
-                    {copied === wh.id ? <CheckCheck size={14} className="text-primary-500" /> : <Copy size={14} />}
-                  </button>
+                  {revealedSecret?.id === wh.id && (
+                    <button onClick={() => copySecret(wh.id, revealedSecret.secret)} aria-label="Copy webhook secret" className="text-gray-500 hover:text-gray-300 shrink-0">
+                      {copied === wh.id ? <CheckCheck size={14} className="text-primary-500" /> : <Copy size={14} />}
+                    </button>
+                  )}
+                  {revealedSecret?.id === wh.id && revealedSecret.overlapHours && (
+                    <p className="basis-full text-xs text-yellow-300">
+                      New secret shown once. The old secret remains valid for {revealedSecret.overlapHours} hours.
+                    </p>
+                  )}
+                  {rotateConfirm === wh.id && (
+                    <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/60 px-4">
+                      <div className="bg-gray-900 rounded-xl p-5 max-w-sm w-full space-y-3">
+                        <p className="text-sm text-white font-medium">Rotate this webhook secret?</p>
+                        <p className="text-xs text-gray-400">The old secret will continue working during the configured overlap window. The new secret is shown once.</p>
+                        <div className="flex gap-2">
+                          <button onClick={() => setRotateConfirm(null)} className="flex-1 py-2 rounded-lg bg-gray-800 text-gray-300 text-sm">Cancel</button>
+                          <button onClick={() => rotateSecret(wh.id)} disabled={rotating === wh.id} className="flex-1 py-2 rounded-lg bg-primary-500 text-white text-sm disabled:opacity-50">{rotating === wh.id ? 'Rotating...' : 'Rotate secret'}</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
               <div className="flex items-center justify-between">

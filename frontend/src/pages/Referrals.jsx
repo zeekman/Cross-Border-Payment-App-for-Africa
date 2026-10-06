@@ -1,22 +1,41 @@
 import React, { useEffect, useState } from 'react';
-import { Copy, CheckCheck, Users, Gift, Share2 } from 'lucide-react';
+import { Copy, CheckCheck, Users, Gift, Share2, Clock, AlertCircle, CheckCircle } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
 
 const DEEP_LINK_PREFIX = 'afripay://register';
 
+const STATUS_CONFIG = {
+  pending: { icon: Clock, color: 'text-yellow-500', bg: 'bg-yellow-50 dark:bg-yellow-900', label: 'Pending' },
+  credited: { icon: CheckCircle, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-900', label: 'Credited' },
+  failed: { icon: AlertCircle, color: 'text-red-500', bg: 'bg-red-50 dark:bg-red-900', label: 'Failed' },
+  ineligible: { icon: AlertCircle, color: 'text-gray-500', bg: 'bg-gray-50 dark:bg-gray-800', label: 'Ineligible' },
+};
+
 export default function Referrals() {
   const [stats, setStats] = useState(null);
+  const [referrals, setReferrals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [showQR, setShowQR] = useState(false);
 
   useEffect(() => {
-    api.get('/referrals/stats')
-      .then(r => setStats(r.data))
-      .catch(() => toast.error('Failed to load referral stats'))
-      .finally(() => setLoading(false));
+    const fetchData = async () => {
+      try {
+        const [statsRes, detailsRes] = await Promise.all([
+          api.get('/referrals/stats'),
+          api.get('/referrals/details'),
+        ]);
+        setStats(statsRes.data);
+        setReferrals(detailsRes.data.referrals || []);
+      } catch (err) {
+        toast.error('Failed to load referral data');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
   }, []);
 
   const code = stats?.referral_code || '';
@@ -51,6 +70,14 @@ export default function Referrals() {
     }
   };
 
+  const formatDate = (date) => {
+    return new Date(date).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950">
@@ -62,6 +89,18 @@ export default function Referrals() {
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950 px-4 py-6">
       <h1 className="text-xl font-bold text-gray-900 dark:text-white mb-6">Refer &amp; Earn</h1>
+
+      {/* Total Rewards Earned Summary */}
+      <div className="bg-gradient-to-r from-primary-500 to-primary-600 rounded-2xl p-5 shadow-md mb-4 text-white">
+        <p className="text-sm opacity-90 mb-1">Total Rewards Earned</p>
+        <div className="flex items-baseline gap-2">
+          <span className="text-3xl font-bold">{stats?.total_rewards_earned || 0}</span>
+          <span className="text-sm opacity-75">loyalty points</span>
+        </div>
+        <p className="text-xs opacity-75 mt-2">
+          From {stats?.first_payments_completed || 0} completed referral reward{stats?.first_payments_completed === 1 ? '' : 's'}
+        </p>
+      </div>
 
       <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm mb-4">
         <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
@@ -114,7 +153,7 @@ export default function Referrals() {
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 gap-3 mb-6">
         <div className="bg-white dark:bg-gray-900 rounded-2xl p-4 shadow-sm flex flex-col items-center gap-2">
           <Users size={24} className="text-primary-500" />
           <span className="text-2xl font-bold text-gray-900 dark:text-white">{stats?.referral_count ?? 0}</span>
@@ -126,6 +165,62 @@ export default function Referrals() {
           <span className="text-xs text-gray-500 dark:text-gray-400">Active credits</span>
         </div>
       </div>
+
+      {/* Referral Status List */}
+      {referrals.length > 0 && (
+        <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm">
+          <h2 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">Referral Status</h2>
+          <div className="space-y-3">
+            {referrals.map((ref) => {
+              const config = STATUS_CONFIG[ref.reward_status] || STATUS_CONFIG.ineligible;
+              const Icon = config.icon;
+
+              return (
+                <div
+                  key={ref.referral_id}
+                  className={`flex items-start justify-between p-3 rounded-xl border border-gray-200 dark:border-gray-700 ${config.bg}`}
+                >
+                  <div className="flex items-start gap-3 flex-1 min-w-0">
+                    <Icon size={20} className={`${config.color} flex-shrink-0 mt-0.5`} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                        {ref.email}
+                      </p>
+                      <p className="text-xs text-gray-600 dark:text-gray-400">
+                        Referred: {formatDate(ref.referred_at)}
+                      </p>
+                      {ref.reward_status === 'credited' && ref.reward_claimed_at && (
+                        <p className="text-xs text-gray-600 dark:text-gray-400">
+                          Claimed: {formatDate(ref.reward_claimed_at)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-col items-end gap-1 flex-shrink-0 ml-2">
+                    <span className={`text-xs font-semibold ${config.color}`}>
+                      {config.label}
+                    </span>
+                    {ref.reward_amount && (
+                      <span className="text-xs text-gray-600 dark:text-gray-400">
+                        {ref.reward_amount} pts
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {referrals.length === 0 && !loading && (
+        <div className="bg-white dark:bg-gray-900 rounded-2xl p-8 shadow-sm text-center">
+          <Users size={32} className="mx-auto text-gray-400 mb-3" />
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            No referrals yet. Share your referral link to get started!
+          </p>
+        </div>
+      )}
     </div>
   );
 }

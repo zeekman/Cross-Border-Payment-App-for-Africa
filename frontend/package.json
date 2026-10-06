@@ -6,6 +6,7 @@
     "@headlessui/react": "^1.7.17",
     "@ledgerhq/hw-app-str": "^7.7.1",
     "@ledgerhq/hw-transport-webusb": "^6.34.1",
+    "@sentry/react": "^8.55.2",
     "@stellar/stellar-sdk": "^12.0.0",
     "axios": "^1.6.2",
     "i18next": "^25.10.5",
@@ -19,6 +20,7 @@
     "react-qr-reader": "^3.0.0-beta-1",
     "react-router-dom": "^6.20.1",
     "react-scripts": "5.0.1",
+    "react-window": "^1.8.10",
     "recharts": "^2.10.3",
     "socket.io-client": "^4.8.3",
     "workbox-window": "^7.4.0"
@@ -34,7 +36,8 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "build": "react-scripts build",
+    "build": "npm run lint:build && DISABLE_ESLINT_PLUGIN=true react-scripts build",
+    "lint:build": "eslint src --ext .js,.jsx --no-eslintrc -c .eslintrc.build.js --max-warnings=0",
     "test": "react-scripts test",
     "lint": "eslint src/**/*.{js,jsx}",
     "lint:fix": "eslint src/**/*.{js,jsx} --fix",
@@ -50,5 +53,17 @@
       "^@ledgerhq/hw-transport-webusb$": "<rootDir>/src/__mocks__/@ledgerhq/hw-transport-webusb.js",
       "^@ledgerhq/hw-app-str$": "<rootDir>/src/__mocks__/@ledgerhq/hw-app-str.js"
     }
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
   }
 }

@@ -40,12 +40,36 @@ function decryptSecret(encryptedKey) {
  * Deposit a platform fee on-chain.
  * Fire-and-forget — caller should not await this in the critical path.
  *
- * @param {number|string} feeAmount - Fee in USDC stroops (7 decimal places)
+ * @param {number|string} feeAmount  - Fee in USDC stroops (7 decimal places).
+ * @param {string}        tokenId   - Stellar asset contract address for the fee token.
+ * @param {string|null}   [source]  - Optional originating address for audit purposes.
  * @returns {Promise<string>} transaction hash
  */
-async function depositFee(feeAmount) {
+
+// SC-017: Mirror the contract-level MAX_DEPOSIT_AMOUNT ceiling here so that a
+// decimal-precision / unit mismatch in the caller is caught before it reaches
+// the network.  The on-chain check is the authoritative backstop; this guard
+// provides an early, descriptive error in the service layer.
+// 10_000_000_000_000 stroops = 1,000,000 USDC (7 decimal places).
+const MAX_DEPOSIT_AMOUNT_STROOPS = BigInt("10000000000000");
+
+async function depositFee(feeAmount, tokenId, source = null) {
   if (!CONTRACT_ID) {
     throw new Error("FEE_DISTRIBUTOR_CONTRACT_ID is not configured");
+  }
+  if (!tokenId) {
+    throw new Error("tokenId is required");
+  }
+
+  const feeAmountBigInt = BigInt(feeAmount);
+  if (feeAmountBigInt <= 0n) {
+    throw new Error("feeAmount must be positive");
+  }
+  if (feeAmountBigInt > MAX_DEPOSIT_AMOUNT_STROOPS) {
+    throw new Error(
+      `feeAmount ${feeAmount} exceeds maximum deposit limit of ${MAX_DEPOSIT_AMOUNT_STROOPS} stroops. ` +
+      "Check for a decimal-precision or unit mismatch in the caller."
+    );
   }
 
   const encryptedKey = process.env.SERVICE_ENCRYPTED_SECRET_KEY;
@@ -61,9 +85,14 @@ async function depositFee(feeAmount) {
   const account = await rpc.getAccount(depositor);
   const contract = new StellarSdk.Contract(CONTRACT_ID);
 
+  // Contract signature: deposit_fee(depositor, token, amount, source)
   const args = [
     StellarSdk.nativeToScVal(depositor, { type: "address" }),
-    StellarSdk.nativeToScVal(BigInt(feeAmount), { type: "i128" }),
+    StellarSdk.nativeToScVal(tokenId, { type: "address" }),
+    StellarSdk.nativeToScVal(feeAmountBigInt, { type: "i128" }),
+    source
+      ? StellarSdk.nativeToScVal(source, { type: "address" })
+      : StellarSdk.xdr.ScVal.scvVoid(),
   ];
 
   const tx = new StellarSdk.TransactionBuilder(account, {

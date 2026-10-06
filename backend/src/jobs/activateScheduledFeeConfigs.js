@@ -1,4 +1,5 @@
 const db = require('../db');
+const audit = require('../services/audit');
 
 async function activateScheduledFeeConfigs() {
   const dueResult = await db.query(
@@ -57,6 +58,20 @@ async function activateScheduledFeeConfigs() {
     await client.query('COMMIT');
     const { refreshCache } = require('../services/feeConfigService');
     await refreshCache();
+
+    // Audit log entry for each config that just went live, distinct from the
+    // 'fee_config_created' entry logged when it was originally scheduled.
+    for (const item of toActivate) {
+      await audit.auditLog(
+        { user: { userId: null, role: 'system' }, ip: null, headers: {} },
+        'fee_config_activated',
+        {
+          type: 'fee_config',
+          id: item.id,
+          newValue: { fee_type: item.fee_type, asset_code: item.asset_code },
+        }
+      );
+    }
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

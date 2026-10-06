@@ -1,5 +1,21 @@
 'use strict';
 
+/**
+ * OWNERSHIP (BE-039): this module owns ALL server-secret-keyed symmetric
+ * encryption — anything deriving its key from an env var
+ * (ENCRYPTION_KEY, WEBHOOK_SECRET_ENCRYPTION_KEY) rather than from a
+ * counterparty's public key. Currently: AES-256-GCM for webhook secrets and
+ * AES-256-CBC for Stellar private keys.
+ *
+ * It does NOT own asymmetric, per-recipient payload encryption (e.g. memo
+ * encryption keyed to a Stellar public key) — that lives in
+ * utils/encryption.js. The two modules are intentionally separate: this one
+ * has a hard dependency on server-held secrets and must never take a
+ * recipient-supplied key as input; utils/encryption.js must never read
+ * process.env directly. Keep new AES/HMAC helpers here, not in
+ * utils/encryption.js.
+ */
+
 const crypto = require('crypto');
 
 // ---------------------------------------------------------------------------

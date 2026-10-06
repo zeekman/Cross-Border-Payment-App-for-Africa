@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Send,
@@ -35,9 +35,11 @@ import { useTranslation } from 'react-i18next';
 import { usePullToRefresh } from '../hooks/usePullToRefresh';
 import PINSetupModal from '../components/PINSetupModal';
 import { usePushNotifications } from '../hooks/usePushNotifications';
-import { getQueueCount } from '../utils/offlineDB';
+import { getQueueCountForUser } from '../utils/offlineDB';
 
-const IS_TESTNET = process.env.REACT_APP_STELLAR_NETWORK !== 'mainnet';
+// FE-129: IS_TESTNET is now sourced from the shared network config module so
+// that Dashboard and every other Stellar-aware file agree on the same value.
+import { IS_TESTNET } from '../config/network';
 const MAX_WALLETS = 5;
 
 function BalanceDisplay({ balance }) {
@@ -69,6 +71,16 @@ export default function Dashboard() {
       setShowPINSetup(true);
     }
   }, [user]);
+
+  // Issue #996: guard against setState after unmount from timers/promises
+  // started in event handlers (not owned by a useEffect cleanup).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Issue #455: Push notification opt-in banner
   const { supported: pushSupported, subscribed: pushSubscribed, loading: pushLoading, subscribe: pushSubscribe } = usePushNotifications();
@@ -142,13 +154,16 @@ export default function Dashboard() {
       if (payment.to === wallet?.public_key) {
         toast.success(`Received ${payment.amount} ${payment.asset}`);
         setBalanceIncreased(true);
-        setTimeout(() => setBalanceIncreased(false), 2000);
+        setTimeout(() => {
+          if (mountedRef.current) setBalanceIncreased(false);
+        }, 2000);
         Promise.all([
           api.get('/wallet/list'),
           api.get('/payments/history'),
           api.get('/scheduled-payments').catch(() => ({ data: { payments: [] } })),
         ])
           .then(([walletsRes, txRes, scheduledRes]) => {
+            if (!mountedRef.current) return;
             setWallets(walletsRes.data.wallets);
             setTransactions(txRes.data.transactions.slice(0, 5));
             setScheduledPayments(
@@ -263,18 +278,20 @@ export default function Dashboard() {
   useEffect(() => {
     loadDashboard();
     if (!isOnline) {
-      getQueueCount()
+      getQueueCountForUser(user?.id)
         .then(setQueueCount)
         .catch(() => {});
     }
-  }, [loadDashboard, isOnline]);
+  }, [loadDashboard, isOnline, user?.id]);
 
   const copyAddress = async () => {
     if (!wallet?.public_key) return;
     try {
       await navigator.clipboard.writeText(wallet.public_key);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setTimeout(() => {
+        if (mountedRef.current) setCopied(false);
+      }, 2000);
     } catch {
       toast.error('Failed to copy address');
     }
@@ -1097,5 +1114,6 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+    </div>
   );
 }

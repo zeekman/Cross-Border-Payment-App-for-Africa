@@ -1,8 +1,9 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
 const authMiddleware = require('../middleware/auth');
+const { readLimiter } = require('../middleware/rateLimiter');
 const isAdmin = require('../middleware/isAdmin');
-const { getStats, awardReferralCreditHandler } = require('../controllers/referralController');
+const { getStats, getReferralDetails, awardReferralCreditHandler } = require('../controllers/referralController');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -11,6 +12,7 @@ const validate = (req, res, next) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger
@@ -25,6 +27,20 @@ router.use(authMiddleware);
  *         description: Referral code, count, and credit summary
  */
 router.get('/stats', getStats);
+
+/**
+ * @swagger
+ * /api/referrals/details:
+ *   get:
+ *     summary: Get list of referrals with their reward status
+ *     tags: [Referrals]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of referrals with reward status (pending, credited, failed, ineligible)
+ */
+router.get('/details', getReferralDetails);
 
 /**
  * @swagger

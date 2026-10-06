@@ -252,3 +252,82 @@ describe('checkDailyLimit (legacy)', () => {
     await expect(checkDailyLimit(WALLET, '100', 'XLM')).resolves.toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// BE-033: shadow/staging mode
+// ---------------------------------------------------------------------------
+describe('checkFraud — shadow mode (BE-033)', () => {
+  const shadowVelocityRule = [{
+    name: 'candidate_velocity', rule_type: 'velocity', mode: 'shadow',
+    parameters: { max_transactions: 5, window_minutes: 10 },
+  }];
+
+  test('a triggered shadow rule does NOT block the transaction', async () => {
+    mockRules(shadowVelocityRule);
+    db.query.mockResolvedValueOnce({ rows: [{ count: '10' }] }); // way over threshold
+    db.query.mockResolvedValue({ rows: [] }); // fraud_checks insert
+    const result = await checkFraud(WALLET, '100', 'USDC');
+    expect(result.blocked).toBe(false);
+  });
+
+  test('logs a shadow_blocked outcome with would_block=true and rule_mode=shadow', async () => {
+    mockRules(shadowVelocityRule);
+    db.query.mockResolvedValueOnce({ rows: [{ count: '10' }] });
+    db.query.mockResolvedValue({ rows: [] });
+    await checkFraud(WALLET, '100', 'USDC');
+
+    const insertCall = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO fraud_checks'));
+    expect(insertCall).toBeTruthy();
+    const [, params] = insertCall;
+    // [rule_name, rule_type, outcome, payment_id, wallet_address, metadata, rule_mode, would_block]
+    expect(params[2]).toBe('shadow_blocked');
+    expect(params[6]).toBe('shadow');
+    expect(params[7]).toBe(true);
+  });
+
+  test('an active rule still blocks as before (regression check)', async () => {
+    const activeRule = [{
+      name: 'active_velocity', rule_type: 'velocity', mode: 'active',
+      parameters: { max_transactions: 5, window_minutes: 10 },
+    }];
+    mockRules(activeRule);
+    db.query.mockResolvedValueOnce({ rows: [{ count: '10' }] });
+    db.query.mockResolvedValue({ rows: [] });
+    const result = await checkFraud(WALLET, '100', 'USDC');
+    expect(result.blocked).toBe(true);
+    expect(result.rule).toBe('active_velocity');
+  });
+
+  test('a shadow rule that does not trigger falls through to later active rules', async () => {
+    const rules = [
+      { name: 'shadow_amount', rule_type: 'amount', mode: 'shadow', parameters: { max_usd: 999999 } },
+      { name: 'active_amount', rule_type: 'amount', mode: 'active', parameters: { max_usd: 10 } },
+    ];
+    mockRules(rules);
+    db.query.mockResolvedValue({ rows: [] });
+    const result = await checkFraud(WALLET, '1000', 'USDC');
+    expect(result.blocked).toBe(true);
+    expect(result.rule).toBe('active_amount');
+  });
+});
+
+describe('getShadowRuleReport (BE-033)', () => {
+  test('aggregates would-block vs would-pass counts per shadow rule', async () => {
+    db.query.mockResolvedValueOnce({
+      rows: [
+        { rule_name: 'candidate_velocity', would_block_count: '3', would_pass_count: '17', total_evaluations: '20' },
+      ],
+    });
+    const { getShadowRuleReport } = fraudDetection;
+    const report = await getShadowRuleReport(7);
+    expect(report).toEqual([
+      {
+        rule_name: 'candidate_velocity',
+        would_block_count: 3,
+        would_pass_count: 17,
+        total_evaluations: 20,
+        would_block_rate: 0.15,
+      },
+    ]);
+  });
+});

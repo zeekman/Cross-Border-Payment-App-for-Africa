@@ -23,6 +23,21 @@ function verifyToken(secret, token) {
   });
 }
 
+/** Return the TOTP time-step counter matched by a code, or null when invalid. */
+function getTokenCounter(secret, token, at = Date.now()) {
+  const step = 30;
+  const currentCounter = Math.floor(at / 1000 / step);
+  const delta = speakeasy.totp.verifyDelta({
+    secret,
+    encoding: 'base32',
+    token,
+    time: Math.floor(at / 1000),
+    step,
+    window: 2
+  });
+  return delta ? currentCounter + delta.delta : null;
+}
+
 function generateBackupCodes(count = 10) {
   const codes = [];
   for (let i = 0; i < count; i++) {
@@ -49,6 +64,7 @@ async function verifyBackupCode(code, hash) {
 module.exports = {
   generateSecret,
   verifyToken,
+  getTokenCounter,
   generateBackupCodes,
   useBackupCode,
   hashBackupCode,

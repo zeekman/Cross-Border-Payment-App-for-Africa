@@ -68,13 +68,17 @@ export default function ReceiveMoney() {
     }
   }, [walletAddress]);
 
+  // FE-131: Only show a federation address when the backend explicitly provides one.
+  // Client-side derivation from the email local-part is removed: it produced
+  // fabricated addresses that weren't registered anywhere and leaked part of the
+  // user's email to anyone the QR card was shared with.
   useEffect(() => {
-    if (user?.email && walletAddress) {
-      const domain = process.env.REACT_APP_FEDERATION_DOMAIN || 'afripay.com';
-      const username = user.email.split('@')[0];
-      setFederationAddress(`${username}*${domain}`);
+    if (user?.federation_name) {
+      setFederationAddress(user.federation_name);
+    } else {
+      setFederationAddress('');
     }
-  }, [user, walletAddress]);
+  }, [user]);
 
   const paymentUri = (() => {
     if (!walletAddress) return '';
@@ -116,43 +120,79 @@ export default function ReceiveMoney() {
     toast.success('QR code downloaded as SVG');
   }, [user]);
 
+  // FE-132: Replaced document.write (HTML injection risk) with safe DOM APIs.
+  // User-controlled strings (name, address) are set via textContent so they are
+  // always treated as plain text — no escaping needed, no script execution possible.
   const handlePrint = useCallback(() => {
-    const printWindow = window.open('', '_blank');
+    const printWindow = window.open('', '_blank', 'noopener,noreferrer');
+    if (!printWindow) return;
+
     const name = user?.display_name || user?.full_name || 'AfriPay User';
     const displayAddress = federationAddress || walletAddress;
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>Print QR Code - AfriPay</title>
-          <style>
-            body { font-family: 'Segoe UI', Arial, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
-            .card { background: white; border-radius: 16px; padding: 32px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.1); max-width: 400px; }
-            .name { font-size: 20px; font-weight: 700; color: #1a1a2e; margin-bottom: 4px; }
-            .label { font-size: 12px; color: #888; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 1px; }
-            .qr-wrap { background: white; padding: 16px; border-radius: 12px; border: 2px solid #e0e0e0; display: inline-block; margin-bottom: 16px; }
-            .address { font-family: 'Courier New', monospace; font-size: 11px; color: #555; word-break: break-all; }
-            .warning { font-size: 10px; color: #aaa; margin-top: 16px; }
-            @media print {
-              body { background: white; }
-              .card { box-shadow: none; border: 1px solid #ddd; }
-            }
-          </style>
-        </head>
-        <body>
-          <div class="card">
-            <div class="name">${name}</div>
-            <div class="label">Scan to pay</div>
-            <div class="qr-wrap">
-              ${qrRef.current?.querySelector('svg')?.outerHTML || ''}
-            </div>
-            <div class="address">${displayAddress}</div>
-            <div class="warning">AfriPay — Cross-Border Payments</div>
-          </div>
-          <script>window.print();window.close();</script>
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
+
+    const doc = printWindow.document;
+
+    // Build the page structure entirely with DOM APIs.
+    doc.title = 'Print QR Code - AfriPay';
+
+    const style = doc.createElement('style');
+    style.textContent = [
+      'body{font-family:"Segoe UI",Arial,sans-serif;display:flex;justify-content:center;',
+      'align-items:center;min-height:100vh;margin:0;background:#f5f5f5;}',
+      '.card{background:white;border-radius:16px;padding:32px;text-align:center;',
+      'box-shadow:0 4px 24px rgba(0,0,0,.1);max-width:400px;}',
+      '.name{font-size:20px;font-weight:700;color:#1a1a2e;margin-bottom:4px;}',
+      '.label{font-size:12px;color:#888;margin-bottom:16px;text-transform:uppercase;letter-spacing:1px;}',
+      '.qr-wrap{background:white;padding:16px;border-radius:12px;border:2px solid #e0e0e0;',
+      'display:inline-block;margin-bottom:16px;}',
+      '.address{font-family:"Courier New",monospace;font-size:11px;color:#555;word-break:break-all;}',
+      '.footer{font-size:10px;color:#aaa;margin-top:16px;}',
+      '@media print{body{background:white;}.card{box-shadow:none;border:1px solid #ddd;}}',
+    ].join('');
+    doc.head.appendChild(style);
+
+    const card = doc.createElement('div');
+    card.className = 'card';
+
+    const nameEl = doc.createElement('div');
+    nameEl.className = 'name';
+    nameEl.textContent = name; // textContent — no HTML parsing, safe against injection
+    card.appendChild(nameEl);
+
+    const labelEl = doc.createElement('div');
+    labelEl.className = 'label';
+    labelEl.textContent = 'Scan to pay';
+    card.appendChild(labelEl);
+
+    const qrWrap = doc.createElement('div');
+    qrWrap.className = 'qr-wrap';
+
+    // Clone the SVG node from the live DOM and import it into the print window's
+    // document. importNode copies the SVG safely without any innerHTML assignment.
+    const liveSvg = qrRef.current?.querySelector('svg');
+    if (liveSvg) {
+      const importedSvg = doc.importNode(liveSvg, true /* deep */);
+      qrWrap.appendChild(importedSvg);
+    }
+    card.appendChild(qrWrap);
+
+    const addrEl = doc.createElement('div');
+    addrEl.className = 'address';
+    addrEl.textContent = displayAddress; // textContent — safe against injection
+    card.appendChild(addrEl);
+
+    const footerEl = doc.createElement('div');
+    footerEl.className = 'footer';
+    footerEl.textContent = 'AfriPay — Cross-Border Payments';
+    card.appendChild(footerEl);
+
+    doc.body.appendChild(card);
+
+    // Trigger print after a short tick to let the browser lay out the new document.
+    printWindow.setTimeout(() => {
+      printWindow.print();
+      printWindow.close();
+    }, 250);
   }, [user, walletAddress, federationAddress]);
 
   return (

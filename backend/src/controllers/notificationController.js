@@ -1,6 +1,6 @@
 const db = require('../db');
 const webpush = require('../services/webpush');
-const { startStreamForUser, stopStreamForUser } = require('../services/horizonWorker');
+const ledgerListener = require('../services/ledgerListener');
 const { persistAndBroadcast } = require('../services/notificationInbox');
 const logger = require('../utils/logger');
 
@@ -33,11 +33,11 @@ async function subscribe(req, res, next) {
 
     // Start Horizon stream for this user if not already running
     const walletResult = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1',
+      'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
       [req.user.userId],
     );
     if (walletResult.rows[0]) {
-      startStreamForUser(req.user.userId, walletResult.rows[0].public_key);
+      ledgerListener.addPushTarget(req.user.userId, walletResult.rows[0].public_key);
     }
 
     res.json({ message: 'Push subscription saved' });
@@ -53,11 +53,11 @@ async function subscribe(req, res, next) {
 async function unsubscribe(req, res, next) {
   try {
     const walletResult = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1',
+      'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
       [req.user.userId],
     );
     if (walletResult.rows[0]) {
-      stopStreamForUser(walletResult.rows[0].public_key);
+      ledgerListener.removePushTarget(walletResult.rows[0].public_key);
     }
 
     await db.query(
@@ -77,7 +77,7 @@ async function unsubscribe(req, res, next) {
  */
 async function sendPushToUser(userId, payload) {
   const { rows } = await db.query(
-    'SELECT id, push_subscription FROM users WHERE id = $1',
+    'SELECT id, push_subscription, push_subscription_active FROM users WHERE id = $1',
     [userId],
   );
   const row = rows[0];
@@ -92,12 +92,40 @@ async function sendPushToUser(userId, payload) {
 
   if (!row?.push_subscription) return;
 
+  // Subscription has been deactivated after repeated delivery failures —
+  // don't waste a send attempt until the user re-subscribes.
+  if (row.push_subscription_active === false) return;
+
+  // Failures (including permanent 410/404) are tracked and, if needed,
+  // deactivated inside webpush.sendNotification — nothing further to do here.
+  await webpush.sendNotification(row.push_subscription, JSON.stringify(payload), row.id, db).catch(() => {});
+}
+
+/**
+ * GET /api/notifications/subscription-health
+ * Lets the frontend (PushNotificationPrompt.jsx) know whether the user's
+ * push subscription has been deactivated after repeated delivery failures,
+ * so it can re-prompt the user to re-subscribe.
+ */
+async function getSubscriptionHealth(req, res, next) {
   try {
-    await webpush.sendNotification(row.push_subscription, JSON.stringify(payload), row.id, db);
+    const { rows } = await db.query(
+      `SELECT push_subscription IS NOT NULL AS has_subscription,
+              COALESCE(push_subscription_active, true) AS active,
+              COALESCE(push_failure_count, 0) AS failure_count
+         FROM users WHERE id = $1`,
+      [req.user.userId],
+    );
+    const row = rows[0] || {};
+    const hasSubscription = !!row.has_subscription;
+    res.json({
+      hasSubscription,
+      active: hasSubscription ? !!row.active : false,
+      failureCount: parseInt(row.failure_count, 10) || 0,
+      needsResubscribe: hasSubscription && row.active === false,
+    });
   } catch (err) {
-    if (err.statusCode === 410) {
-      await db.query('UPDATE users SET push_subscription = NULL WHERE id = $1', [userId]);
-    }
+    next(err);
   }
 }
 
@@ -114,4 +142,4 @@ async function getDeadLetterNotifications(req, res, next) {
   }
 }
 
-module.exports = { subscribe, unsubscribe, sendPushToUser, getDeadLetterNotifications };
+module.exports = { subscribe, unsubscribe, sendPushToUser, getDeadLetterNotifications, getSubscriptionHealth };

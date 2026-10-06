@@ -33,6 +33,7 @@ import {
 import { useAuth, tokenStore } from '../context/AuthContext';
 import { truncateAddress } from '../utils/currency';
 import api from '../utils/api';
+import { useConfirm } from '../context/ConfirmContext';
 import AvatarCrop from '../components/AvatarCrop';
 
 const LANGUAGES = [
@@ -44,6 +45,7 @@ const LANGUAGES = [
 ];
 
 export default function Profile() {
+  const confirm = useConfirm();
   const { user, logout, updateUser } = useAuth();
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
@@ -52,19 +54,28 @@ export default function Profile() {
   // Avatar upload state
   const fileInputRef = useRef(null);
   const [cropFile, setCropFile] = useState(null); // File selected for cropping
+  // Issue #1000: immediate inline error when the selected file fails the
+  // client-side size/type checks — no network round-trip needed.
+  const [avatarError, setAvatarError] = useState('');
 
   const handleAvatarClick = () => fileInputRef.current?.click();
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Client-side limits mirror the backend upload middleware
+    // (backend/src/routes/auth.js avatarUpload: 5 MB, image/(jpeg|png|webp))
+    // so invalid files fail fast before any bytes are uploaded.
     if (file.size > 5 * 1024 * 1024) {
+      setAvatarError('File too large. Maximum size is 5 MB.');
       toast.error('File too large. Maximum size is 5 MB.');
       return;
     }
-    if (!/^image\/(jpeg|jpg|png|webp)$/.test(file.type)) {
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) {
+      setAvatarError('Only JPEG, PNG, and WebP files are accepted.');
       toast.error('Only JPEG, PNG, and WebP files are accepted.');
       return;
     }
+    setAvatarError('');
     setCropFile(file);
     // Reset input so same file can be selected again
     e.target.value = '';
@@ -282,7 +293,7 @@ export default function Profile() {
   };
 
   const handleClearInflation = async () => {
-    if (!window.confirm('Clear the inflation destination from your account?')) return;
+    if (!(await confirm(t('confirm.clear_inflation', 'Clear the inflation destination from your account?'), { title: t('confirm.clear_inflation_title', 'Clear inflation destination'), confirmLabel: t('confirm.clear', 'Clear') }))) return;
     setClearingInflation(true);
     try {
       await api.post('/wallet/clear-inflation-destination');
@@ -296,7 +307,7 @@ export default function Profile() {
   };
 
   const handleRemoveSigner = async (signerKey) => {
-    if (!window.confirm(`Remove signer ${signerKey.slice(0, 8)}…?`)) return;
+    if (!(await confirm(t('confirm.remove_signer', 'Remove signer {{key}}…? It will no longer be able to sign for this account.', { key: signerKey.slice(0, 8) }), { title: t('confirm.remove_signer_title', 'Remove signer'), confirmLabel: t('confirm.remove', 'Remove') }))) return;
     setRemovingSignerKey(signerKey);
     try {
       await api.delete(`/wallet/signers/${signerKey}`);
@@ -384,7 +395,7 @@ export default function Profile() {
   };
 
   const handleRemoveTrustline = async (asset) => {
-    if (!window.confirm(`Remove ${asset} trustline? Your ${asset} balance must be zero.`)) return;
+    if (!(await confirm(t('confirm.remove_trustline', 'Remove {{asset}} trustline? Your {{asset}} balance must be zero.', { asset }), { title: t('confirm.remove_trustline_title', 'Remove trustline'), confirmLabel: t('confirm.remove', 'Remove') }))) return;
     try {
       await api.delete(`/wallet/trustline/${asset}`);
       setTrustlines((prev) => prev.filter((t) => t.asset !== asset));
@@ -410,9 +421,15 @@ export default function Profile() {
     navigate('/');
   };
 
-  const changeLanguage = (code) => {
+  const changeLanguage = async (code) => {
     i18n.changeLanguage(code);
     localStorage.setItem('afripay_lang', code);
+    try {
+      await api.patch('/auth/me', { preferred_language: code });
+    } catch {
+      // Non-critical: local preference is already applied; backend sync failure
+      // is silently ignored to avoid disrupting the language-switch UX.
+    }
   };
 
   const addContact = async (e) => {
@@ -490,9 +507,10 @@ export default function Profile() {
       return;
     }
     if (
-      !window.confirm(
-        'FINAL WARNING: This will permanently close your Stellar account and transfer all XLM to the destination. This cannot be undone. Continue?'
-      )
+      !(await confirm(
+        t('confirm.close_account', 'This will permanently close your Stellar account and transfer all XLM to the destination. This cannot be undone.'),
+        { title: t('confirm.close_account_title', 'Final warning'), confirmLabel: t('confirm.close_account_btn', 'Close account') }
+      ))
     )
       return;
     setCloseLoading(true);
@@ -549,6 +567,12 @@ export default function Profile() {
             <p className="text-gray-400 text-sm">{t('profile.member')}</p>
           </div>
         </div>
+
+        {avatarError && (
+          <p role="alert" className="text-xs text-red-400">
+            {avatarError}
+          </p>
+        )}
 
         <div className="space-y-3 pt-2 border-t border-gray-800">
           <div className="flex items-center gap-3 text-sm">

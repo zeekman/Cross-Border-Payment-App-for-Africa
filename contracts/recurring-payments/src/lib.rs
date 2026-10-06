@@ -131,6 +131,8 @@ pub struct RecipientUpdated {
     pub old_recipient: Address,
     pub new_recipient: Address,
     pub updated_by: Address,
+}
+
 /// Emitted when an execution window (plus grace period) passes without a
 /// successful payment. Also emitted when the caller detects a missed window
 /// by calling `execute_payment` after the grace period has expired.
@@ -294,6 +296,21 @@ impl RecurringPaymentsContract {
         id
     }
 
+    /// Pre-authorization semantics, replay/expiry rules, and schedule lifecycle:
+    ///
+    /// - **Authorization vs Schedule Lifetime**: Pre-authorization is tied strictly
+    ///   to the underlying `RecurringSchedule` identified by `schedule_id`. Cancelling the schedule
+    ///   via `cancel_recurring_payment` permanently revokes execution authority; any subsequent
+    ///   `execute_payment` calls will fail with `"schedule is not active"`. Pausing the schedule
+    ///   via `pause_recurring_payment` immediately halts payment execution with `"Schedule is paused"`.
+    ///   There is no separate authorization object that survives or outlives a cancelled or paused schedule.
+    /// - **Replay Protection**: Each payment execution checks timing (`now >= next_payment_at`)
+    ///   and advances `next_payment_at` monotonically by `interval`, preventing double execution
+    ///   or replay attacks within the same interval window.
+    /// - **Authorization Expiry**: Pre-authorization expires when `max_executions` is reached (if > 0),
+    ///   when `max_missed_executions` consecutive missed windows occur (which auto-cancels the schedule),
+    ///   or when the token allowance / approval granted off-chain by the sender expires or is revoked.
+    ///
     /// Deprecated alias for create_recurring_payment. Use create_recurring_payment instead.
     #[deprecated]
     pub fn authorize_recurring(
@@ -322,13 +339,19 @@ impl RecurringPaymentsContract {
     /// Execute a due payment for `schedule_id`.
     /// Anyone may call this (permissionless / incentivized execution).
     ///
-    /// Timing rules:
+    /// Timing rules and Missed-execution Accounting:
     /// - `now < next_payment_at`                          → panics "payment not yet due"
     /// - `now` in `[next_payment_at, next_payment_at + grace_period_secs]`
-    ///                                                    → payment executed normally
-    /// - `now > next_payment_at + grace_period_secs`      → miss recorded, PaymentMissed
-    ///   emitted, schedule auto-cancelled if threshold reached, then panics
-    ///   "Execution window and grace period have both passed"
+    ///                                                    → payment executed normally and resets `consecutive_misses` to 0
+    /// - `now > next_payment_at + grace_period_secs`      → miss recorded, `consecutive_misses` incremented by 1,
+    ///   `PaymentMissed` emitted, schedule state persisted, and function returns early.
+    ///
+    /// Consecutive Miss Threshold & Auto-Cancellation:
+    /// - When `consecutive_misses >= max_missed_executions`, the schedule is automatically cancelled
+    ///   (`status` set to `ScheduleStatus::Cancelled`).
+    /// - If `consecutive_misses < max_missed_executions`, the schedule's `next_payment_at` is skipped
+    ///   forward across elapsed intervals to prevent a deadlock, remaining `Active` until the next window.
+    /// - A subsequent successful execution before reaching `max_missed_executions` resets the consecutive miss counter to 0.
     pub fn execute_payment(env: Env, executor: Address, schedule_id: u64) {
         executor.require_auth();
 
@@ -387,7 +410,7 @@ impl RecurringPaymentsContract {
                 },
             );
 
-            panic!("Execution window and grace period have both passed");
+            return;
         }
 
         // ── Normal execution path ─────────────────────────────────────────────
@@ -632,6 +655,15 @@ impl RecurringPaymentsContract {
 
     /// Update the recipient address for a recurring schedule. Only the sender may update.
     /// The new recipient takes effect from the next scheduled execution.
+    ///
+    /// # Design & Consent Semantics:
+    /// - `update_recipient` is intended for sender-managed payment streams and legitimate
+    ///   operational updates (e.g. recipient's rotated operational wallet or bank withdrawal partner,
+    ///   communicated off-chain).
+    /// - To ensure transparency and avoid silent redirection without recipient awareness, this
+    ///   function emits the `RecipientUpdated` event containing both `old_recipient` and
+    ///   `new_recipient`. Off-chain listening infrastructure (e.g. notification pipelines and
+    ///   scheduled job daemons) should monitor `RecipientUpdated` to proactively notify both parties.
     pub fn update_recipient(env: Env, sender: Address, schedule_id: u64, new_recipient: Address) {
         sender.require_auth();
 
@@ -693,7 +725,11 @@ impl RecurringPaymentsContract {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
-    /// Returns paginated schedule IDs for a given sender. Limit capped at 50.
+    /// Returns paginated schedule IDs for a given sender.
+    ///
+    /// # Arguments
+    /// * `start` - 0-based offset into the sender's schedule list.
+    /// * `limit` - Maximum number of IDs to return (capped at 50 to prevent excessive gas usage).
     pub fn get_user_schedules(env: Env, sender: Address, start: u32, limit: u32) -> soroban_sdk::Vec<u64> {
         let cap = if limit > 50 { 50 } else { limit };
         let ids: soroban_sdk::Vec<u64> = env
@@ -703,10 +739,11 @@ impl RecurringPaymentsContract {
             .unwrap_or(soroban_sdk::Vec::new(&env));
         let mut result: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
         let len = ids.len();
+        let end = start.saturating_add(cap);
         let mut i = start;
-        while i < len && (i - start) < cap {
+        while i < len && i < end {
             result.push_back(ids.get(i).unwrap());
-            i += 1;
+            i = i.saturating_add(1);
         }
         result
     }
@@ -719,7 +756,11 @@ impl RecurringPaymentsContract {
             .expect("schedule not found")
     }
 
-    /// Returns paginated IDs of schedules with Active status. Limit capped at 50.
+    /// Returns paginated IDs of schedules with Active status.
+    ///
+    /// # Arguments
+    /// * `start` - 0-based offset among active schedules.
+    /// * `limit` - Maximum number of IDs to return (capped at 50 to prevent excessive gas usage).
     pub fn get_active_schedules(env: Env, start: u64, limit: u64) -> soroban_sdk::Vec<u64> {
         let cap = if limit > 50 { 50 } else { limit };
         let total: u64 = env
@@ -730,7 +771,8 @@ impl RecurringPaymentsContract {
         let mut result: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
         let mut scanned: u64 = 0;
         let mut id: u64 = 1;
-        while id <= total && scanned < start + cap {
+        let end = start.saturating_add(cap);
+        while id <= total && scanned < end {
             if let Some(s) = env
                 .storage()
                 .persistent()
@@ -740,10 +782,10 @@ impl RecurringPaymentsContract {
                     if scanned >= start {
                         result.push_back(id);
                     }
-                    scanned += 1;
+                    scanned = scanned.saturating_add(1);
                 }
             }
-            id += 1;
+            id = id.saturating_add(1);
         }
         result
     }
@@ -754,7 +796,7 @@ impl RecurringPaymentsContract {
             .persistent()
             .get(&DataKey::Counter)
             .unwrap_or(0);
-        let next = current + 1;
+        let next = current.checked_add(1).expect("Schedule counter overflow");
         env.storage()
             .persistent()
             .set(&DataKey::Counter, &next);

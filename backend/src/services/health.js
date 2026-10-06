@@ -1,8 +1,10 @@
 const db = require('../db');
 const { withTimeout } = require('../utils/withTimeout');
 const stellar = require('./stellar');
+const { getAnchorHealth } = require('./anchor');
 const { getClient: getRedisClient } = require('../utils/cache');
 const logger = require('../utils/logger');
+const { getRateLimiterStatus } = require('../middleware/rateLimiter');
 
 const horizonUrl = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
 
@@ -72,6 +74,14 @@ function checkLedgerListener() {
   };
 }
 
+// Reports whether each rate limiter is on its shared Redis store or has
+// fallen back to per-process in-memory limiting (see issue #952 / BE-005).
+function checkRateLimiter() {
+  const backends = getRateLimiterStatus();
+  const degraded = Object.values(backends).some((backend) => backend !== 'redis');
+  return { status: degraded ? 'degraded' : 'healthy', backends };
+}
+
 async function checkShallowDatabase() {
   try {
     await withTimeout(db.query('SELECT 1'));
@@ -92,6 +102,7 @@ async function runHealthChecks() {
 
   const ok = dbOk && stellarOk;
   const poolStats = db.getPoolStats();
+  const anchor = getAnchorHealth();
 
   return {
     status: ok ? 'ok' : 'degraded',
@@ -102,6 +113,10 @@ async function runHealthChecks() {
       total: poolStats.total,
       idle: poolStats.idle,
       waiting: poolStats.waiting,
+    },
+    anchor: {
+      status: anchor.circuitOpen ? 'down' : 'ok',
+      consecutiveFailures: anchor.consecutiveFailures,
     },
   };
 }
@@ -118,9 +133,20 @@ async function runDeepHealthChecks() {
     checkRedis(),
   ]);
   const ledger_listener = checkLedgerListener();
+  const rate_limiter = checkRateLimiter();
+
+  // BE-036: surface which Horizon endpoint (primary/fallback) is currently
+  // active and how long the current fallback activation has lasted, so
+  // operators can see it directly in the deep health check output.
+  const horizonEndpoint = stellar.getHorizonEndpointStatus();
+  horizon.endpoint = horizonEndpoint;
 
   const criticalFailed = database.status === 'unhealthy' || redis.status === 'unhealthy';
-  const nonCriticalFailed = horizon.status === 'unhealthy' || ledger_listener.status === 'degraded';
+  const nonCriticalFailed =
+    horizon.status === 'unhealthy' ||
+    ledger_listener.status === 'degraded' ||
+    rate_limiter.status === 'degraded' ||
+    horizonEndpoint.alertExceeded;
 
   let status;
   if (criticalFailed) status = 'unhealthy';
@@ -129,7 +155,7 @@ async function runDeepHealthChecks() {
 
   return {
     status,
-    components: { database, horizon, redis, ledger_listener },
+    components: { database, horizon, redis, ledger_listener, rate_limiter },
     timestamp: new Date().toISOString(),
     version: process.env.npm_package_version || '1.0.0',
   };

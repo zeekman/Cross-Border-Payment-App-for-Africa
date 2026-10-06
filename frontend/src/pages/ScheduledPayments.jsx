@@ -4,11 +4,13 @@ import { ArrowLeft, Plus, Trash2, List, Calendar } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import { useConfirm } from '../context/ConfirmContext';
 import { CURRENCIES } from '../utils/currency';
 import ScheduledPaymentsCalendar from '../components/ScheduledPaymentsCalendar';
 import { validateStellarAddress } from '../utils/validation';
 
 export default function ScheduledPayments() {
+  const confirm = useConfirm();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const [payments, setPayments] = useState([]);
@@ -25,7 +27,7 @@ export default function ScheduledPayments() {
 
   useEffect(() => {
     fetchPayments();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- load once on mount
 
   const fetchPayments = async () => {
     try {
@@ -86,7 +88,7 @@ export default function ScheduledPayments() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm(t('scheduled.confirm_delete') || 'Delete this scheduled payment?')) return;
+    if (!(await confirm(t('scheduled.confirm_delete', 'Delete this scheduled payment? It will no longer run.'), { title: t('confirm.delete_scheduled_title', 'Delete scheduled payment'), confirmLabel: t('confirm.delete', 'Delete') }))) return;
     try {
       await api.delete(`/scheduled-payments/${id}`);
       toast.success(t('scheduled.deleted') || 'Deleted');

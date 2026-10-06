@@ -11,6 +11,7 @@ soroban-sdk = "20.5.0"
 
 [dev-dependencies]
 soroban-sdk = { version = "20.5.0", features = ["testutils"] }
+dispute-resolution-contract = { path = "../dispute-resolution" }
 
 [profile.release]
 opt-level = "z"

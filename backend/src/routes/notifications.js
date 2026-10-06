@@ -1,9 +1,11 @@
 const router = require('express').Router();
 const authMiddleware = require('../middleware/auth');
-const { subscribe, unsubscribe } = require('../controllers/notificationController');
+const { readLimiter } = require('../middleware/rateLimiter');
+const { subscribe, unsubscribe, getSubscriptionHealth } = require('../controllers/notificationController');
 const { listNotifications, markAsRead, markAllAsRead, getUnreadCount } = require('../controllers/notificationInboxController');
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger
@@ -31,6 +33,33 @@ router.use(authMiddleware);
  *         description: Invalid push subscription
  */
 router.post('/subscribe', subscribe);
+
+/**
+ * @swagger
+ * /api/notifications/subscription-health:
+ *   get:
+ *     summary: Check whether the user's push subscription is still active
+ *     tags: [Notifications]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Subscription health status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 hasSubscription:
+ *                   type: boolean
+ *                 active:
+ *                   type: boolean
+ *                 failureCount:
+ *                   type: integer
+ *                 needsResubscribe:
+ *                   type: boolean
+ */
+router.get('/subscription-health', getSubscriptionHealth);
 
 /**
  * @swagger

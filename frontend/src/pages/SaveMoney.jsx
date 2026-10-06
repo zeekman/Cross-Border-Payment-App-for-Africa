@@ -38,7 +38,7 @@ function VaultCountdown({ unlockTimestamp, balance }) {
       setSecs(secondsUntil(unlockTimestamp));
     }, 1000);
     return () => clearInterval(id);
-  }, [unlockTimestamp]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [unlockTimestamp]); // eslint-disable-line react-hooks/exhaustive-deps -- restart the countdown only when the unlock time changes
 
   const unlocked = secs <= 0;
   const penalty = (parseFloat(balance) * 0.1).toFixed(7);

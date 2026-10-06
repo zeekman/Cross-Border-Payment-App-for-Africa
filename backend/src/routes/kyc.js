@@ -2,7 +2,9 @@ const router = require("express").Router();
 const rateLimit = require("express-rate-limit");
 const { body, validationResult } = require("express-validator");
 const authMiddleware = require("../middleware/auth");
+const { readLimiter } = require("../middleware/rateLimiter");
 const kycUpload = require("../middleware/kycUpload");
+const scanUpload = require("../middleware/scanUpload");
 const { submitKYC, getKYCStatus } = require("../controllers/kycController");
 
 const validate = (req, res, next) => {
@@ -25,6 +27,7 @@ const kycSubmissionLimiter = rateLimit({
 });
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 router.get("/status", getKYCStatus);
 
@@ -32,6 +35,7 @@ router.post(
   "/submit",
   kycSubmissionLimiter,
   kycUpload,
+  scanUpload,
   [
     body("id_type").notEmpty().withMessage("ID type is required"),
     body("id_number").notEmpty().withMessage("ID number is required"),

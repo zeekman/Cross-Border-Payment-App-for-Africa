@@ -1,7 +1,7 @@
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');
 const auth = require('../middleware/auth');
-const { create, list, withdraw } = require('../controllers/savingsController');
+const { create, list, withdraw, getWithdrawQuote } = require('../controllers/savingsController');
 
 const router = express.Router();
 
@@ -56,6 +56,37 @@ router.post(
 );
 
 router.get('/', list);
+
+/**
+ * @swagger
+ * /api/savings/{id}/withdraw-quote:
+ *   get:
+ *     summary: Get the exact early-withdrawal penalty for a vault before confirming withdrawal
+ *     tags: [Savings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Withdrawal quote
+ *       404:
+ *         description: Vault not found
+ */
+router.get(
+  '/:id/withdraw-quote',
+  [
+    param('id').isUUID().withMessage('Invalid vault ID'),
+  ],
+  validate,
+  getWithdrawQuote
+);
+
 router.post(
   '/:id/withdraw',
   [

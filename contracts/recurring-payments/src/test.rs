@@ -644,3 +644,255 @@ fn test_per_sender_limit_enforcement() {
     // 501st must panic
     client.create_recurring_payment(&sender, &recipient, &token_id, &100_0000000, &86400, &0, &3600, &3);
 }
+
+// ── SC-031: Pagination Bounds & Overflow Guard Tests ─────────────────────────
+
+#[test]
+fn test_pagination_extreme_bounds_get_user_schedules() {
+    let (env, contract_id, token_id, sender, recipient, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    client.create_recurring_payment(&sender, &recipient, &token_id, &100_0000000, &86400, &0, &3600, &3);
+
+    // Test extreme start values (no overflow panic, returns empty vec)
+    let res1 = client.get_user_schedules(&sender, &u32::MAX, &50);
+    assert_eq!(res1.len(), 0);
+
+    // Test extreme limit values (clamped to 50 max, does not panic)
+    let res2 = client.get_user_schedules(&sender, &0, &u32::MAX);
+    assert_eq!(res2.len(), 1);
+
+    // Test start + limit overflow scenario
+    let res3 = client.get_user_schedules(&sender, &(u32::MAX - 10), &u32::MAX);
+    assert_eq!(res3.len(), 0);
+}
+
+#[test]
+fn test_pagination_extreme_bounds_get_active_schedules() {
+    let (env, contract_id, token_id, sender, recipient, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    client.create_recurring_payment(&sender, &recipient, &token_id, &100_0000000, &86400, &0, &3600, &3);
+
+    // Test extreme start values (no overflow panic, returns empty vec)
+    let res1 = client.get_active_schedules(&u64::MAX, &50);
+    assert_eq!(res1.len(), 0);
+
+    // Test extreme limit values (clamped to 50 max, does not panic)
+    let res2 = client.get_active_schedules(&0, &u64::MAX);
+    assert_eq!(res2.len(), 1);
+
+    // Test start + limit overflow scenario
+    let res3 = client.get_active_schedules(&(u64::MAX - 10), &u64::MAX);
+    assert_eq!(res3.len(), 0);
+}
+
+// ── SC-030: Circuit Breaker / Cadence Enforcement Against Compromised Executor ──
+
+#[test]
+#[should_panic(expected = "payment not yet due")]
+fn test_execute_payment_immediate_succession_rejected() {
+    let (env, contract_id, token_id, sender, recipient, executor, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    let interval = 86400u64;
+    let id = client.create_recurring_payment(
+        &sender,
+        &recipient,
+        &token_id,
+        &100_0000000,
+        &interval,
+        &0,
+        &3600,
+        &3,
+    );
+
+    // Advance to due time
+    advance_time(&env, interval);
+
+    // First execution succeeds
+    client.execute_payment(&executor, &id);
+
+    // Immediate second execution must panic with "payment not yet due"
+    client.execute_payment(&executor, &id);
+}
+
+#[test]
+fn test_compromised_executor_rapid_calls_cannot_drain_funds() {
+    let (env, contract_id, token_id, sender, recipient, executor, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    let initial_balance = 10_000_0000000i128;
+    let payment_amount = 100_0000000i128;
+    let interval = 86400u64;
+
+    let id = client.create_recurring_payment(
+        &sender,
+        &recipient,
+        &token_id,
+        &payment_amount,
+        &interval,
+        &0,
+        &3600,
+        &3,
+    );
+
+    // Advance to first payment due date
+    advance_time(&env, interval);
+
+    // Executor executes the valid payment
+    client.execute_payment(&executor, &id);
+    assert_eq!(token_balance(&env, &token_id, &recipient), payment_amount);
+    assert_eq!(token_balance(&env, &token_id, &sender), initial_balance - payment_amount);
+
+    // Simulated rogue/compromised executor attempts rapid repeated calls in a loop
+    for _ in 0..20 {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.execute_payment(&executor, &id);
+        }));
+        assert!(result.is_err(), "rapid repeated call must be rejected");
+    }
+
+    // Total funds moved must still strictly equal exactly 1 payment amount
+    assert_eq!(token_balance(&env, &token_id, &recipient), payment_amount);
+    assert_eq!(token_balance(&env, &token_id, &sender), initial_balance - payment_amount);
+
+    // Advance halfway through interval (12 hours) — rogue calls must still fail
+    advance_time(&env, 43200);
+    for _ in 0..10 {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.execute_payment(&executor, &id);
+        }));
+        assert!(result.is_err(), "call before interval elapsed must be rejected");
+    }
+    assert_eq!(token_balance(&env, &token_id, &recipient), payment_amount);
+
+    // Advance remaining 12 hours (full interval elapsed) — next execution now succeeds
+    advance_time(&env, 43200);
+    client.execute_payment(&executor, &id);
+    assert_eq!(token_balance(&env, &token_id, &recipient), payment_amount * 2);
+    assert_eq!(token_balance(&env, &token_id, &sender), initial_balance - payment_amount * 2);
+// ── SC-029: Pre-authorization semantics, replay/expiry tests ─────────────────
+
+#[test]
+#[should_panic(expected = "schedule is not active")]
+fn test_authorize_then_cancel_schedule_fails_execution() {
+    let (env, contract_id, _, sender, recipient, executor, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let id = client.authorize_recurring(&sender, &recipient, &100_0000000, &86400);
+
+    // Cancel the schedule
+    client.cancel_recurring_payment(&sender, &id);
+
+    // Attempting to execute must fail because cancellation revokes authorization
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+}
+
+#[test]
+#[should_panic(expected = "schedule is not active")]
+fn test_authorization_expiry_when_max_executions_reached() {
+    let (env, contract_id, token_id, sender, recipient, executor, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    // 1 execution max
+    let id = client.create_recurring_payment(
+        &sender, &recipient, &token_id, &100_0000000, &86400, &1, &3600, &3,
+    );
+
+    // Execute first (and only) allowed execution
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+
+    // Next execution should fail as authorization has expired
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+}
+
+// ── SC-028: RecipientUpdated event transparency and consent tests ─────────────
+
+#[test]
+fn test_update_recipient_emits_event_with_old_and_new_addresses() {
+    let (env, contract_id, _, sender, old_recipient, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let id = client.authorize_recurring(&sender, &old_recipient, &100_0000000, &86400);
+
+    let new_recipient = Address::generate(&env);
+    client.update_recipient(&sender, &id, &new_recipient);
+
+    // Verify recipient has been updated in schedule
+    let schedule = client.get_schedule(&id);
+    assert_eq!(schedule.recipient, new_recipient);
+
+    // Verify event publication with both old and new addresses for notification
+    let events = env.events().all();
+    let mut found_event = false;
+    for i in 0..events.len() {
+        let (contract, topics, data) = events.get(i).unwrap();
+        if contract == contract_id && topics.len() > 0 {
+            if let Ok(sym) = soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()) {
+                if sym == soroban_sdk::Symbol::new(&env, "RecipientUpdated") {
+                    if let Ok(event) = RecipientUpdated::try_from_val(&env, &data) {
+                        assert_eq!(event.schedule_id, id);
+                        assert_eq!(event.old_recipient, old_recipient);
+                        assert_eq!(event.new_recipient, new_recipient);
+                        assert_eq!(event.updated_by, sender);
+                        found_event = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(found_event, "RecipientUpdated event with old and new recipient was not emitted");
+}
+
+// ── SC-027: Consecutive-miss and execution accounting tests ───────────────────
+
+#[test]
+fn test_consecutive_misses_mix_with_successful_execution_and_counter_accuracy() {
+    let (env, contract_id, token_id, sender, recipient, executor, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let amount = 100_0000000i128;
+    let grace = 3_600u64;
+    let max_missed = 3u64;
+    let interval = 86_400u64;
+    let id = client.create_recurring_payment(
+        &sender, &recipient, &token_id, &amount, &interval, &5, &grace, &max_missed,
+    );
+
+    assert_eq!(client.get_remaining_executions(&id), Some(5));
+    assert_eq!(client.get_missed_executions(&id), 0);
+
+    // Miss 1
+    advance_time(&env, interval + grace + 1);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.execute_payment(&executor, &id);
+    }));
+    assert_eq!(client.get_missed_executions(&id), 1);
+    assert_eq!(client.get_remaining_executions(&id), Some(5));
+
+    // Miss 2
+    advance_time(&env, interval + grace + 1);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.execute_payment(&executor, &id);
+    }));
+    assert_eq!(client.get_missed_executions(&id), 2);
+    assert_eq!(client.get_remaining_executions(&id), Some(5));
+
+    // Now execute successfully in the next window
+    advance_time(&env, interval);
+    client.execute_payment(&executor, &id);
+
+    // Successful execution must reset consecutive_misses to 0 and reduce remaining executions
+    assert_eq!(client.get_missed_executions(&id), 0);
+    assert_eq!(client.get_remaining_executions(&id), Some(4));
+    assert_eq!(client.get_schedule(&id).status, ScheduleStatus::Active);
+
+    // Miss 1 again after reset
+    advance_time(&env, interval + grace + 1);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.execute_payment(&executor, &id);
+    }));
+    assert_eq!(client.get_missed_executions(&id), 1);
+    assert_eq!(client.get_remaining_executions(&id), Some(4));
+}
+

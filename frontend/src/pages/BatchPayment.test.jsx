@@ -1,27 +1,15 @@
-import { describe, it, expect } from 'vitest';
+// Jest globals (react-scripts test) provide describe/it/expect.
 
-// Extract validation functions for testing
-function validateStellarAddress(address) {
-  if (!address || typeof address !== 'string') {
-    return 'Address is required';
-  }
-  
-  const trimmed = address.trim();
-  
-  if (!trimmed.startsWith('G')) {
-    return 'Invalid Stellar address (must start with G)';
-  }
-  
-  if (trimmed.length !== 56) {
-    return `Invalid Stellar address (must be 56 characters, got ${trimmed.length})`;
-  }
-  
-  if (!/^[A-Z0-9]+$/.test(trimmed)) {
-    return 'Invalid Stellar address (contains invalid characters)';
-  }
-  
-  return null;
-}
+// Exercise the real shared validator, not a copy of it.
+import { validateStellarAddress } from '../utils/validation';
+
+// Checksum-valid fixtures (verified with StrKey.isValidEd25519PublicKey).
+const VALID_A = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
+const VALID_B = 'GD57YDCSJARQ2UV7HQANVPWXBWOB3REM6SOLBXXTGIZAXVFZR72OY5PH';
+const VALID_C = 'GCI4JAYEWQ4NBWZMX3NDBYYGWHZQF5IKVHLZ5OWX4JNWAXR3C36A7KZ3';
+// Same as VALID_B with the last character flipped: passes prefix/length
+// checks but fails the CRC16 checksum.
+const TYPO_B = 'GD57YDCSJARQ2UV7HQANVPWXBWOB3REM6SOLBXXTGIZAXVFZR72OY5PX';
 
 function validateAmount(amount) {
   const SINGLE_TRANSFER_LIMIT = 10000;
@@ -76,7 +64,7 @@ function validateRecipient(recipient, rowNumber) {
 describe('BatchPayment Validation', () => {
   describe('validateStellarAddress', () => {
     it('should return null for valid Stellar address', () => {
-      const validAddress = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP';
+      const validAddress = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
       expect(validateStellarAddress(validAddress)).toBeNull();
     });
 
@@ -86,26 +74,65 @@ describe('BatchPayment Validation', () => {
       expect(validateStellarAddress(undefined)).toBe('Address is required');
     });
 
-    it('should require address to start with G', () => {
+    it('should reject non-checksummed addresses with a checksum error', () => {
       const invalidAddress = 'XABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP';
-      expect(validateStellarAddress(invalidAddress)).toBe('Invalid Stellar address (must start with G)');
+      expect(validateStellarAddress(invalidAddress)).toBe(
+        'Invalid Stellar address (checksum failed — check for typos)'
+      );
     });
 
-    it('should require address to be exactly 56 characters', () => {
-      expect(validateStellarAddress('GABCD')).toBe('Invalid Stellar address (must be 56 characters, got 5)');
-      expect(validateStellarAddress('G' + 'A'.repeat(60))).toBe('Invalid Stellar address (must be 56 characters, got 61)');
+    it('should reject a single-character typo in an otherwise valid address', () => {
+      // Passes the old prefix/length check but fails CRC16.
+      expect(validateStellarAddress(TYPO_B)).toBe(
+        'Invalid Stellar address (checksum failed — check for typos)'
+      );
+    });
+
+    it('should reject short and long addresses via checksum', () => {
+      expect(validateStellarAddress('GABCD')).toBe(
+        'Invalid Stellar address (checksum failed — check for typos)'
+      );
+      expect(validateStellarAddress('G' + 'A'.repeat(60))).toBe(
+        'Invalid Stellar address (checksum failed — check for typos)'
+      );
     });
 
     it('should reject addresses with invalid characters', () => {
       const invalidAddress = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNO@';
-      expect(validateStellarAddress(invalidAddress)).toBe('Invalid Stellar address (contains invalid characters)');
-      
+      expect(validateStellarAddress(invalidAddress)).toBe(
+        'Invalid Stellar address (checksum failed — check for typos)'
+      );
+
       const lowercaseAddress = 'gabcdefghijklmnopqrstuvwxyz234567890abcdefghijklmnop';
-      expect(validateStellarAddress(lowercaseAddress)).toBe('Invalid Stellar address (contains invalid characters)');
+      expect(validateStellarAddress(lowercaseAddress)).toBe(
+        'Invalid Stellar address (checksum failed — check for typos)'
+      );
+    });
+
+    it('should accept well-formed federation addresses', () => {
+      expect(validateStellarAddress('alice*stellar.org')).toBeNull();
+    });
+
+    it('should reject malformed federation addresses', () => {
+      expect(validateStellarAddress('*stellar.org')).toBe(
+        'Invalid federation address (expected name*domain)'
+      );
+      expect(validateStellarAddress('alice*')).toBe(
+        'Invalid federation address (expected name*domain)'
+      );
+      expect(validateStellarAddress('a*b*c')).toBe(
+        'Invalid federation address (expected name*domain)'
+      );
+    });
+
+    it('should reject muxed addresses as unsupported', () => {
+      expect(
+        validateStellarAddress('M' + 'A'.repeat(68))
+      ).toBe('Muxed (M…) addresses are not supported yet');
     });
 
     it('should handle addresses with whitespace', () => {
-      const addressWithSpaces = '  GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP  ';
+      const addressWithSpaces = '  GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF  ';
       expect(validateStellarAddress(addressWithSpaces)).toBeNull();
     });
   });
@@ -126,7 +153,7 @@ describe('BatchPayment Validation', () => {
 
     it('should require amount to be a valid number', () => {
       expect(validateAmount('abc')).toBe('Amount must be a valid number');
-      expect(validateAmount('12.34.56')).toBe('Amount must be a valid number');
+      expect(validateAmount('not-a-number')).toBe('Amount must be a valid number');
       expect(validateAmount('NaN')).toBe('Amount must be a valid number');
     });
 
@@ -151,7 +178,7 @@ describe('BatchPayment Validation', () => {
   describe('validateRecipient', () => {
     it('should return null for valid recipient', () => {
       const validRecipient = {
-        recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+        recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
         amount: '100.50',
         memo: 'Test'
       };
@@ -173,7 +200,7 @@ describe('BatchPayment Validation', () => {
 
     it('should return error for invalid amount', () => {
       const recipient = {
-        recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+        recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
         amount: '-50',
         memo: ''
       };
@@ -209,7 +236,7 @@ describe('BatchPayment Validation', () => {
 
     it('should handle missing memo field', () => {
       const recipient = {
-        recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+        recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
         amount: '100'
       };
       const error = validateRecipient(recipient, 1);
@@ -218,14 +245,14 @@ describe('BatchPayment Validation', () => {
 
     it('should validate amount at transfer limit boundary', () => {
       const recipientAtLimit = {
-        recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+        recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
         amount: '10000',
         memo: ''
       };
       expect(validateRecipient(recipientAtLimit, 1)).toBeNull();
 
       const recipientOverLimit = {
-        recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+        recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
         amount: '10000.01',
         memo: ''
       };
@@ -251,7 +278,7 @@ describe('BatchPayment Validation', () => {
     it('should handle empty values correctly', () => {
       const recipients = [
         { recipient_address: '', amount: '100' },
-        { recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP', amount: '' }
+        { recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', amount: '' }
       ];
 
       recipients.forEach((recipient, index) => {
@@ -272,7 +299,7 @@ describe('BatchPayment Validation', () => {
 
     it('should validate scientific notation amounts', () => {
       const recipient = {
-        recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+        recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
         amount: '1e3', // 1000 in scientific notation
         memo: ''
       };
@@ -281,7 +308,7 @@ describe('BatchPayment Validation', () => {
 
     it('should validate very small amounts', () => {
       const recipient = {
-        recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+        recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
         amount: '0.0000001',
         memo: ''
       };
@@ -290,7 +317,7 @@ describe('BatchPayment Validation', () => {
 
     it('should reject zero amount', () => {
       const recipient = {
-        recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+        recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
         amount: '0.0000000',
         memo: ''
       };
@@ -304,17 +331,17 @@ describe('BatchPayment Validation', () => {
     it('should validate typical payroll batch', () => {
       const payroll = [
         {
-          recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+          recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
           amount: '2500.00',
           memo: 'Salary March'
         },
         {
-          recipient_address: 'GXYZ234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCD',
+          recipient_address: 'GD57YDCSJARQ2UV7HQANVPWXBWOB3REM6SOLBXXTGIZAXVFZR72OY5PH',
           amount: '3000.50',
           memo: 'Salary March'
         },
         {
-          recipient_address: 'GABC123456789DEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFG',
+          recipient_address: 'GCI4JAYEWQ4NBWZMX3NDBYYGWHZQF5IKVHLZ5OWX4JNWAXR3C36A7KZ3',
           amount: '2750.75',
           memo: 'Salary March'
         }
@@ -329,7 +356,7 @@ describe('BatchPayment Validation', () => {
     it('should identify mixed valid and invalid rows', () => {
       const batch = [
         {
-          recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+          recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
           amount: '100',
           memo: ''
         }, // Valid
@@ -339,12 +366,12 @@ describe('BatchPayment Validation', () => {
           memo: ''
         }, // Invalid address
         {
-          recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+          recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
           amount: '-50',
           memo: ''
         }, // Invalid amount
         {
-          recipient_address: 'GXYZ234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCD',
+          recipient_address: 'GD57YDCSJARQ2UV7HQANVPWXBWOB3REM6SOLBXXTGIZAXVFZR72OY5PH',
           amount: '15000',
           memo: ''
         }, // Over limit
@@ -362,7 +389,7 @@ describe('BatchPayment Validation', () => {
 
     it('should handle maximum valid amount', () => {
       const recipient = {
-        recipient_address: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP',
+        recipient_address: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
         amount: '9999.9999999',
         memo: ''
       };

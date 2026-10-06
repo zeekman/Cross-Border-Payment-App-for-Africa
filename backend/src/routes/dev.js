@@ -16,7 +16,7 @@ router.use((req, res, next) => {
 router.post('/fund-wallet', authMiddleware, async (req, res, next) => {
   try {
     const result = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1',
+      'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
       [req.user.userId]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
@@ -78,7 +78,7 @@ router.post('/handle-testnet-reset', async (req, res, next) => {
 router.post('/fix-sequence', authMiddleware, async (req, res, next) => {
   try {
     const result = await db.query(
-      'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
+      'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
       [req.user.userId]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Wallet not found' });

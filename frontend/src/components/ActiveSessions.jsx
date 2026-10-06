@@ -18,6 +18,9 @@ export function ActiveSessions({ currentSessionId }) {
   const [error, setError] = useState(null);
   const [revoking, setRevoking] = useState(null);
   const [confirmAll, setConfirmAll] = useState(false);
+  // 'others' = revoke all other sessions (keep current); 'all' = revoke everything
+  // including the current session (user will be signed out of this device too).
+  const [confirmAllScope, setConfirmAllScope] = useState('others');
   const [confirmSingle, setConfirmSingle] = useState(null);
 
   const loadSessions = useCallback(async () => {
@@ -53,8 +56,15 @@ export function ActiveSessions({ currentSessionId }) {
   const handleRevokeAll = async () => {
     setRevoking('all');
     try {
-      await api.delete('/auth/sessions?except=current');
-      setSessions((prev) => prev.filter((s) => s.id === currentSessionId));
+      if (confirmAllScope === 'others') {
+        await api.delete('/auth/sessions?except=current');
+        setSessions((prev) => prev.filter((s) => s.id === currentSessionId));
+      } else {
+        // Revoke all sessions including the current one.
+        await api.delete('/auth/sessions');
+        // The parent page / AuthContext should handle redirect to /login.
+        setSessions([]);
+      }
     } catch {
       setError('Failed to revoke sessions.');
     } finally {
@@ -76,10 +86,11 @@ export function ActiveSessions({ currentSessionId }) {
         <h3 className="text-sm font-semibold text-gray-300">Active Sessions</h3>
         {sessions.length > 1 && (
           <button
-            onClick={() => setConfirmAll(true)}
+            onClick={() => { setConfirmAllScope('others'); setConfirmAll(true); }}
             disabled={revoking === 'all'}
             className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50 transition-colors"
             aria-label="Revoke all other sessions"
+            data-testid="revoke-all-button"
           >
             {revoking === 'all' ? 'Revoking…' : 'Revoke all other sessions'}
           </button>
@@ -131,18 +142,42 @@ export function ActiveSessions({ currentSessionId }) {
           ))}
         </ul>
       )}
-    </section>
 
       <ConfirmModal
         isOpen={confirmAll}
         onClose={() => setConfirmAll(false)}
         onConfirm={handleRevokeAll}
-        title="Revoke all other sessions?"
-        message="This will immediately invalidate all other active sessions. You will remain logged in on this device. Any ongoing operations on those sessions will be interrupted."
-        confirmLabel="Revoke All"
+        title={
+          confirmAllScope === 'others'
+            ? 'Revoke all other sessions?'
+            : 'Revoke ALL sessions including this device?'
+        }
+        message={
+          confirmAllScope === 'others'
+            ? 'This will immediately invalidate all other active sessions. You will remain logged in on this device. Any ongoing operations on those sessions will be interrupted.'
+            : '⚠️ This will sign you out of every device, including the one you are currently using. Any unsaved work on this device will be lost.'
+        }
+        confirmLabel={
+          confirmAllScope === 'others'
+            ? 'Revoke All Other Sessions'
+            : 'Revoke All Sessions (including this device)'
+        }
         confirmVariant="danger"
         loading={revoking === 'all'}
-      />
+      >
+        {confirmAllScope === 'others' && (
+          <p className="text-xs text-gray-500 mt-3 text-center">
+            Want to also sign out of this device?{' '}
+            <button
+              className="text-red-400 hover:text-red-300 underline"
+              onClick={() => setConfirmAllScope('all')}
+              data-testid="active-sessions-include-this-device"
+            >
+              Include this device
+            </button>
+          </p>
+        )}
+      </ConfirmModal>
 
       <ConfirmModal
         isOpen={!!confirmSingle}

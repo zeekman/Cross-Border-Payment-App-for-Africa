@@ -1,5 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
+const { PENALTY_BPS, calculateEarlyWithdrawalPenalty } = require('../utils/savingsPenalty');
 
 async function create(req, res, next) {
   try {
@@ -50,6 +51,50 @@ async function list(req, res, next) {
   }
 }
 
+/**
+ * GET /api/savings/:id/withdraw-quote
+ * Pre-flight quote: computes the exact early-withdrawal penalty for a vault
+ * without executing the withdrawal, using the same formula/constant as
+ * withdraw() below and the savings-vault contract's penalty_bps.
+ */
+async function getWithdrawQuote(req, res, next) {
+  try {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    const vault = await db.query(
+      `SELECT * FROM savings_vaults WHERE id = $1 AND user_id = $2`,
+      [id, userId]
+    );
+
+    if (!vault.rows.length) {
+      return res.status(404).json({ error: 'Vault not found' });
+    }
+
+    const v = vault.rows[0];
+    if (v.status === 'withdrawn') {
+      return res.status(400).json({ error: 'Vault already withdrawn' });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const isEarly = now < v.unlock_timestamp;
+    const penalty = isEarly ? calculateEarlyWithdrawalPenalty(v.amount) : 0;
+    const payout = parseFloat(v.amount) - penalty;
+
+    res.json({
+      vault_id: v.id,
+      amount: v.amount,
+      early_withdrawal: isEarly,
+      penalty_bps: PENALTY_BPS,
+      penalty: penalty.toFixed(7),
+      payout: payout.toFixed(7),
+      unlock_timestamp: v.unlock_timestamp,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function withdraw(req, res, next) {
   try {
     const { id } = req.params;
@@ -72,7 +117,7 @@ async function withdraw(req, res, next) {
 
     const now = Math.floor(Date.now() / 1000);
     const isEarly = now < v.unlock_timestamp;
-    const penalty = isEarly ? parseFloat(v.amount) * 0.1 : 0;
+    const penalty = isEarly ? calculateEarlyWithdrawalPenalty(v.amount) : 0;
     const payout = parseFloat(v.amount) - penalty;
 
     await db.query(
@@ -95,4 +140,4 @@ async function withdraw(req, res, next) {
   }
 }
 
-module.exports = { create, list, withdraw };
+module.exports = { create, list, withdraw, getWithdrawQuote };

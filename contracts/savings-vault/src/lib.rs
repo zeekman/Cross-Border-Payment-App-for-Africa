@@ -131,6 +131,8 @@ pub enum DataKey {
 
 const SECONDS_PER_YEAR: u64 = 31_536_000;
 const MAX_INTEREST_BPS: u32 = 2_000;
+/// Maximum deposit amount to prevent arithmetic overflow in interest and penalty math.
+pub const MAX_DEPOSIT_AMOUNT: i128 = 100_000_000_000_000_000_000; // 100B tokens (7 decimals)
 
 #[contract]
 pub struct SavingsVaultContract;
@@ -248,7 +250,7 @@ impl SavingsVaultContract {
             .persistent()
             .get(&DataKey::InterestReserve)
             .unwrap_or(0);
-        let new_reserve = reserve + amount;
+        let new_reserve = reserve.checked_add(amount).expect("interest reserve overflow");
         env.storage()
             .persistent()
             .set(&DataKey::InterestReserve, &new_reserve);
@@ -289,13 +291,25 @@ impl SavingsVaultContract {
             vault.last_accrue_time = now;
             return 0;
         }
-        let interest = (vault.balance * rate_bps as i128 * elapsed as i128)
-            / (10_000i128 * SECONDS_PER_YEAR as i128);
+        let numerator = vault
+            .balance
+            .checked_mul(rate_bps as i128)
+            .and_then(|v| v.checked_mul(elapsed as i128))
+            .expect("interest calculation overflow");
+        let denominator = (10_000i128)
+            .checked_mul(SECONDS_PER_YEAR as i128)
+            .expect("denominator overflow");
+        let interest = numerator
+            .checked_div(denominator)
+            .expect("interest calculation division error");
         if interest <= 0 {
             vault.last_accrue_time = now;
             return 0;
         }
-        vault.accrued_interest += interest;
+        vault.accrued_interest = vault
+            .accrued_interest
+            .checked_add(interest)
+            .expect("accrued interest overflow");
         vault.last_accrue_time = now;
         interest
     }
@@ -309,7 +323,11 @@ impl SavingsVaultContract {
         if vault.accrued_interest <= 0 || withdraw_amount <= 0 || vault.balance <= 0 {
             return;
         }
-        let interest_due = (vault.accrued_interest * withdraw_amount) / vault.balance;
+        let interest_due = vault
+            .accrued_interest
+            .checked_mul(withdraw_amount)
+            .and_then(|v| v.checked_div(vault.balance))
+            .expect("interest due overflow");
         if interest_due <= 0 {
             return;
         }
@@ -334,20 +352,25 @@ impl SavingsVaultContract {
                 user,
                 &paid,
             );
+            let rem_reserve = reserve.checked_sub(paid).expect("reserve underflow");
             env.storage()
                 .persistent()
-                .set(&DataKey::InterestReserve, &(reserve - paid));
-            vault.accrued_interest -= paid;
+                .set(&DataKey::InterestReserve, &rem_reserve);
+            vault.accrued_interest = vault
+                .accrued_interest
+                .checked_sub(paid)
+                .expect("accrued interest underflow");
         }
         if paid < interest_due {
             let timestamp = env.ledger().timestamp();
+            let rem_reserve = reserve.checked_sub(paid).expect("reserve underflow");
             env.events().publish(
                 (Symbol::new(&env, "InsufficientReserve"),),
                 InsufficientReserveEvent {
                     user: user.clone(),
                     requested: interest_due,
                     paid,
-                    reserve_remaining: reserve - paid,
+                    reserve_remaining: rem_reserve,
                     timestamp,
                 },
             );
@@ -387,6 +410,7 @@ impl SavingsVaultContract {
     }
 
     /// Execute an emergency withdrawal for a user after the 48-hour delay.
+    /// Transitions: EmergencyAnnounced (t >= 48h) -> Closed Vault (removes vault).
     pub fn emergency_withdraw(env: Env, admin: Address, user: Address) {
         admin.require_auth();
         let stored_admin: Address = env
@@ -413,7 +437,7 @@ impl SavingsVaultContract {
         }
 
         let vault_key = DataKey::Vault(user.clone());
-        let mut vault: Vault = env.storage().persistent().get(&vault_key).expect("No vault found for user");
+        let vault: Vault = env.storage().persistent().get(&vault_key).expect("No vault found for user");
         if vault.balance <= 0 {
             panic!("No balance to withdraw");
         }
@@ -438,9 +462,10 @@ impl SavingsVaultContract {
             .persistent()
             .get(&DataKey::TotalLocked)
             .unwrap_or(0);
+        let new_total = total_locked.checked_sub(amount).expect("total locked underflow");
         env.storage()
             .persistent()
-            .set(&DataKey::TotalLocked, &(total_locked - amount));
+            .set(&DataKey::TotalLocked, &new_total);
 
         env.events().publish(
             (Symbol::new(&env, "EmergencyWithdrawn"),),
@@ -454,6 +479,7 @@ impl SavingsVaultContract {
     }
 
     /// Cancel a pending emergency withdrawal announcement before the 48-hour delay expires.
+    /// Transitions: EmergencyAnnounced (t < 48h) -> Normal.
     pub fn cancel_emergency(env: Env, admin: Address) {
         admin.require_auth();
         let stored_admin: Address = env
@@ -489,6 +515,7 @@ impl SavingsVaultContract {
     }
 
     /// Activate emergency mode. Admin-only. Sets EmergencyActivated = true and records timestamp.
+    /// Transitions: Normal -> EmergencyActive.
     /// Emits EmergencyActivated event. Normal deposit/withdraw remain unblocked.
     pub fn activate_emergency(env: Env, admin: Address) {
         admin.require_auth();
@@ -513,6 +540,7 @@ impl SavingsVaultContract {
     }
 
     /// Deactivate emergency before the 48-hour window expires. Admin-only.
+    /// Transitions: EmergencyActive (t < 48h) -> Normal.
     pub fn deactivate_emergency(env: Env, admin: Address) {
         admin.require_auth();
         let stored_admin: Address = env
@@ -536,6 +564,7 @@ impl SavingsVaultContract {
     }
 
     /// Return full vault balance to user. Admin-only, callable only after 48h from activation.
+    /// Transitions: EmergencyActive (t >= 48h) -> Closed Vault (removes vault).
     /// Normal deposit/withdraw are NOT blocked. Emits EmergencyFundsReturned event.
     pub fn emergency_return_funds(env: Env, admin: Address, user: Address) {
         admin.require_auth();
@@ -581,7 +610,8 @@ impl SavingsVaultContract {
             .persistent()
             .get(&DataKey::TotalLocked)
             .unwrap_or(0);
-        env.storage().persistent().set(&DataKey::TotalLocked, &(total_locked - amount));
+        let new_total = total_locked.checked_sub(amount).expect("total locked underflow");
+        env.storage().persistent().set(&DataKey::TotalLocked, &new_total);
         env.events().publish(
             (Symbol::new(&env, "EmergencyFundsReturned"),),
             EmergencyWithdrawnEvent { admin, user, amount, timestamp: now },
@@ -601,7 +631,7 @@ impl SavingsVaultContract {
             .get(&DataKey::Vault(user.clone()))
             .expect("No vault found for user");
 
-        let interest = Self::accrue_interest_internal(&env, &mut vault);
+        let interest = Self::accrue_interest_internal(&env, &mut vault, true);
         env.storage()
             .persistent()
             .set(&DataKey::Vault(user.clone()), &vault);
@@ -631,6 +661,9 @@ impl SavingsVaultContract {
         user.require_auth();
         if amount <= 0 {
             panic!("Amount must be positive");
+        }
+        if amount > MAX_DEPOSIT_AMOUNT {
+            panic!("Amount exceeds maximum deposit bound");
         }
         if unlock_time <= env.ledger().timestamp() {
             panic!("Unlock time must be in the future");
@@ -671,7 +704,10 @@ impl SavingsVaultContract {
                 accrued_interest: 0,
             });
 
-        vault.balance += amount;
+        vault.balance = vault.balance.checked_add(amount).expect("vault balance overflow");
+        if vault.balance > MAX_DEPOSIT_AMOUNT {
+            panic!("Vault balance exceeds maximum bound");
+        }
         if unlock_time > vault.unlock_time {
             vault.unlock_time = unlock_time;
         }
@@ -686,9 +722,10 @@ impl SavingsVaultContract {
             .persistent()
             .get(&DataKey::TotalLocked)
             .unwrap_or(0);
+        let new_total = total_locked.checked_add(amount).expect("total locked overflow");
         env.storage()
             .persistent()
-            .set(&DataKey::TotalLocked, &(total_locked + amount));
+            .set(&DataKey::TotalLocked, &new_total);
 
         env.events().publish(
             (Symbol::new(&env, "Deposit"),),
@@ -730,12 +767,17 @@ impl SavingsVaultContract {
 
         let now = env.ledger().timestamp();
         let penalty = if now < vault.unlock_time {
-            (amount * penalty_bps as i128) / 10000
+            amount
+                .checked_mul(penalty_bps as i128)
+                .and_then(|v| v.checked_div(10000))
+                .expect("penalty calculation overflow")
         } else {
             0
         };
 
-        let withdraw_amount = amount - penalty;
+        let withdraw_amount = amount
+            .checked_sub(penalty)
+            .expect("withdrawal amount calculation underflow");
 
         Self::accrue_interest_internal(&env, &mut vault, false);
         Self::settle_interest_payment(&env, &user, &mut vault, amount);
@@ -746,7 +788,10 @@ impl SavingsVaultContract {
             &withdraw_amount,
         );
 
-        vault.balance -= amount;
+        vault.balance = vault
+            .balance
+            .checked_sub(amount)
+            .expect("vault balance underflow");
         env.storage()
             .persistent()
             .set(&DataKey::Vault(user.clone()), &vault);
@@ -757,9 +802,12 @@ impl SavingsVaultContract {
             .persistent()
             .get(&DataKey::TotalLocked)
             .unwrap_or(0);
+        let new_total = total_locked
+            .checked_sub(amount)
+            .expect("total locked underflow");
         env.storage()
             .persistent()
-            .set(&DataKey::TotalLocked, &(total_locked - amount));
+            .set(&DataKey::TotalLocked, &new_total);
 
         env.events().publish(
             (Symbol::new(&env, "Withdrawal"),),

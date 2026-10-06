@@ -7,6 +7,12 @@ const DEFAULT_PROPOSAL_TTL_SECS: u64 = 604_800; // 7 days
 const EXPIRY_SECONDS: u64 = 86_400; // 24 hours
 const ROTATION_DELAY: u64 = 259_200; // 72 hours
 
+/// Default weight for a signer that has never had one set explicitly.
+const DEFAULT_SIGNER_WEIGHT: u32 = 1;
+/// Upper bound on any single signer's weight. Caps how much influence one key
+/// can hold so a single signer cannot unilaterally satisfy quorum.
+const MAX_SIGNER_WEIGHT: u32 = 100;
+
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TxStatus {
@@ -152,7 +158,13 @@ impl MultisigContract {
         id
     }
 
-    /// Approve a pending proposal. Executes automatically when quorum is reached.
+    /// Approve a pending proposal. Executes automatically when the cumulative
+    /// **weight** of approvals reaches quorum.
+    ///
+    /// Both execution paths — this on-chain `approve` flow and the off-chain
+    /// `execute_with_signatures` flow — count each signer's configured
+    /// `SignerWeight` (default `DEFAULT_SIGNER_WEIGHT`). Quorum is therefore a
+    /// weight threshold enforced identically regardless of path (issue #1056).
     pub fn approve(env: Env, approver: Address, tx_id: u64) {
         approver.require_auth();
         Self::assert_is_approver(&env, &approver);
@@ -165,8 +177,8 @@ impl MultisigContract {
             panic!("Proposal has expired");
         }
 
-        env.storage().persistent().set(&DataKey::Voted(tx_id, approver), &true);
-        proposal.approvals += 1;
+        env.storage().persistent().set(&DataKey::Voted(tx_id, approver.clone()), &true);
+        proposal.approvals += Self::signer_weight(&env, &approver);
 
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
         if proposal.approvals >= quorum {
@@ -183,14 +195,20 @@ impl MultisigContract {
         let mut proposal = Self::get_pending(&env, tx_id);
         assert!(!env.storage().persistent().has(&DataKey::Voted(tx_id, approver.clone())), "already voted");
 
-        env.storage().persistent().set(&DataKey::Voted(tx_id, approver), &true);
+        env.storage().persistent().set(&DataKey::Voted(tx_id, approver.clone()), &true);
         proposal.rejections += 1;
 
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
-        // Rejected when remaining possible approvals can no longer reach quorum
-        let remaining = approvers.len() as u32 - proposal.approvals - proposal.rejections;
-        if proposal.approvals + remaining < quorum {
+        // Rejected once the weight still available from signers who have not voted
+        // can no longer lift the current approval weight to quorum.
+        let mut remaining_weight: u32 = 0;
+        for a in approvers.iter() {
+            if !env.storage().persistent().has(&DataKey::Voted(tx_id, a.clone())) {
+                remaining_weight += Self::signer_weight(&env, &a);
+            }
+        }
+        if proposal.approvals + remaining_weight < quorum {
             proposal.status = TxStatus::Rejected;
         }
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
@@ -327,12 +345,16 @@ impl MultisigContract {
         }
         
         env.storage().persistent().remove(&DataKey::Proposal(tx_id));
+    }
+
     // --- signer rotation ---
 
     /// Propose adding or removing a signer. Admin only.
     ///
     /// The rotation is time-locked: it cannot be executed until
     /// `now + 259200` (72 hours). Only one rotation may be pending at a time.
+    /// A pending rotation may be aborted during the time-lock window — see
+    /// `cancel_signer_change` for the (lower-threshold) cancellation authority.
     /// Emits `SignerChangeProposed`.
     ///
     /// # Arguments
@@ -428,16 +450,30 @@ impl MultisigContract {
         );
     }
 
-    /// Cancel the pending signer rotation before its time-lock elapses. Admin only.
+    /// Cancel the pending signer rotation before its time-lock elapses.
+    ///
+    /// # Authorization model (issue #1054)
+    ///
+    /// Cancellation is deliberately held to a **lower threshold** than proposal.
+    /// `propose_signer_change` is admin-only, but `cancel_signer_change` may be
+    /// called by the admin **or by any single current approver**. This preserves
+    /// the multisig's single-key-compromise resistance: if a compromised admin
+    /// key proposes a malicious rotation, any one honest signer can veto it
+    /// during the 72-hour window. `caller` must authorize the call.
     ///
     /// Emits `SignerChangeCancelled`.
-    pub fn cancel_signer_change(env: Env) {
+    pub fn cancel_signer_change(env: Env, caller: Address) {
+        caller.require_auth();
+
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
-        admin.require_auth();
+        let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
+        if caller != admin && !approvers.contains(&caller) {
+            panic!("not authorized to cancel");
+        }
 
         let rotation: PendingRotation = env
             .storage()
@@ -482,29 +518,65 @@ impl MultisigContract {
         proposal
     }
 
+    /// Quorum weight contributed by `addr`, defaulting to
+    /// `DEFAULT_SIGNER_WEIGHT` when no weight has been set. Used by both
+    /// execution paths so quorum enforcement is identical (issue #1056).
+    fn signer_weight(env: &Env, addr: &Address) -> u32 {
+        env.storage().persistent()
+            .get(&DataKey::SignerWeight(addr.clone()))
+            .unwrap_or(DEFAULT_SIGNER_WEIGHT)
+    }
+
     // ── Issue #760: Off-chain signature aggregation ───────────────────────────
 
     /// Set the signing weight for an approver. Admin only.
-    /// Weight defaults to 1 if not explicitly set.
+    ///
+    /// Weight defaults to `DEFAULT_SIGNER_WEIGHT` (1) when never set. The
+    /// accepted range is `1..=MAX_SIGNER_WEIGHT` (issue #1055):
+    ///
+    /// * `weight == 0` is **rejected**. A zero weight would leave a signer in the
+    ///   approvers list while contributing nothing to quorum, blurring the line
+    ///   between "present" and "removed". To drop a signer's influence, use the
+    ///   time-locked `propose_signer_change(RotationAction::Remove, ..)` flow so
+    ///   the approvers list and quorum stay consistent.
+    /// * `weight > MAX_SIGNER_WEIGHT` (100) is **rejected** so no single signer
+    ///   can concentrate enough weight to satisfy quorum alone.
     pub fn set_signer_weight(env: Env, admin: Address, signer: Address, weight: u32) {
         admin.require_auth();
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         if admin != stored_admin { panic!("Only admin can set signer weight"); }
         if weight == 0 { panic!("Weight must be positive"); }
+        if weight > MAX_SIGNER_WEIGHT { panic!("Weight exceeds maximum"); }
         Self::assert_is_approver(&env, &signer);
         env.storage().persistent().set(&DataKey::SignerWeight(signer), &weight);
     }
 
-    /// Compute a deterministic SHA-256 hash of: contract_address + proposal_id + proposal.data + proposal.nonce.
-    /// Here proposal.data is encoded as (amount, recipient) and nonce is proposal.approvals (used as replay guard).
+    /// Deterministic SHA-256 digest an off-chain signer signs to approve a
+    /// proposal.
+    ///
+    /// # Domain separation (issue #1053)
+    ///
+    /// The preimage binds a signature to one exact context so it cannot be
+    /// replayed elsewhere:
+    ///
+    /// * **contract instance** — `current_contract_address()` prevents replay
+    ///   against another deployment of this contract.
+    /// * **network** — `ledger().network_id()` (the chain id) prevents replay of
+    ///   a testnet signature on mainnet or across any two networks.
+    /// * **proposal id** — a signature over `proposal_hash(a)` can never satisfy
+    ///   `proposal_hash(b)`, even if every other field matches.
+    /// * **payload + nonce** — the transfer amount and the per-proposal unique
+    ///   `expires_at` value.
     pub fn proposal_hash(env: Env, proposal_id: u64) -> BytesN<32> {
         let proposal: Proposal = env.storage().persistent().get(&DataKey::Proposal(proposal_id))
             .expect("proposal not found");
         let contract_addr = env.current_contract_address();
         let mut preimage = Bytes::new(&env);
-        // contract address bytes
+        // Domain separator: this contract instance.
         preimage.append(&contract_addr.to_xdr(&env));
-        // proposal_id as 8 big-endian bytes
+        // Domain separator: the network / chain id.
+        preimage.append(&Bytes::from(env.ledger().network_id()));
+        // proposal_id as 8 big-endian bytes — binds the signature to one proposal.
         preimage.append(&Bytes::from_array(&env, &proposal_id.to_be_bytes()));
         // amount as 16 big-endian bytes
         preimage.append(&Bytes::from_array(&env, &proposal.amount.to_be_bytes()));
@@ -516,8 +588,19 @@ impl MultisigContract {
     /// Execute a proposal using pre-collected off-chain ed25519 signatures.
     ///
     /// Each entry in `signatures` is `(signer_address, ed25519_sig_over_proposal_hash)`.
-    /// Verifies all signatures, checks cumulative weight >= quorum, rejects duplicates,
-    /// and marks the proposal Executed.
+    /// Verifies all signatures against `Self::proposal_hash`, checks cumulative
+    /// weight `>= quorum`, rejects duplicate signers, and marks the proposal
+    /// `Executed`.
+    ///
+    /// Replay protection (issue #1053):
+    /// * Signatures are bound to this contract instance, this network and this
+    ///   `proposal_id` — see `Self::proposal_hash`.
+    /// * Execution state is unified with the on-chain `approve` path: this call
+    ///   goes through `Self::get_pending`, so a proposal already `Executed`
+    ///   (or `Expired`/`Cancelled`) via any path is rejected with `"not pending"`.
+    ///
+    /// Quorum here counts each signer's `SignerWeight` exactly as `approve` does
+    /// (issue #1056).
     pub fn execute_with_signatures(
         env: Env,
         proposal_id: u64,
@@ -547,10 +630,7 @@ impl MultisigContract {
                 .expect("Invalid signer public key");
             env.crypto().ed25519_verify(&pub_key, &Bytes::from(hash.clone()), &sig);
 
-            let weight: u32 = env.storage().persistent()
-                .get(&DataKey::SignerWeight(signer.clone()))
-                .unwrap_or(1);
-            total_weight += weight;
+            total_weight += Self::signer_weight(&env, &signer);
         }
 
         if total_weight < quorum {

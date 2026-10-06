@@ -2,10 +2,12 @@ const router = require('express').Router();
 const { body, param, query, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
+const { readLimiter, exportKeyLimiter } = require('../middleware/rateLimiter');
 const {
   getWallet,
   listWallets,
   createWalletHandler,
+  setDefaultWallet,
   getQRCode,
   getWalletTransactions,
   exportKey,
@@ -36,6 +38,7 @@ const validate = (req, res, next) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 // Multi-wallet endpoints
 router.get('/list', listWallets);
@@ -44,6 +47,12 @@ router.post(
   [body('label').optional().trim().isLength({ max: 100 }).withMessage('Label must be at most 100 characters')],
   validate,
   createWalletHandler,
+);
+router.put(
+  '/default',
+  [body('wallet_id').notEmpty().isUUID().withMessage('wallet_id must be a valid UUID')],
+  validate,
+  setDefaultWallet,
 );
 
 // Single-wallet endpoints (support optional ?wallet_id query param)
@@ -73,10 +82,12 @@ router.get('/transactions', getWalletTransactions);
 
 router.post(
   '/export-key',
+  exportKeyLimiter,
   [
     body('password').notEmpty().withMessage('Password is required'),
     body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID'),
     body('totp_code').optional().trim().isLength({ min: 6, max: 6 }).withMessage('TOTP code must be 6 digits'),
+    body('pin').optional().matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits'),
   ],
   validate,
   exportKey,
@@ -170,14 +181,15 @@ router.post(
 );
 
 // Multisig / business account routes
+// NOTE: register each (method, path) pair exactly once in this file — Express uses the
+// first matching registration, so a later duplicate is silently dead code. See
+// scripts/check-duplicate-routes.js (run in CI) which fails the build on any new duplicate.
 router.post(
   '/upgrade-business',
   [body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID')],
   validate,
   upgradeToBusinessAccount,
 );
-router.get('/signers', listSigners);
-router.post('/upgrade-business', upgradeToBusinessAccount);
 router.get('/signers', isAdminOrOwner(), listSigners);
 router.get('/signers/horizon', getSignersFromHorizon);
 router.post('/clear-inflation-destination', clearInflationDestinationHandler);

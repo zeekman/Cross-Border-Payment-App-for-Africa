@@ -688,3 +688,35 @@ fn test_cast_vote_duplicate_rejected() {
     // Second call from the same arbitrator must panic.
     client.cast_vote(&arb1, &id, &false);
 }
+
+// ── escrow cross-contract hook ────────────────────────────────────────────────
+
+#[test]
+fn test_set_and_get_escrow_contract() {
+    let (env, client, admin, _, _, _) = setup();
+    let escrow = Address::generate(&env);
+    assert!(client.get_escrow_contract().is_none());
+    client.set_escrow_contract(&admin, &escrow);
+    assert_eq!(client.get_escrow_contract().unwrap(), escrow);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_set_escrow_contract_non_admin_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let impostor = Address::generate(&env);
+    let escrow = Address::generate(&env);
+    client.set_escrow_contract(&impostor, &escrow);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not the escrow contract")]
+fn test_open_escrow_dispute_non_escrow_caller_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let escrow = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    // A top-level caller is not the escrow contract, so this must be rejected.
+    client.open_escrow_dispute(&escrow, &sender, &recipient, &500_0000000);
+}

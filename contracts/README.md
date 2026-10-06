@@ -4,25 +4,26 @@ This directory contains Soroban smart contracts for the AfriPay cross-border pay
 
 ## Contracts
 
-### Escrow Contract (`escrow/`)
-A trustless on-chain escrow contract for USDC remittances.
+| Contract | Description | Docs |
+|---|---|---|
+| `escrow/` | Three-party (sender/recipient/agent) trustless escrow for USDC remittances | [README](./escrow/README.md) |
+| `agent-escrow/` | Trustless agent-mediated escrow variant for cross-border remittances | [README](./agent-escrow/README.md) |
+| `dispute-resolution/` | On-chain three-party dispute resolution for escrowed payments | — |
+| `fee-distributor/` | On-chain platform fee accumulation and withdrawal | — |
+| `kyc-attestation/` | On-chain KYC status via SHA-256 hash (no raw PII stored on-chain) | — |
+| `loyalty-token/` | SEP-41 compatible fungible loyalty token with tiered fee-discount redemption | — |
+| `multisig-approval/` | Multisig proposal approval and signer key rotation | — |
+| `recurring-payments/` | User-authorized recurring transfers without giving the contract custody of funds | [README](./recurring-payments/README.md) |
+| `savings-vault/` | On-chain savings deposit/withdrawal vault | — |
 
-**Features:**
-- Three-party escrow model (sender, recipient, agent)
-- Automated fee calculation and collection
-- Event emission for blockchain transparency
-- Full test coverage
-- Comprehensive documentation
+Each contract is an independent crate — see its `Cargo.toml` and `src/lib.rs` for details where a dedicated README isn't yet written.
 
-**Quick Links:**
-- Documentation: [escrow/README.md](./escrow/README.md)
-- Source: [escrow/src/lib.rs](./escrow/src/lib.rs)
-- Deployment: [deploy.sh](./deploy.sh)
+**Deployment:** [deploy.sh](./deploy.sh)
 
 ## Building
 
 ```bash
-cd escrow
+cd <contract-dir>   # e.g. escrow, fee-distributor, savings-vault, ...
 cargo build --release --target wasm32-unknown-unknown
 cargo test
 ```
@@ -45,13 +46,13 @@ See [deploy.sh](./deploy.sh) for detailed deployment instructions and network co
 
 ### Testing
 ```bash
-cd escrow
+cd <contract-dir>
 cargo test
 ```
 
 ### Building for Production
 ```bash
-cd escrow
+cd <contract-dir>
 cargo build --release --target wasm32-unknown-unknown
 ```
 

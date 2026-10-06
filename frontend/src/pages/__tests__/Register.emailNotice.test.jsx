@@ -89,6 +89,7 @@ describe('Register — post-registration navigation', () => {
     fireEvent.change(screen.getByPlaceholderText('[Full Name]'), { target: { value: 'Ada Obi' } });
     fireEvent.change(screen.getByPlaceholderText('[email]'), { target: { value: 'ada@test.com' } });
     fireEvent.change(screen.getByPlaceholderText('Min 8 characters'), { target: { value: 'Password1!' } });
+    fireEvent.change(screen.getByPlaceholderText('Re-enter your password'), { target: { value: 'Password1!' } });
     fireEvent.click(screen.getByRole('button', { name: /create account/i }));
 
     await waitFor(() => {

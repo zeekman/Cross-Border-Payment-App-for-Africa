@@ -1,3 +1,45 @@
+'use strict';
+/**
+ * Shared SSRF protection for any feature that fetches a user- or
+ * partner-supplied URL (webhooks, SEP-31 callbacks, etc.).
+ *
+ * Resolve-then-validate: the hostname is DNS-resolved and the *resolved* IP
+ * is checked against the private/reserved ranges, not just the hostname
+ * string. Callers that hold onto a validated URL for any length of time
+ * (retry loops, queued deliveries) MUST re-validate immediately before each
+ * outbound request to defend against DNS rebinding.
+ */
+const dns = require('dns').promises;
+
+const BLOCKED_HOSTNAME_SUFFIXES = ['.local', '.internal', 'localhost'];
+
+/**
+ * Validates that `url` is https:// and resolves to a public IP address.
+ * Returns true only if the URL is safe to fetch *right now* — callers that
+ * delay delivery must call this again immediately before the request.
+ */
+async function validatePublicUrl(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (BLOCKED_HOSTNAME_SUFFIXES.some((s) => hostname === s || hostname.endsWith(s))) return false;
+
+  // Reject if hostname is a bare IP in a blocked range
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) && isPrivateIp(hostname)) return false;
+
+  // Resolve hostname and check the actually-connected IP (defends against
+  // DNS rebinding — a name that only resolves to a private IP at request time).
+  try {
+    const { address } = await dns.lookup(hostname);
+    if (isPrivateIp(address)) return false;
+  } catch {
+    return false; // unresolvable hostname
+  }
+  return true;
+}
+
 /**
  * SSRF protection utility.
  * Validates outbound URLs to prevent Server-Side Request Forgery attacks.
@@ -111,4 +153,4 @@ async function validateOutboundUrl(url) {
   return { valid: true, pinnedIp, agent };
 }
 
-module.exports = { validateOutboundUrl };
+module.exports = { validateOutboundUrl, validatePublicUrl };

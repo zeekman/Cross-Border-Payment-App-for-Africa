@@ -740,6 +740,8 @@ fn test_redeem_boundary_exactly_at_tier1_threshold() {
 fn test_get_tier_unconfigured_panics() {
     let (_, client, _) = setup();
     client.get_tier(&4u32); // tier 4 not set by default
+}
+
 // ── Helper for new tests (passes all 3 initialize args correctly) ─────────────
 
 fn setup_v2() -> (Env, LoyaltyTokenContractClient<'static>, Address) {

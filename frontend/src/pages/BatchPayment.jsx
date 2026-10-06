@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, CheckCircle2, Download, FileUp, Loader2, Plus, RotateCcw, Send, Trash2, Upload, XCircle } from 'lucide-react';
+import { ArrowLeft, AlertCircle, CheckCircle, CheckCircle2, Download, FileUp, Loader2, Plus, RotateCcw, Send, Trash2, Upload, XCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { CURRENCIES, truncateAddress } from '../utils/currency';
 import { validateStellarAddress } from '../utils/validation';
 
 const SINGLE_TRANSFER_LIMIT = 10000;
+// Matches the Soroban batch_create_escrow contract hard-cap and BE-010 server-side cap
+const MAX_BATCH_SIZE = 20;
 
 function createEmptyRecipient() {
   return { recipient_address: '', amount: '', memo: '' };
@@ -288,14 +290,14 @@ export default function BatchPayment() {
         return;
       }
 
-      setRecipients(parsed.slice(0, 100));
-      setValidationErrors(errors.slice(0, 100));
+      setRecipients(parsed.slice(0, MAX_BATCH_SIZE));
+      setValidationErrors(errors.slice(0, MAX_BATCH_SIZE));
       setResults(null);
       
       if (errors.length > 0) {
         toast.error(`Found ${errors.length} validation error${errors.length > 1 ? 's' : ''} in CSV`);
       } else {
-        toast.success(`Imported ${Math.min(parsed.length, 100)} recipients`);
+        toast.success(`Imported ${Math.min(parsed.length, MAX_BATCH_SIZE)} recipients`);
       }
     } catch (error) {
       toast.error(error.message || 'Failed to parse CSV file');
@@ -317,7 +319,8 @@ export default function BatchPayment() {
   };
 
   const addRecipient = () => {
-    setRecipients((current) => [...current, createEmptyRecipient()].slice(0, 100));
+    if (recipients.length >= MAX_BATCH_SIZE) return;
+    setRecipients((current) => [...current, createEmptyRecipient()]);
   };
 
   const removeRecipient = (index) => {
@@ -393,7 +396,7 @@ export default function BatchPayment() {
             <p className="text-sm uppercase tracking-[0.2em] text-primary-400">Bulk payouts</p>
             <h1 className="text-3xl font-bold text-white">Batch Payments</h1>
             <p className="text-gray-400 mt-2 max-w-2xl">
-              Upload a CSV or paste recipients manually to send up to 100 Stellar payments in one transaction.
+              Upload a CSV or paste recipients manually to send up to {MAX_BATCH_SIZE} Stellar payments in one transaction.
             </p>
           </div>
 
@@ -541,13 +544,19 @@ export default function BatchPayment() {
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
               <div>
                 <p className="text-sm text-gray-400">Recipients</p>
-                <p className="text-xs text-gray-500">{filledRecipients.length}/100 rows ready</p>
+                <p className="text-xs text-gray-500">
+                  {filledRecipients.length}/{MAX_BATCH_SIZE} recipients
+                  {recipients.length >= MAX_BATCH_SIZE && (
+                    <span className="ml-2 text-yellow-400 font-medium">Batch limit reached</span>
+                  )}
+                </p>
               </div>
               <button
                 type="button"
                 onClick={addRecipient}
-                disabled={recipients.length >= 100}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-white text-sm disabled:opacity-50"
+                disabled={recipients.length >= MAX_BATCH_SIZE}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-white text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                title={recipients.length >= MAX_BATCH_SIZE ? `Maximum batch size of ${MAX_BATCH_SIZE} recipients reached` : 'Add recipient'}
               >
                 <Plus size={16} /> Add row
               </button>
@@ -607,7 +616,7 @@ export default function BatchPayment() {
             </div>
             <div className="bg-gray-950 border border-gray-800 rounded-2xl p-4">
               <p className="text-gray-500 text-sm">Transaction shape</p>
-              <p className="text-white mt-1">One Stellar transaction, up to 100 payment operations.</p>
+              <p className="text-white mt-1">One Stellar transaction, up to {MAX_BATCH_SIZE} payment operations.</p>
             </div>
           </div>
 

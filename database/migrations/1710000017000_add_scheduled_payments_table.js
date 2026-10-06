@@ -29,34 +29,19 @@ exports.up = (pgm) => {
       notNull: true,
       check: "frequency IN ('daily', 'weekly', 'monthly')"
     },
-    next_run_at: {
+    execute_at: {
       type: 'timestamp',
       notNull: true
     },
-    active: {
-      type: 'boolean',
-      default: true,
-      notNull: true
-    },
+    next_run_at: {},
+    active: {},
     memo: {
       type: 'text'
     },
-    last_run_at: {
-      type: 'timestamp'
-    },
-    failed_attempts: {
-      type: 'integer',
-      default: 0
-    },
-    created_at: {
-      type: 'timestamp',
-      default: pgm.func('NOW()'),
-      notNull: true
-    }
+    last_run_at: {},
+    failed_attempts: {},
+    created_at: {}
   });
-  pgm.createIndex('scheduled_payments', 'user_id');
-  pgm.createIndex('scheduled_payments', 'next_run_at');
-  pgm.createIndex('scheduled_payments', 'active');
 };
 
 exports.down = (pgm) => {

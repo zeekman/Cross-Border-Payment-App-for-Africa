@@ -19,10 +19,23 @@ async function registerWebAuthn() {
       },
     });
     const credId = btoa(String.fromCharCode(...new Uint8Array(credential.rawId)));
+
+    // Persist the credential on the backend so biometric unlock can be
+    // verified server-side instead of trusting a client-only flag.
+    await api.post('/auth/biometric/register', {
+      credential_id: credId,
+      device_label: navigator.platform || navigator.userAgent,
+    });
+
     localStorage.setItem('afripay_webauthn_credential_id', credId);
     localStorage.setItem('afripay_webauthn_registered', 'true');
     return true;
   } catch {
+    // Registration on the device or the backend call failed — make sure we
+    // don't leave a stale "registered" flag pointing at a credential the
+    // server doesn't know about.
+    localStorage.removeItem('afripay_webauthn_credential_id');
+    localStorage.removeItem('afripay_webauthn_registered');
     return false;
   }
 }

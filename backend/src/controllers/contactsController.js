@@ -21,17 +21,42 @@ async function addContact(req, res, next) {
   try {
     const { name, wallet_address, notes, memo_required, default_memo, tags } = req.body;
     const id = uuidv4();
+
+    // Upsert: if the same Stellar public key already exists for this user, update
+    // the label/metadata rather than creating a duplicate entry.
+    // The DB enforces uniqueness via contacts_user_wallet_unique (user_id, wallet_address).
+    // Product decision: upsert (merge) — return the updated record with 200 if it
+    // already existed, 201 if it was newly created.
     const result = await db.query(
       `INSERT INTO contacts (id, user_id, name, wallet_address, notes, memo_required, default_memo, tags)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT (user_id, wallet_address) DO UPDATE
-         SET name = $3, notes = $5, memo_required = $6, default_memo = $7, tags = $8
-       RETURNING id, name, wallet_address, notes, memo_required, default_memo, tags`,
+         SET name = EXCLUDED.name,
+             notes = EXCLUDED.notes,
+             memo_required = EXCLUDED.memo_required,
+             default_memo = EXCLUDED.default_memo,
+             tags = EXCLUDED.tags
+       RETURNING id, name, wallet_address, notes, memo_required, default_memo, tags, (xmax = 0) AS inserted`,
       [id, req.user.userId, name, wallet_address,
        notes || null, memo_required || false, default_memo || null, tags || []]
     );
-    res.status(201).json({ message: 'Contact saved', contact: result.rows[0] });
-  } catch (err) { next(err); }
+
+    const contact = result.rows[0];
+    const wasInserted = contact.inserted;
+    // Remove the internal flag from the response
+    delete contact.inserted;
+
+    const statusCode = wasInserted ? 201 : 200;
+    const message = wasInserted ? 'Contact saved' : 'Contact updated';
+    res.status(statusCode).json({ message, contact });
+  } catch (err) {
+    // Safety net: map DB unique-constraint violations to a clear conflict error
+    // in case a race bypasses the ON CONFLICT clause (e.g., a different constraint).
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'A contact with this Stellar address already exists.' });
+    }
+    next(err);
+  }
 }
 
 async function deleteContact(req, res, next) {

@@ -1,10 +1,10 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Symbol};
 
 mod test;
 
 /// Semantic version of this contract. Bumped on every upgrade.
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 
 #[derive(Clone)]
 #[contracttype]
@@ -129,6 +129,15 @@ pub struct EscrowDeposited {
 
 #[derive(Clone)]
 #[contracttype]
+pub struct EscrowDisputed {
+    pub escrow_id: u64,
+    pub dispute_id: u64,
+    pub opener: Address,
+    pub amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
 pub struct Escrow {
     pub id: u64,
     pub sender: Address,
@@ -149,6 +158,11 @@ pub enum EscrowStatus {
     Pending,
     Released,
     Cancelled,
+    /// Escrowed funds have been handed to the dispute-resolution contract and
+    /// the escrow is awaiting (or already subject to) arbitration. In this state
+    /// the escrow can no longer be released, cancelled, deposited into, or
+    /// expired — the winning party is paid directly by the dispute contract.
+    UnderDispute,
 }
 
 #[contracttype]
@@ -160,6 +174,7 @@ pub enum DataKey {
     RetentionPeriodSecs,
     Escrow(u64),
     KycContractAddress,
+    DisputeContractAddress,
     ContractVersion,
 }
 
@@ -474,7 +489,15 @@ impl EscrowContract {
             panic!("Escrow has expired");
         }
 
-        let fee_amount = (escrow.amount / 10000).saturating_mul(escrow.release_fee_bps as i128);
+        // SC-117: Fix fee truncation by using checked arithmetic.
+        // Old: (amount / 10000).saturating_mul(bps) — truncates for amounts < 10_000.
+        // New: (amount * bps) / 10_000 — rounds down in platform's favour.
+        let fee_amount = escrow
+            .amount
+            .checked_mul(escrow.release_fee_bps as i128)
+            .expect("fee calc overflow")
+            .checked_div(10_000)
+            .expect("fee calc underflow");
         let agent_amount = escrow.amount.checked_sub(fee_amount).expect("fee exceeds escrow amount");
         if agent_amount <= 0 {
             panic!("fee cannot exceed 100% of escrow");
@@ -555,6 +578,92 @@ impl EscrowContract {
         );
     }
 
+    /// Escalate a pending escrow to the configured dispute-resolution contract.
+    ///
+    /// Either the escrow sender or recipient may open a dispute — this is the
+    /// sender's recourse when the agent has confirmed delivery but has not
+    /// released funds (and `cancel_escrow` is therefore blocked).
+    ///
+    /// The full remaining escrow balance is transferred to the dispute-resolution
+    /// contract, which takes custody of it for arbitration. The escrow is then
+    /// marked `UnderDispute` and can no longer be released, cancelled, deposited
+    /// into, or expired. The adjudicated winner is paid by the dispute contract.
+    ///
+    /// # Arguments
+    /// * `caller`   — Must be the escrow sender or recipient (auth required).
+    /// * `escrow_id` — The escrow to escalate.
+    ///
+    /// # Returns
+    /// The dispute ID assigned by the dispute-resolution contract.
+    pub fn dispute_escrow(env: Env, caller: Address, escrow_id: u64) -> u64 {
+        caller.require_auth();
+
+        let dispute_contract: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeContractAddress)
+            .expect("Dispute resolution contract not configured");
+
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+
+        if caller != escrow.sender && caller != escrow.recipient {
+            panic!("Only the sender or recipient can dispute escrow");
+        }
+        if escrow.status != EscrowStatus::Pending {
+            panic!("Escrow is not in pending state");
+        }
+
+        let usdc_address: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsdcAddress)
+            .expect("Contract not initialized");
+
+        // Checks-Effects-Interactions: mark the escrow BEFORE any external calls.
+        escrow.status = EscrowStatus::UnderDispute;
+        escrow.updated_at = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+
+        // Hand the full remaining balance over to the dispute-resolution contract,
+        // which holds it in its own custody until the conflict is adjudicated.
+        token::Client::new(&env, &usdc_address).transfer(
+            &env.current_contract_address(),
+            &dispute_contract,
+            &escrow.amount,
+        );
+
+        // Record the dispute on-chain with the dispute-resolution contract.
+        let dispute_id: u64 = env.invoke_contract::<u64>(
+            &dispute_contract,
+            &Symbol::new(&env, "open_escrow_dispute"),
+            soroban_sdk::vec![
+                &env,
+                env.current_contract_address().into_val(&env),
+                escrow.sender.clone().into_val(&env),
+                escrow.recipient.clone().into_val(&env),
+                escrow.amount.into_val(&env)
+            ],
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "EscrowDisputed"),),
+            EscrowDisputed {
+                escrow_id,
+                dispute_id,
+                opener: caller,
+                amount: escrow.amount,
+            },
+        );
+
+        dispute_id
+    }
+
     pub fn partial_release(env: Env, agent: Address, escrow_id: u64, amount: i128) {
         agent.require_auth();
 
@@ -574,11 +683,23 @@ impl EscrowContract {
         if escrow.status != EscrowStatus::Pending {
             panic!("Escrow is not in pending state");
         }
+        // Expiry guard: expired escrows cannot be released by the agent.
+        // SC-117: This check was missing, allowing agents to release after expiry.
+        if env.ledger().timestamp() >= escrow.expires_at {
+            panic!("Escrow has expired");
+        }
         if amount > escrow.amount {
             panic!("Release amount exceeds escrow balance");
         }
 
-        let fee_amount = (amount / 10000).saturating_mul(escrow.release_fee_bps as i128);
+        // SC-117: Fix fee truncation by using checked arithmetic.
+        // Old: (amount / 10000).saturating_mul(bps) — truncates for amounts < 10_000.
+        // New: (amount * bps) / 10_000 — rounds down in platform's favour.
+        let fee_amount = amount
+            .checked_mul(escrow.release_fee_bps as i128)
+            .expect("fee calc overflow")
+            .checked_div(10_000)
+            .expect("fee calc underflow");
         let agent_amount = amount.checked_sub(fee_amount).expect("fee exceeds release amount");
         if agent_amount <= 0 {
             panic!("fee cannot exceed 100% of escrow");
@@ -590,12 +711,9 @@ impl EscrowContract {
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
-        token::Client::new(&env, &usdc_address).transfer(
-            &env.current_contract_address(),
-            &escrow.agent,
-            &agent_amount,
-        );
-
+        // SC-117: Checks-Effects-Interactions: write state BEFORE token transfers.
+        // Soroban prevents re-entrancy by disallowing cross-contract calls that
+        // re-enter the same contract instance within a single transaction invocation.
         let current_fees: i128 = env
             .storage()
             .persistent()
@@ -613,6 +731,13 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+
+        // External calls after state is committed (Interactions step).
+        token::Client::new(&env, &usdc_address).transfer(
+            &env.current_contract_address(),
+            &escrow.agent,
+            &agent_amount,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "PartialRelease"),),
@@ -635,9 +760,11 @@ impl EscrowContract {
             .set(&DataKey::RetentionPeriodSecs, &retention_secs);
     }
 
-    pub fn cleanup_escrow(env: Env, admin: Address, escrow_id: u64) {
-        require_admin(&env, &admin);
-
+    /// Permissionless cleanup of released/cancelled escrows past the retention
+    /// period, callable by anyone to reclaim storage rent. Mirrors the
+    /// permissionless `expire_escrow` pattern to avoid adding a snooping burden
+    /// on the admin as escrow volume grows.
+    pub fn cleanup_escrow(env: Env, escrow_id: u64) {
         let escrow: Escrow = env
             .storage()
             .persistent()
@@ -1021,6 +1148,8 @@ impl EscrowContract {
         );
 
         first_id
+    }
+
     /// Set the KYC contract address. Only admin may call this.
     /// Pass a zero address (all bytes 0) to disable KYC checking.
     pub fn set_kyc_contract(env: Env, admin: Address, kyc_contract: Address) {
@@ -1028,6 +1157,21 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::KycContractAddress, &kyc_contract);
+    }
+
+    /// Set the dispute-resolution contract address. Only admin may call this.
+    pub fn set_dispute_contract(env: Env, admin: Address, dispute_contract: Address) {
+        require_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeContractAddress, &dispute_contract);
+    }
+
+    /// Get the dispute-resolution contract address, or None if not set.
+    pub fn get_dispute_contract(env: Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeContractAddress)
     }
 
     /// Get the KYC contract address, or None if not set.

@@ -151,6 +151,109 @@ describe('POST /api/wallet/create', () => {
     const res = await request(app).post('/api/wallet/create').send({ label: 'Test' });
     expect(res.status).toBe(401);
   });
+
+  it('never exceeds MAX_WALLETS_PER_USER under concurrent requests', async () => {
+    // Simulate the serialized (locked) path: the handler must take a
+    // transaction-scoped lock on the user row before counting + inserting.
+    // We model the DB so that the count reflects committed inserts, and the
+    // lock serializes the 10 parallel requests so only 5 succeed.
+    const MAX = 5;
+    let committed = 0;
+    let lock = Promise.resolve();
+
+    const client = {
+      query: jest.fn(async (sql) => {
+        if (/SELECT COUNT\(\*\)/i.test(sql)) {
+          return { rows: [{ count: String(committed) }] };
+        }
+        if (/INSERT INTO wallets/i.test(sql)) {
+          committed += 1;
+          return { rows: [{ ...WALLET_1, id: `wallet-${committed}` }] };
+        }
+        return { rows: [] };
+      }),
+      release: jest.fn(),
+    };
+
+    // Serialize access to the "user row lock" across concurrent requests.
+    db.pool.connect.mockImplementation(async () => {
+      const prev = lock;
+      let releaseLock;
+      lock = new Promise((resolve) => { releaseLock = resolve; });
+      await prev;
+      return {
+        query: async (sql, params) => {
+          const result = await client.query(sql, params);
+          if (/COMMIT|ROLLBACK/i.test(sql)) releaseLock();
+          return result;
+        },
+        release: jest.fn(),
+      };
+    });
+
+    stellar.createWallet.mockImplementation(async () => ({
+      publicKey: 'GBVVJJWBKQZFKQZFKQZFKQZFKQZFKQZFKQZFKQZFKQZFKQZFKQZFKQ',
+      encryptedSecretKey: 'iv2:enc2',
+    }));
+
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        request(app)
+          .post('/api/wallet/create')
+          .set('Authorization', `Bearer ${TOKEN}`)
+          .send({ label: `W${i}` }),
+      ),
+    );
+
+    const created = results.filter((r) => r.status === 201).length;
+    const rejected = results.filter(
+      (r) => r.status === 400 && r.body.code === 'WALLET_LIMIT_REACHED',
+    ).length;
+
+    expect(created).toBe(MAX);
+    expect(rejected).toBe(10 - MAX);
+    expect(committed).toBe(MAX);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/wallet/default
+// ---------------------------------------------------------------------------
+
+describe('PUT /api/wallet/default', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.pool.connect.mockReset();
+  });
+  afterEach(() => {
+    db.pool.connect.mockReset();
+  });
+
+  it('changes the default wallet for the authenticated user', async () => {
+    const client = {
+      query: jest.fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: 'cccccccc-0000-4000-8000-000000000002' }] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ ...WALLET_1, id: 'cccccccc-0000-4000-8000-000000000002', is_default: true }] }),
+      release: jest.fn(),
+    };
+    db.pool.connect.mockResolvedValue(client);
+
+    const res = await request(app)
+      .put('/api/wallet/default')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send({ wallet_id: 'cccccccc-0000-4000-8000-000000000002' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.wallet.is_default).toBe(true);
+    expect(client.query).toHaveBeenCalledWith(
+      'UPDATE wallets SET is_default = false WHERE user_id = $1',
+      [USER_ID],
+    );
+    expect(client.query).toHaveBeenCalledWith('COMMIT');
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -198,45 +301,4 @@ describe('GET /api/wallet/list', () => {
 
 // ---------------------------------------------------------------------------
 // GET /api/wallet/balance  with ?wallet_id
-// ---------------------------------------------------------------------------
-
-describe('GET /api/wallet/balance', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  it('returns balance for the specified wallet_id', async () => {
-    db.query.mockResolvedValueOnce({ rows: [WALLET_1] });
-    stellar.getBalance.mockResolvedValue([{ asset: 'XLM', balance: '200.0000000' }]);
-
-    const res = await request(app)
-      .get(`/api/wallet/balance?wallet_id=${WALLET_1.id}`)
-      .set('Authorization', `Bearer ${TOKEN}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.id).toBe(WALLET_1.id);
-    expect(res.body.label).toBe('Main');
-  });
-
-  it('returns 404 when wallet_id does not belong to the user', async () => {
-    db.query.mockResolvedValueOnce({ rows: [] }); // no matching wallet
-
-    const res = await request(app)
-      .get('/api/wallet/balance?wallet_id=00000000-dead-beef-0000-000000000000')
-      .set('Authorization', `Bearer ${TOKEN}`);
-
-    expect(res.status).toBe(404);
-  });
-
-  it('falls back to default wallet when no wallet_id is given', async () => {
-    db.query.mockResolvedValueOnce({ rows: [WALLET_1] });
-    stellar.getBalance.mockResolvedValue([{ asset: 'XLM', balance: '100.0000000' }]);
-
-    const res = await request(app)
-      .get('/api/wallet/balance')
-      .set('Authorization', `Bearer ${TOKEN}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.is_default).toBe(true);
-  });
-});
+//

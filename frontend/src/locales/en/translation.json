@@ -9,6 +9,7 @@
     "add": "Add",
     "continue": "Continue",
     "cancel": "Cancel",
+    "close": "Close",
     "retry": "Try Again",
     "sign_out": "Sign Out",
     "no_transactions": "No transactions found",
@@ -39,7 +40,8 @@
     "have_account": "Already have an account?",
     "sign_in": "Sign in",
     "success": "Account created! Your wallet is ready.",
-    "error": "Registration failed"
+    "error": "Registration failed",
+    "verify_email_notice": "Please check your email to verify your account."
   },
   "login": {
     "title": "Welcome back",
@@ -52,7 +54,14 @@
     "no_account": "Don't have an account?",
     "create_one": "Create one",
     "error": "Login failed",
-    "forgot_password": "Forgot password?"
+    "forgot_password": "Forgot password?",
+    "rate_limited": "Too many attempts. Please try again later.",
+    "remember_device": "Remember this device",
+    "totp_title": "Two-factor authentication",
+    "totp_label": "Authentication code",
+    "totp_hint": "Enter the 6-digit code from your authenticator app.",
+    "totp_error": "Invalid authentication code. Please try again.",
+    "try_again_in": "Try again in {{seconds}}s"
   },
   "passwordReset": {
     "forgot_title": "Reset password",
@@ -75,10 +84,17 @@
     "total_balance": "Total Balance",
     "send": "Send",
     "receive": "Receive",
+    "add_money": "Add Money",
+    "withdraw": "Withdraw",
     "recent_activity": "Recent Activity",
     "no_transactions": "No transactions yet. Send your first payment!",
     "to": "To",
     "from": "From"
+  },
+  "analytics": {
+    "title": "Analytics",
+    "error": "Failed to load analytics",
+    "no_data": "No analytics data available yet"
   },
   "send": {
     "title": "Send Money",
@@ -102,6 +118,24 @@
     "request_camera_access": "Request Camera Access",
     "camera_permission_granted": "Camera access granted!",
     "camera_permission_denied_persistent": "Camera access denied. Please enable camera in browser settings.",
+    "permission_fix_title": "How to enable camera:",
+    "permission_instructions_label": "Camera permission recovery steps",
+    "permission_ios_safari_step1": "Open the iPhone Settings app",
+    "permission_ios_safari_step2": "Scroll to Safari → Camera",
+    "permission_ios_safari_step3": "Change to \"Allow\" then return to this page",
+    "permission_ios_pwa_step1": "Open the iPhone Settings app",
+    "permission_ios_pwa_step2": "Scroll down to AfriPay → Camera",
+    "permission_ios_pwa_step3": "Tap \"Allow\" then reopen the app",
+    "permission_android_chrome_step1": "Tap the lock icon in the address bar",
+    "permission_android_chrome_step2": "Tap Permissions → Camera → Allow",
+    "permission_android_chrome_step3": "Refresh this page and try again",
+    "permission_android_pwa_step1": "Open Android Settings → Apps → AfriPay",
+    "permission_android_pwa_step2": "Tap Permissions → Camera → Allow",
+    "permission_android_pwa_step3": "Reopen the app and try again",
+    "permission_chrome_step1": "Click the camera icon or lock icon in the address bar",
+    "permission_chrome_step2": "Set Camera to \"Allow\" and refresh the page",
+    "permission_firefox_step1": "Click the lock icon in the address bar",
+    "permission_firefox_step2": "Set Camera permission to \"Allow\" and reload",
     "amount": "Amount",
     "memo": "Memo (optional)",
     "memo_placeholder": "Payment note, numeric ID, or 64-char hex…",
@@ -119,6 +153,7 @@
     "confirm_amount": "Amount:",
     "confirm_memo": "Memo:",
     "confirm_memo_type": "Memo type:",
+    "confirm_fee": "Network fee:",
     "review": "Review Payment",
     "confirm_send": "Confirm & Send",
     "success": "Payment sent successfully!",
@@ -150,56 +185,26 @@
     "title": "Receive Money",
     "subtitle": "Share your wallet address or QR code to receive payments",
     "address_label": "Your Stellar Wallet Address",
+    "federation_label": "Federation address",
     "warning": "Only send XLM or Stellar-based assets to this address",
     "address_copied": "Address copied!"
+  },
+  "request": {
+    "title": "Request Money",
+    "create": "Create Request",
+    "created": "Request created successfully!",
+    "error": "Failed to create request"
+  },
+  "scheduled": {
+    "title": "Scheduled Payments",
+    "created": "Scheduled payment created!",
+    "deleted": "Scheduled payment deleted",
+    "none": "No scheduled payments yet"
   },
   "swap": {
     "title": "Swap",
     "dex_rate": "DEX rate",
     "slippage_tolerance": "Slippage Tolerance",
-    "custom": "Custom",
-    "high_slippage_warning": "High slippage tolerance — your trade may result in an unfavorable price.",
-    "you_sell": "You sell",
-    "you_receive_est": "You receive (est.)",
-    "minimum_received": "Minimum received: {{amount}} {{asset}} ({{slippage}}% slippage)",
-    "high_price_impact": "High price impact ({{pct}}%). Your order is large relative to available liquidity — you may receive significantly less than the quoted amount.",
-    "confirm_swap": "Confirm swap",
-    "confirm_swap_detail": "Sell {{sellAmount}} {{sellAsset}} for approximately {{estimatedReceived}} {{buyAsset}}?",
-    "price_locked": "Price is locked — auto-refresh paused.",
-    "swapping": "Swapping…",
-    "confirm_swap_button": "Confirm Swap",
-    "swap_button": "Swap {{sellAsset}} → {{buyAsset}}",
-    "swap_complete": "Swap complete",
-    "sold": "Sold {{amount}} {{asset}}",
-    "est_received": "Est. received {{amount}} {{asset}}"
-  },
-  "history": {
-    "title": "History",
-    "filter_all": "all",
-    "filter_sent": "sent",
-    "filter_received": "received",
-    "to": "To:",
-    "from": "From:",
-    "export_csv": "Export CSV",
-    "search_placeholder": "Search memo, address, or amount",
-    "date_from": "From date",
-    "date_to": "To date",
-    "asset_label": "Asset",
-    "asset_all": "All assets",
-    "load_error": "Failed to load transactions",
-    "load_more": "Load more",
-    "loading_more": "Loading..."
-  },
-  "profile": {
-    "title": "Profile",
-    "member": "AfriPay Member",
-    "frequent_contacts": "Frequent Contacts",
-    "no_contacts": "No contacts yet",
-    "contact_name_placeholder": "Contact name",
-    "contact_address_placeholder": "G... wallet address",
-    "contact_added": "Contact added",
-    "contact_error": "Failed to add contact",
-    "address_copied": "Address copied!",
-    "language": "Language"
+    "custom": "Custom"
   }
 }

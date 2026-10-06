@@ -1,14 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Code, Copy, Check, ExternalLink } from 'lucide-react';
-import { TransactionBuilder, Networks } from '@stellar/stellar-sdk';
+import { TransactionBuilder } from '@stellar/stellar-sdk';
+// FE-129: Import from the shared network config instead of deriving inline.
+import { NETWORK_PASSPHRASE, NETWORK_LABEL } from '../config/network';
 
-const NETWORK = process.env.REACT_APP_STELLAR_NETWORK === 'mainnet'
-  ? 'public'
-  : 'testnet';
-
-const NETWORK_PASSPHRASE = NETWORK === 'public'
-  ? Networks.PUBLIC
-  : Networks.TESTNET;
+// Keep a local alias so the rest of this file reads naturally.
+const NETWORK = NETWORK_LABEL;
 
 function formatMemo(memo) {
   if (!memo || memo.type === 'none') return null;

@@ -26,6 +26,7 @@ The escrow lifecycle is:
 
 - `Pending` → `Released` when the assigned agent calls `release_escrow` or fully settles the escrow with `partial_release`
 - `Pending` → `Cancelled` when the original sender calls `cancel_escrow`
+- `Pending` → `UnderDispute` when the sender or recipient calls `dispute_escrow`, handing the full balance to the dispute-resolution contract for arbitration
 
 Completed or cancelled escrow records may be archived after a configurable retention period to limit persistent storage growth.
 
@@ -346,14 +347,14 @@ Panics / Errors:
 
 Signature:
 ```rust
-fn cleanup_escrow(env: Env, admin: Address, escrow_id: u64)
+fn cleanup_escrow(env: Env, escrow_id: u64)
 ```
 
 Description:
 - Removes a completed or cancelled escrow record from persistent storage once the configured retention period has elapsed.
+- Permissionless: like `expire_escrow`, anyone may call it (no admin auth) so old records can be swept without placing the burden on the admin.
 
 Parameters:
-- `admin` (`Address`) - must authorize the cleanup.
 - `escrow_id` (`u64`) - the escrow to archive.
 
 Returns:
@@ -464,6 +465,56 @@ Authorization:
 Panics / Errors:
 - `Contract not initialized` if the contract was never initialized.
 
+## Dispute Escalation
+
+If the agent confirms delivery but never releases (`confirm_delivery`) or disputes
+the payout amount, the sender cannot cancel (cancellation is blocked once
+delivery is confirmed) and would otherwise have to wait out the full
+`DEFAULT_EXPIRY_SECS` (30 days). This contract closes that gap by routing a
+pending escrow into the on-chain `dispute-resolution` contract for arbitration.
+
+### `set_dispute_contract`
+
+Signature:
+```rust
+fn set_dispute_contract(env: Env, admin: Address, dispute_contract: Address)
+```
+
+Admin-only. Stores the dispute-resolution contract address used by
+`dispute_escrow`. Read back with `get_dispute_contract()`. Until this is set,
+`dispute_escrow` panics with `Dispute resolution contract not configured`.
+
+### `dispute_escrow`
+
+Signature:
+```rust
+fn dispute_escrow(env: Env, caller: Address, escrow_id: u64) -> u64
+```
+
+Escalates a pending escrow to the configured dispute-resolution contract. Only
+the **sender** or **recipient** may call (auth required). The full remaining
+balance is transferred to the dispute-resolution contract, which records a
+dispute and takes custody of the funds; the escrow is marked `UnderDispute`
+and can no longer be released, cancelled, deposited into, or expired. The
+adjudicated winner is paid directly by the dispute-resolution contract.
+
+Returns the dispute ID assigned by the dispute-resolution contract.
+
+Panics / Errors:
+- `Dispute resolution contract not configured` if no dispute contract was set.
+- `Escrow {id} not found` if the escrow does not exist.
+- `Only the sender or recipient can dispute escrow` if the caller is neither.
+- `Escrow is not in pending state` if the escrow is no longer pending.
+
+Events:
+- `EscrowDisputed`
+
+### Dispute-resolution setup
+
+The dispute-resolution contract must register this escrow as its trusted escrow
+(via its admin-only `set_escrow_contract`) before `dispute_escrow` can succeed;
+its `open_escrow_dispute` is only callable by the registered escrow contract.
+
 ## Event Schemas
 
 ### `EscrowInitialized`
@@ -519,6 +570,16 @@ Fields:
 - `escrow_id` (`u64`) - escrow identifier.
 - `agent` (`Address`) - agent that confirmed delivery.
 
+### `EscrowDisputed`
+
+Emitted by `dispute_escrow`.
+
+Fields:
+- `escrow_id` (`u64`) - escrow identifier.
+- `dispute_id` (`u64`) - dispute ID assigned by the dispute-resolution contract.
+- `opener` (`Address`) - sender or recipient who escalated the escrow.
+- `amount` (`i128`) - balance handed over to the dispute-resolution contract.
+
 ### `PartialRelease`
 
 Emitted by `partial_release`.
@@ -546,6 +607,8 @@ This contract stores state under the following `DataKey` variants in persistent 
 - `DataKey::AccumulatedFees` -> `i128`
 - `DataKey::RetentionPeriodSecs` -> `u64`
 - `DataKey::Escrow(u64)` -> `Escrow`
+- `DataKey::DisputeContractAddress` -> `Address` (dispute-resolution contract used by `dispute_escrow`)
+- `DataKey::ContractVersion` -> `u32`
 
 ### `Escrow` struct layout
 
@@ -567,7 +630,7 @@ struct Escrow {
 
 ### Storage TTL strategy
 
-Completed or cancelled escrows are eligible for cleanup after a configurable retention period. The admin can set the retention TTL via `set_retention_period`, and then manually archive old records with `cleanup_escrow` once the escrow's `updated_at` timestamp is older than the retention threshold.
+Completed or cancelled escrows are eligible for cleanup after a configurable retention period. The admin can set the retention TTL via `set_retention_period`. Once the escrow's `updated_at` timestamp is older than the retention threshold, anyone can reclaim its storage with the permissionless `cleanup_escrow`, obviating the need for a manual admin (or automated job under the admin's key) sweep.
 
 ### `EscrowStatus` enum
 
@@ -576,6 +639,7 @@ enum EscrowStatus {
     Pending,
     Released,
     Cancelled,
+    UnderDispute,
 }
 ```
 
@@ -717,7 +781,10 @@ soroban contract deploy \
 - `release_escrow`: `agent.require_auth()` + agent address match.
 - `cancel_escrow`: `sender.require_auth()` + sender address match.
 - `withdraw_fees`: `admin.require_auth()` + stored admin match.
-- `upgrade`, `migrate`, `set_retention_period`, `cleanup_escrow`, `update_fee`, `set_kyc_contract`: admin-only.
+- `dispute_escrow`: `require_auth()` + caller must be the escrow sender or recipient.
+- `upgrade`, `migrate`, `set_retention_period`, `cleanup_escrow`, `update_fee`, `set_kyc_contract`, `set_dispute_contract`: admin-only.
+- `upgrade`, `migrate`, `set_retention_period`, `update_fee`, `set_kyc_contract`: admin-only.
+- `expire_escrow`, `cleanup_escrow`: permissionless (anyone may call once eligible).
 
 ### Event Emission Completeness
 - `EscrowInitialized` on `initialize`.
@@ -729,6 +796,7 @@ soroban contract deploy \
 - `PartialRelease` on `partial_release`.
 - `EscrowArchived` on `cleanup_escrow`.
 - `FeesWithdrawn` on `withdraw_fees`.
+- `EscrowDisputed` on `dispute_escrow`.
 - `FeeUpdated` on `update_fee`.
 - `Upgraded` on `upgrade`.
 - `Migrated` on `migrate`.

@@ -58,4 +58,55 @@ async function auditLog(ctx, action, resource = {}) {
   }
 }
 
-module.exports = { log, auditLog };
+/**
+ * BE-037: Compliance report summarizing geo-restriction denials over a date
+ * range, grouped by country/route/day, for questions like "how many
+ * attempts did we see from a newly-sanctioned jurisdiction last month".
+ *
+ * @param {object} range
+ * @param {string|Date} [range.from] - inclusive start (defaults to 30 days ago)
+ * @param {string|Date} [range.to]   - inclusive end (defaults to now)
+ * @returns {Promise<{ from: string, to: string, total: number, byCountry: Array, rows: Array }>}
+ */
+async function getGeoDenialReport({ from, to } = {}) {
+  const fromDate = from ? new Date(from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const toDate = to ? new Date(to) : new Date();
+
+  const { rows } = await db.query(
+    `SELECT
+       new_value->>'country' AS country,
+       new_value->>'route' AS route,
+       date_trunc('day', created_at) AS day,
+       COUNT(*) AS count
+     FROM audit_logs
+     WHERE action = 'geo_restriction_denied'
+       AND created_at BETWEEN $1 AND $2
+     GROUP BY country, route, day
+     ORDER BY day DESC, count DESC`,
+    [fromDate.toISOString(), toDate.toISOString()]
+  );
+
+  const byCountryMap = new Map();
+  let total = 0;
+  for (const r of rows) {
+    const count = parseInt(r.count, 10);
+    total += count;
+    const country = r.country || 'unknown';
+    byCountryMap.set(country, (byCountryMap.get(country) || 0) + count);
+  }
+
+  return {
+    from: fromDate.toISOString(),
+    to: toDate.toISOString(),
+    total,
+    byCountry: Array.from(byCountryMap.entries()).map(([country, count]) => ({ country, count })),
+    rows: rows.map((r) => ({
+      country: r.country || 'unknown',
+      route: r.route,
+      day: r.day,
+      count: parseInt(r.count, 10),
+    })),
+  };
+}
+
+module.exports = { log, auditLog, getGeoDenialReport };

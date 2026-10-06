@@ -1,10 +1,49 @@
 const router = require('express').Router();
-const { getAssetMetadata, getAssetByParams, issueTokens } = require('../controllers/assetController');
-const { body, validationResult } = require('express-validator');
+const { getAssetMetadata, getAssetByParams, issueTokens, setAssetStatus } = require('../controllers/assetController');
+const { body, param, validationResult } = require('express-validator');
 const auth = require('../middleware/auth');
 const isAdmin = require('../middleware/isAdmin');
 
 router.get('/AFRI/info', getAssetMetadata);
+
+/**
+ * @openapi
+ * /api/assets/{id}/status:
+ *   patch:
+ *     summary: Enable or disable a supported asset (admin only)
+ *     description: >
+ *       Toggles supported_assets.is_active and explicitly invalidates the
+ *       balance cache (BE-030) so the change takes effect immediately rather
+ *       than after the balance cache TTL expires.
+ *     tags: [Assets]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Asset status updated
+ *       400:
+ *         description: Validation error
+ *       404:
+ *         description: Asset not found
+ */
+router.patch(
+  '/:id/status',
+  auth,
+  isAdmin,
+  [
+    param('id').isInt().withMessage('id must be an integer'),
+    body('is_active').isBoolean().withMessage('is_active must be a boolean'),
+  ],
+  (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    next();
+  },
+  setAssetStatus
+);
+
 router.get('/:code/:issuer', getAssetByParams);
 
 /**

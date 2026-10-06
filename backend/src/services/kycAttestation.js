@@ -129,4 +129,17 @@ async function revokeKyc(adminPublicKey, userWalletAddress) {
   return invokeAdmin("revoke", args);
 }
 
-module.exports = { attestKyc, revokeKyc };
+/**
+ * Public key of the admin wallet configured via ADMIN_ENCRYPTED_SECRET_KEY.
+ * Used by system jobs (e.g. kycExpiryJob) that need to call attest/revoke
+ * without an authenticated admin request in context.
+ */
+function getAdminPublicKey() {
+  const encryptedKey = process.env.ADMIN_ENCRYPTED_SECRET_KEY;
+  if (!encryptedKey) {
+    throw Object.assign(new Error("ADMIN_ENCRYPTED_SECRET_KEY is not configured"), { status: 500 });
+  }
+  return StellarSdk.Keypair.fromSecret(decryptSecret(encryptedKey)).publicKey();
+}
+
+module.exports = { attestKyc, revokeKyc, getAdminPublicKey };

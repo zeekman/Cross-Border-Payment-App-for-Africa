@@ -10,11 +10,53 @@ const PRICE_CHANGE_TOAST_THRESHOLD = 0.005; // 0.5%
 
 const SLIPPAGE_PRESETS = [0.1, 0.5, 1.0];
 const DEFAULT_SLIPPAGE = 0.5;
-const SLIPPAGE_STORAGE_KEY = 'afripay_swap_slippage';
+const MAX_SLIPPAGE = 5;
+const SLIPPAGE_STORAGE_KEY = 'afripay_slippage'; // shared with SendMoney
+// Single app-wide slippage preference shared by Swap and Send Money.
+const SLIPPAGE_STORAGE_KEY = 'afripay_slippage';
+
+// Stellar amounts are fixed-point with 7 decimals. Keep them as strings
+// end-to-end and use integer (stroop) arithmetic for derived values so we
+// never round-trip through IEEE-754 floats.
+const AMOUNT_REGEX = /^\d+(\.\d{1,7})?$/;
+const AMOUNT_DECIMALS = 7;
+const AMOUNT_SCALE = 10n ** BigInt(AMOUNT_DECIMALS);
+
+function isValidAmount(value) {
+  return typeof value === 'string' && AMOUNT_REGEX.test(value.trim());
+}
+
+// Parse a decimal string into a scaled BigInt (value * 10^7).
+function toScaled(value) {
+  const [whole, frac = ''] = String(value).trim().split('.');
+  const paddedFrac = (frac + '0'.repeat(AMOUNT_DECIMALS)).slice(0, AMOUNT_DECIMALS);
+  return BigInt(whole) * AMOUNT_SCALE + BigInt(paddedFrac || '0');
+}
+
+// Render a scaled BigInt back to a fixed 7-decimal string.
+function fromScaled(scaled) {
+  const negative = scaled < 0n;
+  const abs = negative ? -scaled : scaled;
+  const whole = abs / AMOUNT_SCALE;
+  const frac = (abs % AMOUNT_SCALE).toString().padStart(AMOUNT_DECIMALS, '0');
+  return `${negative ? '-' : ''}${whole}.${frac}`;
+}
+
+// Multiply a decimal string by a rational factor (num/den) using integer math.
+function mulDiv(value, num, den) {
+  return fromScaled((toScaled(value) * BigInt(num)) / BigInt(den));
+}
+
+function normalizeSlippage(value) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SLIPPAGE;
+  return Math.min(MAX_SLIPPAGE, Math.max(parsed, 0.01));
+}
 
 function getSavedSlippage() {
-  const v = parseFloat(localStorage.getItem(SLIPPAGE_STORAGE_KEY));
-  return isNaN(v) || v <= 0 ? DEFAULT_SLIPPAGE : v;
+  const raw = Number.parseFloat(localStorage.getItem(SLIPPAGE_STORAGE_KEY));
+  if (!Number.isFinite(raw)) return DEFAULT_SLIPPAGE;
+  return normalizeSlippage(raw);
 }
 
 export default function Swap() {
@@ -33,15 +75,16 @@ export default function Swap() {
   const slippagePopoverRef = useRef(null);
 
   const minReceived = quote?.estimatedReceived
-    ? (parseFloat(quote.estimatedReceived) * (1 - slippage / 100)).toFixed(7)
+    ? mulDiv(quote.estimatedReceived, Math.round((100 - slippage) * 100), 10000)
     : null;
 
+  // Minimum the backend will actually enforce (server-returned destMin).
+  const enforcedMin = result?.destMin ?? result?.dest_min ?? null;
+
   const applySlippage = (value) => {
-    const v = parseFloat(value);
-    if (!isNaN(v) && v > 0 && v <= 50) {
-      setSlippage(v);
-      localStorage.setItem(SLIPPAGE_STORAGE_KEY, String(v));
-    }
+    const nextValue = normalizeSlippage(value);
+    setSlippage(nextValue);
+    localStorage.setItem(SLIPPAGE_STORAGE_KEY, String(nextValue));
   };
 
   // Close slippage popover on outside click
@@ -72,14 +115,16 @@ export default function Swap() {
   };
 
   const fetchQuote = useCallback(async (isAutoRefresh = false) => {
-    if (!sellAmount || parseFloat(sellAmount) <= 0) { setQuote(null); return; }
+    if (!isValidAmount(sellAmount) || toScaled(sellAmount) <= 0n) { setQuote(null); return; }
     setQuoteLoading(true);
     try {
       const bookRes = await api.get(`/dex/orderbook?selling=${sellAsset}&buying=${buyAsset}`);
       const { midPrice, asks } = bookRes.data;
 
       const bestAsk = asks[0] ? parseFloat(asks[0].price) : null;
-      const estimatedReceived = bestAsk ? (parseFloat(sellAmount) / bestAsk).toFixed(7) : null;
+      const estimatedReceived = bestAsk
+        ? mulDiv(sellAmount, Math.round((1 / bestAsk) * 1e7), 1e7)
+        : null;
       const bestAskVolume = asks[0] ? parseFloat(asks[0].amount) : Infinity;
       const priceImpactPct = bestAskVolume > 0
         ? Math.min(((parseFloat(sellAmount) / bestAskVolume) * 100), 100)
@@ -156,15 +201,22 @@ export default function Swap() {
 
   const handleSwap = async (e) => {
     e.preventDefault();
+    if (!isValidAmount(sellAmount)) {
+      toast.error('Enter a valid amount with up to 7 decimal places');
+      return;
+    }
     if (!confirmOpen) { setConfirmOpen(true); return; }
     setSubmitting(true);
     setResult(null);
     try {
       const res = await api.post('/dex/swap', {
         sell_asset: sellAsset,
-        sell_amount: parseFloat(sellAmount),
+        sell_amount: sellAmount.trim(),
         buy_asset: buyAsset,
+        // Backend honours slippage_pct; min_received kept for BE-139 forward-compat.
+        slippage_pct: slippage,
         min_received: minReceived ? parseFloat(minReceived) : undefined,
+        min_received: minReceived || undefined,
       });
       setResult(res.data);
       setSellAmount('');
@@ -208,82 +260,119 @@ export default function Swap() {
             <Settings size={14} />
             <span className="font-medium">{slippage}%</span>
           </button>
-
           {showSlippagePopover && (
-            <div className="absolute right-0 top-8 z-20 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-4 w-56 shadow-xl space-y-3">
-              <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">
-                {t('swap.slippage_tolerance')}
-              </p>
+            <div className="absolute right-0 mt-2 w-56 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-lg p-3 z-20 space-y-2">
+              <p className="text-xs font-medium text-gray-500 dark:text-gray-400">Slippage tolerance</p>
               <div className="flex gap-2">
-                {SLIPPAGE_PRESETS.map((p) => (
+            <div className="absolute right-0 mt-2 w-56 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-lg p-3 z-10">
+              <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">Slippage tolerance</p>
+              <div className="flex gap-2 mb-2">
+                {SLIPPAGE_PRESETS.map((preset) => (
                   <button
-                    key={p}
+                    key={preset}
                     type="button"
-                    onClick={() => { applySlippage(p); setCustomSlippage(''); }}
-                    className={`flex-1 py-1.5 rounded-lg text-sm font-semibold border transition-colors ${
-                      slippage === p && !customSlippage
-                        ? 'border-primary-500 bg-primary-500/10 text-primary-500'
-                        : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:border-primary-400'
+                    onClick={() => applySlippage(preset)}
+                    className={`flex-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors ${
+                      slippage === preset
+                        ? 'bg-primary-500 text-white'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                    className={`flex-1 py-1 rounded-lg text-xs font-medium transition-colors ${
+                      slippage === preset
+                        ? 'bg-primary-500 text-white'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
                     }`}
                   >
-                    {p}%
+                    {preset}%
                   </button>
                 ))}
               </div>
-              <div>
-                <label className="text-xs text-gray-500 block mb-1">{t('swap.custom')}</label>
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number"
-                    min="0.01"
-                    max="50"
-                    step="0.1"
-                    placeholder="0.5"
-                    value={customSlippage}
-                    onChange={(e) => {
-                      setCustomSlippage(e.target.value);
-                      if (e.target.value) applySlippage(e.target.value);
-                    }}
-                    className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-primary-500"
-                  />
-                  <span className="text-sm text-gray-500">%</span>
-                </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="0.01"
+                  max={MAX_SLIPPAGE}
+                  step="0.1"
+                  value={customSlippage}
+                  onChange={(e) => setCustomSlippage(e.target.value)}
+                  placeholder="Custom"
+                  className="flex-1 px-2 py-1 rounded-lg text-xs bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white border border-transparent focus:border-primary-500 outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => { applySlippage(customSlippage); setCustomSlippage(''); }}
+                  className="px-2 py-1 rounded-lg text-xs font-medium bg-primary-500 text-white hover:bg-primary-600 transition-colors"
+                >
+                  Set
+                </button>
               </div>
-              {slippage > 5 && (
-                <p className="text-xs text-yellow-500">
-                  {t('swap.high_slippage_warning')}
+              {slippage > HIGH_IMPACT_PCT && (
+                <p className="text-xs text-amber-500 flex items-center gap-1">
+                  <AlertTriangle size={12} /> High slippage tolerance
                 </p>
               )}
+              <input
+                type="number"
+                step="0.1"
+                min="0.01"
+                max={MAX_SLIPPAGE}
+                value={customSlippage}
+                onChange={(e) => setCustomSlippage(e.target.value)}
+                onBlur={() => {
+                  if (customSlippage) applySlippage(customSlippage);
+                  setCustomSlippage('');
+                }}
+                placeholder="Custom %"
+                className="w-full px-2 py-1 text-xs rounded-lg border border-gray-200 dark:border-gray-600 bg-transparent text-gray-900 dark:text-white"
+              />
             </div>
           )}
         </div>
       </div>
 
-      <form onSubmit={handleSwap} className="space-y-3">
+      <form onSubmit={handleSwap} className="space-y-4">
         {/* Sell */}
-        <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl p-4 space-y-2">
-          <label className="text-xs text-gray-500 uppercase tracking-wide">{t('swap.you_sell')}</label>
-          <div className="flex items-center gap-3">
+        <div className="bg-white dark:bg-gray-800 rounded-xl p-4 border border-gray-200 dark:border-gray-700">
+          <label className="text-xs text-gray-500 dark:text-gray-400">You pay</label>
+          <div className="flex items-center gap-2 mt-1">
             <input
               type="number"
               min="0"
               step="any"
-              required
-              placeholder="0.00"
               value={sellAmount}
-              onChange={e => { setSellAmount(e.target.value); setResult(null); }}
-              className="flex-1 bg-transparent text-2xl font-bold text-gray-900 dark:text-white outline-none placeholder-gray-300 dark:placeholder-gray-700"
+              onChange={(e) => setSellAmount(e.target.value)}
+              placeholder="0.00"
+        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-3">
+          <label className="text-xs text-gray-500 dark:text-gray-400">You sell</label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              inputMode="decimal"
+              value={sellAmount}
+              onChange={(e) => setSellAmount(e.target.value)}
+              placeholder="0.0000000"
+              className="flex-1 bg-transparent text-2xl font-semibold text-gray-900 dark:text-white outline-none"
             />
-            <span className="text-lg font-semibold text-gray-700 dark:text-gray-300 shrink-0">{sellAsset}</span>
+            <select
+              value={sellAsset}
+              onChange={(e) => setSellAsset(e.target.value)}
+              className="bg-gray-100 dark:bg-gray-700 rounded-lg px-2 py-1 text-sm text-gray-900 dark:text-white outline-none"
+              className="px-2 py-1 rounded-lg border border-gray-200 dark:border-gray-600 bg-transparent text-sm text-gray-900 dark:text-white"
+            >
+              <option value="XLM">XLM</option>
+              <option value="USDC">USDC</option>
+            </select>
           </div>
+          {sellAmount && !isValidAmount(sellAmount) && (
+            <p className="text-xs text-red-500">Amount must have at most 7 decimal places</p>
+          )}
         </div>
 
-        {/* Flip button */}
         <div className="flex justify-center">
           <button
             type="button"
             onClick={flipPair}
-            className="w-9 h-9 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full flex items-center justify-center text-gray-500 hover:text-primary-500 transition-colors shadow-sm"
+            className="p-2 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 hover:text-primary-500 transition-colors"
+            className="p-2 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
             aria-label="Flip pair"
           >
             <ArrowUpDown size={16} />
@@ -291,80 +380,124 @@ export default function Swap() {
         </div>
 
         {/* Buy */}
-        <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl p-4 space-y-2">
-          <label className="text-xs text-gray-500 uppercase tracking-wide">{t('swap.you_receive_est')}</label>
-          <div className="flex items-center gap-3">
-            <span className="flex-1 text-2xl font-bold text-gray-400 dark:text-gray-600">
-              {quoteLoading ? '…' : quote?.estimatedReceived ?? '0.00'}
+        <div className="bg-white dark:bg-gray-800 rounded-xl p-4 border border-gray-200 dark:border-gray-700">
+          <label className="text-xs text-gray-500 dark:text-gray-400">You receive</label>
+          <div className="flex items-center gap-2 mt-1">
+            <span className="flex-1 text-2xl font-semibold text-gray-900 dark:text-white">
+              {quoteLoading ? '…' : quote?.estimatedReceived || '0.00'}
             </span>
-            <span className="text-lg font-semibold text-gray-700 dark:text-gray-300 shrink-0">{buyAsset}</span>
+            <select
+              value={buyAsset}
+              onChange={(e) => setBuyAsset(e.target.value)}
+              className="bg-gray-100 dark:bg-gray-700 rounded-lg px-2 py-1 text-sm text-gray-900 dark:text-white outline-none"
+            >
+              <option value="XLM">XLM</option>
+              <option value="USDC">USDC</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Quote details */}
+        {quote && (
+          <div className="bg-gray-50 dark:bg-gray-800/50 rounded-xl p-3 text-xs space-y-1.5">
+            <div className="flex justify-between text-gray-500 dark:text-gray-400">
+              <span>Minimum received</span>
+              <span className="font-medium text-gray-900 dark:text-white">
+                {minReceived ? `${minReceived} ${buyAsset}` : '—'}
+              </span>
+            </div>
+            <div className="flex justify-between text-gray-500 dark:text-gray-400">
+              <span>Price impact</span>
+              <span className={`font-medium ${highImpact ? 'text-amber-500' : 'text-gray-900 dark:text-white'}`}>
+                {quote.priceImpactPct.toFixed(2)}%
+              </span>
+            </div>
+            <div className="flex justify-between text-gray-500 dark:text-gray-400">
+              <span>Auto-refresh in</span>
+              <span className="font-medium text-gray-900 dark:text-white">{refreshCountdown}s</span>
+            </div>
+            <div className="h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+              <div className="h-full bg-primary-500 transition-all" style={{ width: `${progressPct}%` }} />
+            </div>
+            <button
+              type="button"
+              onClick={handleManualRefresh}
+              className="text-primary-500 hover:underline"
+            >
+              Refresh quote
+            </button>
+          </div>
+        )}
+
+        {highImpact && (
+          <div className="flex items-start gap-2 text-xs text-amber-500 bg-amber-500/10 rounded-xl p-3">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <span>High price impact. You may receive significantly less than quoted.</span>
+        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-3">
+          <label className="text-xs text-gray-500 dark:text-gray-400">You receive (estimated)</label>
+          <div className="flex gap-2 items-center">
+            <span className="flex-1 text-2xl font-semibold text-gray-900 dark:text-white">
+              {quoteLoading ? '…' : quote?.estimatedReceived || '0.0000000'}
+            </span>
+            <span className="px-2 py-1 rounded-lg border border-gray-200 dark:border-gray-600 text-sm text-gray-900 dark:text-white">
+              {buyAsset}
+            </span>
           </div>
           {minReceived && (
-            <p className="text-xs text-gray-500">
-              {t('swap.minimum_received', { amount: minReceived, asset: buyAsset, slippage })}
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Minimum received: {minReceived} {buyAsset}
             </p>
           )}
         </div>
 
         {highImpact && (
-          <div className="flex items-start gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 text-sm text-yellow-500">
-            <AlertTriangle size={16} className="shrink-0 mt-0.5" />
-            <span>
-              {t('swap.high_price_impact', { pct: quote.priceImpactPct.toFixed(1) })}
-            </span>
-          </div>
-        )}
-
-        {/* Confirm step */}
-        {confirmOpen && (
-          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 text-sm text-yellow-400">
-            <p className="font-semibold mb-1">{t('swap.confirm_swap')}</p>
-            <p>{t('swap.confirm_swap_detail', { sellAmount, sellAsset, estimatedReceived: quote?.estimatedReceived, buyAsset })}</p>
-            <p className="text-xs text-gray-400 mt-1">{t('swap.price_locked')}</p>
+          <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <span>High price impact ({quote.priceImpactPct.toFixed(2)}%). You may receive significantly less than estimated.</span>
           </div>
         )}
 
         <button
           type="submit"
-          disabled={submitting || !sellAmount || parseFloat(sellAmount) <= 0}
-          className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-2xl transition-colors"
+          disabled={!quote || submitting}
+          className="w-full py-3 rounded-xl bg-primary-500 text-white font-semibold hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          disabled={submitting || !isValidAmount(sellAmount)}
+          className="w-full py-3 rounded-xl bg-primary-500 text-white font-semibold disabled:opacity-50 transition-opacity"
         >
-          {submitting ? t('swap.swapping') : confirmOpen ? t('swap.confirm_swap_button') : t('swap.swap_button', { sellAsset, buyAsset })}
+          {submitting ? 'Swapping…' : confirmOpen ? 'Confirm swap' : 'Review swap'}
         </button>
-
-        {confirmOpen && (
-          <button
-            type="button"
-            onClick={() => setConfirmOpen(false)}
-            className="w-full text-gray-400 hover:text-white text-sm py-2 transition-colors"
-          >
-            {t('common.cancel')}
-          </button>
-        )}
       </form>
 
-      {/* Success result */}
+      {/* Confirmation / result */}
       {result && (
-        <div className="bg-green-500/10 border border-green-500/30 rounded-2xl p-4 space-y-1">
-          <div className="flex items-center gap-2 text-green-400 font-semibold text-sm mb-2">
-            <CheckCircle2 size={16} /> {t('swap.swap_complete')}
+        <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-4 text-sm space-y-1.5">
+          <div className="flex items-center gap-2 text-green-600 dark:text-green-400 font-medium">
+            <CheckCircle2 size={16} /> Swap executed
           </div>
-          <p className="text-sm text-gray-700 dark:text-gray-300">
-            {t('swap.sold', { amount: result.soldAmount, asset: result.soldAsset })}
-          </p>
-          <p className="text-sm text-gray-700 dark:text-gray-300">
-            {t('swap.est_received', { amount: result.estimatedReceived, asset: result.buyAsset })}
-          </p>
-          <a
-            href={`https://stellar.expert/explorer/testnet/tx/${result.transactionHash}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs text-primary-400 hover:underline break-all"
-          >
-            {result.transactionHash}
-          </a>
+          {enforcedMin != null && (
+            <div className="flex justify-between text-gray-500 dark:text-gray-400">
+              <span>Minimum enforced</span>
+              <span className="font-medium text-gray-900 dark:text-white">
+                {enforcedMin} {buyAsset}
+              </span>
+            </div>
+          )}
+      {result && (
+        <div className="flex items-start gap-2 bg-green-500/10 border border-green-500/20 rounded-xl px-3 py-2 text-xs text-green-600 dark:text-green-400">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          <span>Swap submitted successfully.</span>
         </div>
       )}
+
+      <div className="flex items-center justify-between text-xs text-gray-400 dark:text-gray-500">
+        <span>Auto-refresh in {refreshCountdown}s</span>
+        <button type="button" onClick={handleManualRefresh} className="hover:text-primary-500 transition-colors">
+          Refresh now
+        </button>
+      </div>
+      <div className="h-1 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
+        <div className="h-full bg-primary-500 transition-all" style={{ width: `${progressPct}%` }} />
+      </div>
     </div>
   );
 }

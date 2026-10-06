@@ -20,6 +20,9 @@ const DEAD_LETTER_KEY   = 'push:dead_letter';
 const MAX_ATTEMPTS      = 3;
 // Retry delays in seconds: attempt 1 → 60s, attempt 2 → 300s, attempt 3 → 1800s
 const RETRY_DELAYS      = [60, 300, 1800];
+// Consecutive non-permanent failures (across attempts + retries) after which
+// a subscription is deactivated even without ever getting a 410/404.
+const MAX_CONSECUTIVE_FAILURES = parseInt(process.env.PUSH_MAX_CONSECUTIVE_FAILURES || '5', 10);
 
 // ---------------------------------------------------------------------------
 // VAPID helpers
@@ -141,34 +144,77 @@ function _sendRaw(subscription, payload) {
 }
 
 // ---------------------------------------------------------------------------
+// Subscription health tracking
+// ---------------------------------------------------------------------------
+
+/**
+ * Deactivate (not delete) a subscription — keeps the stored PushSubscription
+ * JSON so we retain history, but stops further send attempts until the user
+ * re-subscribes (see notificationController.getSubscriptionHealth).
+ */
+async function deactivateSubscription(dbPool, subscriptionId) {
+  if (!dbPool || !subscriptionId) return;
+  await dbPool.query(
+    'UPDATE users SET push_subscription_active = false WHERE id = $1',
+    [subscriptionId],
+  ).catch(e => logger.warn('Failed to deactivate stale push subscription', { error: e.message }));
+}
+
+async function recordSendSuccess(dbPool, subscriptionId) {
+  if (!dbPool || !subscriptionId) return;
+  await dbPool.query(
+    'UPDATE users SET push_failure_count = 0, push_subscription_active = true WHERE id = $1',
+    [subscriptionId],
+  ).catch(e => logger.warn('Failed to reset push failure count', { error: e.message }));
+}
+
+/**
+ * Increment the consecutive-failure counter and deactivate the subscription
+ * once it crosses MAX_CONSECUTIVE_FAILURES.
+ */
+async function recordSendFailure(dbPool, subscriptionId) {
+  if (!dbPool || !subscriptionId) return;
+  const result = await dbPool.query(
+    `UPDATE users SET push_failure_count = push_failure_count + 1
+     WHERE id = $1 RETURNING push_failure_count`,
+    [subscriptionId],
+  ).catch(e => { logger.warn('Failed to increment push failure count', { error: e.message }); return null; });
+
+  const count = result?.rows?.[0]?.push_failure_count;
+  if (count != null && count >= MAX_CONSECUTIVE_FAILURES) {
+    await deactivateSubscription(dbPool, subscriptionId);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public sendNotification with retry enqueue on failure
 // ---------------------------------------------------------------------------
 
 /**
- * Attempt to send; on failure enqueue for retry (unless 410/404 → clean up).
+ * Attempt to send; on failure enqueue for retry (unless 410/404 → deactivate).
  * @param {object} subscription - { endpoint, keys }
  * @param {string} payload      - JSON string
- * @param {string|null} subscriptionId - DB id for cleanup on 410
- * @param {object} db           - pg pool (optional, passed for 410 cleanup)
+ * @param {string|null} subscriptionId - DB id for health tracking / cleanup
+ * @param {object} dbPool       - pg pool (optional, passed for health tracking)
  * @returns {Promise<number>}   - HTTP status
  */
 async function sendNotification(subscription, payload, subscriptionId = null, dbPool = null) {
   try {
-    return await module.exports._sendRaw(subscription, payload);
+    const status = await module.exports._sendRaw(subscription, payload);
+    await recordSendSuccess(dbPool, subscriptionId);
+    return status;
   } catch (err) {
     const status = err.statusCode;
 
-    // Permanent failure — clean up subscription
+    // Permanent failure — deactivate subscription (endpoint is confirmed gone)
     if (status === 410 || status === 404) {
-      if (dbPool && subscriptionId) {
-        await dbPool.query('UPDATE users SET push_subscription = NULL WHERE id = $1', [subscriptionId])
-          .catch(e => logger.warn('Failed to remove stale push subscription', { error: e.message }));
-      }
+      await deactivateSubscription(dbPool, subscriptionId);
       return status;
     }
 
     // Enqueue for retry
     if (subscriptionId) {
+      await recordSendFailure(dbPool, subscriptionId);
       const retryAfter = (status === 429 && err.retryAfter) ? err.retryAfter : RETRY_DELAYS[0];
       await enqueueRetry({ subscriptionId, subscription, payload, attempt: 1,
         nextRetryAt: Date.now() + retryAfter * 1000 });
@@ -214,18 +260,18 @@ async function processRetryQueue(dbPool) {
 
     try {
       await module.exports._sendRaw(item.subscription, item.payload);
+      await recordSendSuccess(dbPool, item.subscriptionId);
       logger.info('Push retry succeeded', { subscriptionId: item.subscriptionId, attempt: item.attempt });
     } catch (err) {
       const status = err.statusCode;
 
       if (status === 410 || status === 404) {
-        // Permanently gone — clean up
-        if (dbPool && item.subscriptionId) {
-          await dbPool.query('UPDATE users SET push_subscription = NULL WHERE id = $1', [item.subscriptionId])
-            .catch(() => {});
-        }
+        // Permanently gone — deactivate (not delete)
+        await deactivateSubscription(dbPool, item.subscriptionId);
         continue;
       }
+
+      await recordSendFailure(dbPool, item.subscriptionId);
 
       if (item.attempt >= MAX_ATTEMPTS) {
         // Move to dead-letter
@@ -265,9 +311,13 @@ module.exports = {
   sendNotification,
   processRetryQueue,
   getDeadLetter,
+  deactivateSubscription,
+  recordSendSuccess,
+  recordSendFailure,
   _sendRaw,
   RETRY_QUEUE_KEY,
   DEAD_LETTER_KEY,
   MAX_ATTEMPTS,
   RETRY_DELAYS,
+  MAX_CONSECUTIVE_FAILURES,
 };

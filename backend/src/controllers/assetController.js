@@ -1,6 +1,7 @@
 const db = require('../db');
 const { issueAsset, getAssetInfo, getAssetMetadataByCodeAndIssuer } = require('../services/stellar');
 const logger = require('../utils/logger');
+const cache = require('../utils/cache');
 
 // Issue AFRI tokens to a recipient (admin only)
 async function issueTokens(req, res, next) {
@@ -55,4 +56,54 @@ async function getAssetByParams(req, res, next) {
   }
 }
 
-module.exports = { issueTokens, getAssetMetadata, getAssetByParams };
+// PATCH /api/assets/:id/status (admin only) — enable/disable a supported asset.
+//
+// Cache-invalidation path (BE-030): asset whitelist metadata is folded into the
+// per-wallet `balance:<public_key>` cache entries in walletController (TTL =
+// MULTI_ASSET_TTL, currently 10s) rather than cached under its own key. Simply
+// waiting out that TTL after disabling an asset for compliance reasons would let
+// it remain "sendable" from a client's point of view for up to 10s. To avoid
+// relying on TTL expiry, every toggle here does a `cache.delPattern('balance:*')`
+// immediately after the DB write, so the next balance read for any wallet is
+// forced to hit Postgres and pick up the fresh `is_active` flag. Direct
+// whitelist checks (e.g. addTrustlineHandler in walletController) already query
+// `supported_assets` live and are unaffected by this cache.
+async function setAssetStatus(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { is_active } = req.body;
+
+    if (typeof is_active !== 'boolean') {
+      const err = new Error('is_active must be a boolean');
+      err.status = 400;
+      throw err;
+    }
+
+    const result = await db.query(
+      `UPDATE supported_assets SET is_active = $1 WHERE id = $2
+       RETURNING id, asset_code, asset_issuer, is_active`,
+      [is_active, id]
+    );
+
+    if (!result.rows[0]) {
+      const err = new Error('Asset not found');
+      err.status = 404;
+      throw err;
+    }
+
+    // Explicit invalidation — do not rely on the balance cache TTL alone.
+    await cache.delPattern('balance:*');
+
+    logger.info('Supported asset status toggled', {
+      assetId: id,
+      is_active,
+      admin: req.user?.userId,
+    });
+
+    res.json({ success: true, asset: result.rows[0] });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { issueTokens, getAssetMetadata, getAssetByParams, setAssetStatus };

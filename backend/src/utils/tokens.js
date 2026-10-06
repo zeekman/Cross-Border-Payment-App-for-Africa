@@ -16,6 +16,10 @@ const REFRESH_TOKEN_TTL_MS = REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000;
 
 const COOKIE_NAME = 'refreshToken';
 
+/** httpOnly cookie carrying the device-trust token (issue #995 — replaces localStorage). */
+const DEVICE_COOKIE_NAME = 'deviceTrust';
+const DEVICE_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matches DEVICE_TOKEN_TTL
+
 const isProduction = process.env.NODE_ENV === 'production';
 
 const COOKIE_OPTIONS = {
@@ -24,6 +28,16 @@ const COOKIE_OPTIONS = {
   // lax allows cross-origin credentialed requests in dev (e.g. localhost:3000 → :5000)
   sameSite: isProduction ? 'strict' : 'lax',
   maxAge: REFRESH_TOKEN_TTL_MS,
+  path: '/api/auth',
+};
+
+const DEVICE_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? 'strict' : 'lax',
+  maxAge: DEVICE_TOKEN_TTL_MS,
+  // Scoped like the refresh-token cookie so /api/auth/login can read it and
+  // /api/auth/device-trust can clear it with a matching path.
   path: '/api/auth',
 };
 
@@ -43,7 +57,7 @@ function refreshTokenExpiresAt() {
   return new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
 }
 
-/** Issue a 30-day device trust token (stored client-side in localStorage). */
+/** Issue a 30-day device trust token (delivered via an httpOnly cookie — never localStorage). */
 function signDeviceToken(payload) {
   return jwt.sign({ ...payload, type: 'device_trust' }, process.env.JWT_SECRET, { expiresIn: DEVICE_TOKEN_TTL });
 }
@@ -61,6 +75,8 @@ function verifyDeviceToken(token) {
 module.exports = {
   COOKIE_NAME,
   COOKIE_OPTIONS,
+  DEVICE_COOKIE_NAME,
+  DEVICE_COOKIE_OPTIONS,
   signAccessToken,
   generateRefreshToken,
   refreshTokenExpiresAt,

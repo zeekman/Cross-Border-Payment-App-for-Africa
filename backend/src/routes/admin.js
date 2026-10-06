@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { body, param, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
+const { readLimiter, adminLimiter } = require('../middleware/rateLimiter');
 const isAdmin = require('../middleware/isAdmin');
 const ipAllowlist = require('../middleware/ipAllowlist');
 const { issueTokens } = require('../controllers/assetController');
@@ -24,12 +25,16 @@ const {
   getFraudRules,
   createFraudRule,
   updateFraudRule,
+  getFraudShadowReport,
   bulkSuspend,
   bulkUnsuspend,
   bulkExport,
   getJobStatus,
   bulkKycUpdate,
   getAuditLogs,
+  getGeoDenialsReport,
+  overrideAmlFlag,
+  getAmlOverrides,
 } = require('../controllers/adminController');
 const { getDeadLetterNotifications } = require('../controllers/notificationController');
 const {
@@ -37,6 +42,7 @@ const {
   createFeeConfig,
   updateFeeConfig,
   listHistory,
+  previewFeeConfigChange,
 } = require('../controllers/feeConfigController');
 
 const validate = (req, res, next) => {
@@ -47,6 +53,7 @@ const validate = (req, res, next) => {
 
 router.use(ipAllowlist);
 router.use(authMiddleware);
+router.use(readLimiter);
 router.use(isAdmin);
 
 /**
@@ -197,6 +204,8 @@ router.post('/fraud-rules',
     body('name').trim().notEmpty().isLength({ max: 100 }),
     body('rule_type').isIn(['velocity', 'amount', 'daily_limit']),
     body('parameters').isObject(),
+    // BE-033: optional at creation — defaults to 'shadow' in the controller.
+    body('mode').optional().isIn(['shadow', 'active']),
   ],
   validate,
   createFraudRule
@@ -207,10 +216,15 @@ router.patch('/fraud-rules/:id',
     body('name').optional().trim().isLength({ max: 100 }),
     body('parameters').optional().isObject(),
     body('is_active').optional().isBoolean(),
+    body('mode').optional().isIn(['shadow', 'active']),
   ],
   validate,
   updateFraudRule
 );
+
+// BE-033: compare shadow-rule outcomes (would-block vs would-pass) before
+// promoting a rule from 'shadow' to 'active'.
+router.get('/fraud-rules/shadow-report', getFraudShadowReport);
 
 // ---------------------------------------------------------------------------
 // Bulk User Management (#692)
@@ -257,6 +271,60 @@ router.get('/notifications/dead-letter', getDeadLetterNotifications);
 // Immutable Audit Log (#698)
 // ---------------------------------------------------------------------------
 router.get('/audit-logs', getAuditLogs);
+router.get('/compliance/geo-denials', getGeoDenialsReport);
+
+/**
+ * @openapi
+ * /api/admin/aml/override:
+ *   post:
+ *     summary: Override an AML flag (admin only, audit-logged) — BE-032
+ *     description: >
+ *       Requires a mandatory free-text reason. Every override is written to
+ *       the audit trail (services/audit.js) with the reviewing admin's
+ *       identity and a timestamp for regulatory/compliance traceability.
+ *     tags: [Admin, Compliance]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Override recorded
+ *       400:
+ *         description: Missing/empty reason or missing subject
+ */
+router.post(
+  '/aml/override',
+  [
+    body('reason')
+      .isString().withMessage('reason is required')
+      .trim()
+      .isLength({ min: 1 }).withMessage('reason must not be empty'),
+    body('wallet_address').optional().isString().trim(),
+    body('user_id').optional().isString().trim(),
+    body('new_status').optional().isIn(['cleared', 'confirmed']).withMessage('new_status must be cleared or confirmed'),
+  ],
+  (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    next();
+  },
+  overrideAmlFlag
+);
+
+/**
+ * @openapi
+ * /api/admin/aml/overrides:
+ *   get:
+ *     summary: Compliance report — list AML overrides in a date range — BE-032
+ *     tags: [Admin, Compliance]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of overrides
+ */
+router.get('/aml/overrides', getAmlOverrides);
 
 // ---------------------------------------------------------------------------
 // Fee Configuration CRUD with Audit Trail
@@ -293,6 +361,67 @@ router.get('/fee-configs', listConfigs);
  *         description: Admin access required
  */
 router.get('/fee-configs/history', listHistory);
+
+/**
+ * @openapi
+ * /api/admin/fee-configs/preview:
+ *   post:
+ *     summary: Simulate a proposed fee config against recent transaction volume (admin only)
+ *     description: >
+ *       Applies a proposed fee config against historical transaction volume
+ *       (default last 7 days) and returns the estimated fee-revenue delta
+ *       versus what actually happened. Does not modify any data.
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [fee_type, asset_code, fee_bps, max_fee_usdc, min_fee_usdc]
+ *             properties:
+ *               fee_type:
+ *                 type: string
+ *                 enum: [platform, referral, loyalty_redemption]
+ *               asset_code:
+ *                 type: string
+ *               fee_bps:
+ *                 type: integer
+ *                 maximum: 1000
+ *               max_fee_usdc:
+ *                 type: number
+ *               min_fee_usdc:
+ *                 type: number
+ *               lookback_days:
+ *                 type: integer
+ *                 description: Historical window to simulate against (default 7, max 90)
+ *     responses:
+ *       200:
+ *         description: Simulated fee-revenue delta
+ *       400:
+ *         description: Validation error
+ *       403:
+ *         description: Admin access required
+ */
+router.post(
+  '/fee-configs/preview',
+  [
+    body('fee_type')
+      .notEmpty().withMessage('fee_type is required')
+      .isIn(['platform', 'referral', 'loyalty_redemption']).withMessage('fee_type must be one of: platform, referral, loyalty_redemption'),
+    body('asset_code').notEmpty().withMessage('asset_code is required').trim().isLength({ max: 12 }),
+    body('fee_bps')
+      .notEmpty().withMessage('fee_bps is required')
+      .isInt({ min: 0, max: 1000 }).withMessage('fee_bps must be between 0 and 1000'),
+    body('max_fee_usdc').notEmpty().withMessage('max_fee_usdc is required').isFloat({ min: 0 }),
+    body('min_fee_usdc').notEmpty().withMessage('min_fee_usdc is required').isFloat({ min: 0 }),
+    body('lookback_days').optional().isInt({ min: 1, max: 90 }),
+  ],
+  validate,
+  previewFeeConfigChange
+);
 
 /**
  * @openapi

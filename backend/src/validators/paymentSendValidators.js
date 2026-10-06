@@ -1,12 +1,60 @@
 const { body } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
+const { openApiSchemaFromSpec } = require('../utils/openApiSchemaFromValidator');
 
 const MEMO_ID_MAX = 2n ** 64n - 1n;
 
 /**
+ * Declarative field spec for POST /payments/send.
+ *
+ * This is the single source of truth for both:
+ *  - the express-validator chains used at runtime (below), and
+ *  - the OpenAPI/Swagger request schema (PaymentSendRequest, exported from
+ *    this module and wired into backend/src/app.js's swagger components).
+ *
+ * Keeping both derived from the same list prevents the docs from silently
+ * drifting away from what the API actually accepts/rejects.
+ */
+const paymentSendFieldSpec = [
+  {
+    name: 'recipient_address',
+    type: 'string',
+    required: true,
+    description: 'Recipient Stellar wallet address (Ed25519 public key, G...)',
+  },
+  {
+    name: 'amount',
+    type: 'number',
+    format: 'float',
+    required: true,
+    description: 'Amount to send. Must be greater than 0.',
+  },
+  {
+    name: 'asset',
+    type: 'string',
+    required: false,
+    enum: ['XLM', 'USDC', 'NGN', 'GHS', 'KES'],
+    description: 'Asset code to send. Defaults to XLM when omitted.',
+  },
+  {
+    name: 'memo',
+    type: 'string',
+    required: false,
+    description: 'Optional payment memo. Constraints depend on memo_type.',
+  },
+  {
+    name: 'memo_type',
+    type: 'string',
+    required: false,
+    enum: ['text', 'id', 'hash', 'return'],
+    description: 'Memo type. Defaults to "text" when a memo is present.',
+  },
+];
+
+/**
  * Shared validators for POST /payments/send (used by routes and integration tests).
  */
-module.exports = [
+const paymentSendValidators = [
   body('recipient_address')
     .notEmpty().withMessage('Recipient address is required')
     .custom((value) => {
@@ -57,3 +105,13 @@ module.exports = [
     return true;
   })
 ];
+
+// OpenAPI request schema derived from the same field spec above. Consumed by
+// backend/src/app.js and referenced from the /send route's @openapi block as
+// '#/components/schemas/PaymentSendRequest'.
+paymentSendValidators.openApiSchema = openApiSchemaFromSpec(paymentSendFieldSpec, {
+  title: 'PaymentSendRequest',
+});
+paymentSendValidators.fieldSpec = paymentSendFieldSpec;
+
+module.exports = paymentSendValidators;

@@ -57,18 +57,72 @@ jobs:
         cd backend
         npm ci
 
+    - name: Lint (backend)
+      if: matrix.component == 'backend'
+      # continue-on-error: repo has pre-existing lint debt (~2.5k violations);
+      # this makes new violations visible without blocking merges until that's paid down
+      continue-on-error: true
+      run: |
+        cd backend
+        npm run lint
+
+    - name: Audit dependencies (backend)
+      if: matrix.component == 'backend'
+      # continue-on-error: known pre-existing advisories in transitive deps
+      # (e.g. ws, uuid via node-cron); informational until addressed in a follow-up
+      continue-on-error: true
+      run: |
+        cd backend
+        npm audit --audit-level=high
+
     - name: Check for undeclared dependencies (backend)
       if: matrix.component == 'backend'
       run: |
         cd backend
         npx depcheck --ignores='swagger-jsdoc,swagger-ui-express,nodemon' --ignore-dirs='__mocks__,coverage'
-    
-    - name: Install frontend deps  
+
+    - name: Check for duplicate route registrations (backend)
+      if: matrix.component == 'backend'
+      run: |
+        cd backend
+        node scripts/check-duplicate-routes.js
+
+    - name: Check for duplicate migration prefixes (backend)
+      if: matrix.component == 'backend'
+      run: |
+        cd backend
+        node scripts/check-migration-prefixes.js
+
+    - name: Install frontend deps
       if: matrix.component == 'frontend'
       run: |
         cd frontend
         npm ci
-    
+
+    - name: Lint correctness (frontend, required)
+      if: matrix.component == 'frontend'
+      run: |
+        cd frontend
+        npm run lint:build
+
+    - name: Lint style (frontend)
+      if: matrix.component == 'frontend'
+      # continue-on-error: repo has pre-existing lint debt (~800 violations);
+      # this makes new violations visible without blocking merges until that's paid down
+      continue-on-error: true
+      run: |
+        cd frontend
+        npm run lint
+
+    - name: Audit dependencies (frontend)
+      if: matrix.component == 'frontend'
+      # continue-on-error: known pre-existing advisories in transitive deps
+      # (e.g. ws, websocket-driver via react-scripts/webpack-dev-server); informational for now
+      continue-on-error: true
+      run: |
+        cd frontend
+        npm audit --audit-level=high
+
     - name: Run backend tests
       if: matrix.component == 'backend'
       run: |
@@ -98,6 +152,74 @@ jobs:
       with:
         name: coverage-report-${{ matrix.component }}
         path: coverage/
+
+  contracts:
+    name: Soroban Contracts (build + test)
+    runs-on: ubuntu-latest
+
+    # Share one Cargo target dir across all contract crates so the identical
+    # soroban-sdk dependency graph is compiled once for the whole job.
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: contracts/target
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        # Needed to compile Soroban contracts to WASM (matches contracts/deploy.sh)
+        targets: wasm32-unknown-unknown
+        components: clippy
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          contracts/target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/**/Cargo.toml', '**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Build all contracts (WASM)
+      run: |
+        set -e
+        for manifest in contracts/*/Cargo.toml; do
+          echo "=== Building $(dirname "$manifest")/ ==="
+          cargo build --release --target wasm32-unknown-unknown --manifest-path "$manifest"
+        done
+
+    - name: Test all contracts
+      run: |
+        set -e
+        for manifest in contracts/*/Cargo.toml; do
+          echo "=== Testing $(dirname "$manifest")/ ==="
+          cargo test --manifest-path "$manifest"
+        done
+
+    - name: Clippy (all contracts)
+      # continue-on-error: first run of clippy in this repo; not yet triaged.
+      # Makes lints visible without blocking merges until baseline is assessed.
+      continue-on-error: true
+      run: |
+        set -e
+        for manifest in contracts/*/Cargo.toml; do
+          echo "=== Clippy $(dirname "$manifest")/ ==="
+          cargo clippy --manifest-path "$manifest" --target wasm32-unknown-unknown --release -- -D warnings
+        done
+
+    - name: Audit dependencies (contracts)
+      # continue-on-error: known-advisory triage hasn't happened yet; informational for now
+      continue-on-error: true
+      run: |
+        cargo install cargo-audit --locked
+        for manifest in contracts/*/Cargo.toml; do
+          echo "=== Audit $(dirname "$manifest")/ ==="
+          cargo audit --file "$(dirname "$manifest")/Cargo.lock" || true
+        done
 
   e2e:
     name: End-to-End Tests
@@ -167,7 +289,9 @@ jobs:
         cd frontend
         npm run build
       env:
-        REACT_APP_API_URL: http://localhost:5000
+        # FE-130: must include /api so axios baseURL matches the backend routing
+        # (api.js calls paths like /auth/login which resolve to /api/auth/login).
+        REACT_APP_API_URL: http://localhost:5000/api
         REACT_APP_STELLAR_NETWORK: testnet
     
     - name: Run E2E tests

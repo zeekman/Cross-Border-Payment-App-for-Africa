@@ -209,15 +209,28 @@ async function revokeSession(req, res, next) {
   }
 }
 
-// DELETE /api/sessions  (revoke all, optionally keep current)
+// DELETE /api/sessions  (revoke all sessions)
+//
+// Safer default (BE-028): the caller's own current session is EXCLUDED by
+// default, so "sign out everywhere" does not unexpectedly log the caller
+// out of the device they're using to make the request. To also revoke the
+// current session (a full "log me out of everything, including this
+// device" action), the caller must explicitly pass ?include_current=true.
+//
+// For backward compatibility, the legacy ?keep_current=true param is still
+// honored as a no-op (it's already the default), and ?keep_current=false is
+// treated the same as ?include_current=true.
 async function revokeAllSessions(req, res, next) {
   try {
-    const keepCurrent = req.query.keep_current === 'true';
+    const includeCurrent =
+      req.query.include_current === 'true' || req.query.keep_current === 'false';
     const userId = req.user.userId;
+    const currentHash = req.headers.authorization
+      ? hashToken(req.headers.authorization.replace('Bearer ', ''))
+      : null;
 
     let rows;
-    if (keepCurrent && req.headers.authorization) {
-      const currentHash = hashToken(req.headers.authorization.replace('Bearer ', ''));
+    if (!includeCurrent && currentHash) {
       ({ rows } = await db.query(
         `UPDATE sessions SET is_active = FALSE
          WHERE user_id = $1 AND is_active = TRUE AND token_hash != $2
@@ -237,8 +250,18 @@ async function revokeAllSessions(req, res, next) {
       if (row.token_jti) await blacklistJti(row.token_jti, 24 * 3600);
     }
 
-    logger.info('All sessions revoked', { userId, keepCurrent });
-    res.json({ message: 'All sessions revoked' });
+    // Whether the caller's own session was revoked — the frontend needs
+    // this to decide whether to force a local logout (see FE-024).
+    const currentSessionRevoked = includeCurrent || !currentHash;
+
+    logger.info('All sessions revoked', { userId, includeCurrent, currentSessionRevoked });
+    res.json({
+      message: currentSessionRevoked
+        ? 'All sessions revoked, including this device'
+        : 'All other sessions revoked',
+      revoked_count: rows.length,
+      current_session_revoked: currentSessionRevoked,
+    });
   } catch (err) {
     next(err);
   }

@@ -43,6 +43,39 @@ if [[ "$NETWORK" == "mainnet" && "$CONFIRM_MAINNET" != "true" ]]; then
     exit 1
 fi
 
+# Explicit, unambiguous mainnet confirmation: the network name is echoed back and
+# the operator must type it literally. A bare yes/no answer is not enough, because
+# contract deployments/upgrades are IRREVERSIBLE on-chain.
+confirm_mainnet_deployment() {
+    [[ "$NETWORK" != "mainnet" ]] && return 0
+
+    cat << CONFIRM_EOF
+
+${RED}══════════════════════════════════════════════════════════════════${NC}
+${RED}⚠  DANGER ZONE — MAINNET  ${NC}
+${RED}══════════════════════════════════════════════════════════════════${NC}
+${YELLOW}You are about to DEPLOY + INITIALIZE on:${NC} ${RED}MAINNET${NC}
+${YELLOW}  Network name : ${NETWORK}${NC}
+${YELLOW}  Network passphrase : auto-derived from $NETWORK${NC}
+${YELLOW}  Contract     : ${TARGET_CONTRACT}${NC}
+
+${RED}Contract deployments/upgrades are IRREVERSIBLE on-chain. Once a new${NC}
+${RED}WASM hash is applied, the previous bytecode cannot be restored.${NC}
+
+${YELLOW}To proceed, type exactly:${NC} ${GREEN}CONFIRM_MAINNET${NC}
+${YELLOW}Any other input will abort without touching the network.${NC}
+CONFIRM_EOF
+
+    read -r -p "> " confirmation
+    if [[ "$confirmation" != "CONFIRM_MAINNET" ]]; then
+        echo -e "${RED}✗ Confirmation \"${confirmation:-<empty>}\" did not match CONFIRM_MAINNET. Aborting — no changes were made to ${NETWORK}.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Confirmed. Proceeding with deployment on ${NETWORK}.${NC}"
+}
+
+confirm_mainnet_deployment
+
 CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 case "$TARGET_CONTRACT" in
@@ -157,6 +190,17 @@ echo -e "\n${YELLOW}Step 3.5: Computing WASM hash...${NC}"
 EXPECTED_WASM_HASH=$(sha256sum "$WASM_FILE" | awk '{print $1}')
 echo "Expected WASM hash: $EXPECTED_WASM_HASH"
 echo -e "${GREEN}✓ WASM hash computed${NC}"
+
+# Step 3.6: Pre-network quality gate — mirror SC-001's CI job (full cargo build + cargo test).
+# This MUST pass immediately before ANY on-chain action (deploy/initialize) against a real
+# network (testnet or mainnet). Contract upgrades are irreversible, so deploy.sh will not
+# touch a network unless the freshly built code builds and all tests pass.
+echo -e "\n${YELLOW}Step 3.6: Running pre-network quality gate (cargo build + cargo test)...${NC}"
+
+cargo build --release
+cargo test
+
+echo -e "${GREEN}✓ Quality gate passed: cargo build and cargo test succeeded. Safe to proceed to network.${NC}"
 
 # Step 4: Deploy to Stellar Network
 echo -e "\n${YELLOW}Step 4: Deploying to $NETWORK...${NC}"

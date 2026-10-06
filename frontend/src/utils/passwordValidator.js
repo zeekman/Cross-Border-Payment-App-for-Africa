@@ -1,70 +1,132 @@
 /**
- * Password validation utility matching backend rules
- * Rules: min 8 chars, uppercase, lowercase, digit, special character
+ * Password validation utilities.
+ *
+ * All strength/acceptance checks are derived from the backend password policy
+ * (fetched via GET /auth/password-policy — see utils/passwordPolicy.js), so
+ * the rules the frontend enforces can never drift from what the backend
+ * actually enforces at registration and password-reset time. The backend
+ * remains the authoritative gate; these functions exist so the UI can give
+ * real-time feedback and block submission of passwords the backend would
+ * reject.
+ *
+ * Every function accepts an optional `policy` argument (defaulting to the
+ * cached/server policy) so callers and tests can control it explicitly.
  */
 
-export function getPasswordStrength(password) {
-  const checks = {
-    length: password.length >= 8,
-    uppercase: /[A-Z]/.test(password),
-    lowercase: /[a-z]/.test(password),
-    number: /[0-9]/.test(password),
-    special: /[^A-Za-z0-9]/.test(password),
-  };
+import { getPasswordPolicy } from './passwordPolicy';
 
+const RULE_REGEXES = {
+  uppercase: /[A-Z]/,
+  lowercase: /[a-z]/,
+  number: /[0-9]/,
+  special: /[^A-Za-z0-9]/,
+};
+
+// Checklist display labels. Presentation only — the rules themselves come from
+// the backend policy; unknown future rules fall back to a generic label.
+export const RULE_LABELS = {
+  uppercase: 'One uppercase letter',
+  lowercase: 'One lowercase letter',
+  number: 'One number',
+  special: 'One special character',
+};
+
+// Wording for the unmet-requirement error message (see getPasswordError).
+const RULE_ERROR_LABELS = {
+  uppercase: 'uppercase letter',
+  lowercase: 'lowercase letter',
+  number: 'number',
+  special: 'special character',
+};
+
+function enabledRules(policy) {
+  return Object.entries(policy.rules).filter(([, required]) => required);
+}
+
+/** Build the per-requirement check map from the policy (length + each rule). */
+function getChecks(password, policy) {
+  const checks = { length: password.length >= policy.min_length };
+  enabledRules(policy).forEach(([rule]) => {
+    checks[rule] = RULE_REGEXES[rule].test(password);
+  });
+  return checks;
+}
+
+/** True only when every policy requirement is met (matches backend acceptance). */
+function allChecksMet(checks) {
+  return Object.values(checks).every(Boolean);
+}
+
+/**
+ * Checklist items derived from the policy, e.g. for the register/reset pages:
+ *   [{ key: 'length', label: 'At least 8 characters' },
+ *    { key: 'uppercase', label: 'One uppercase letter' }, ...]
+ */
+export function getPasswordChecklist(policy = getPasswordPolicy()) {
+  const items = [{ key: 'length', label: `At least ${policy.min_length} characters` }];
+  enabledRules(policy).forEach(([rule]) => {
+    items.push({ key: rule, label: RULE_LABELS[rule] || `One ${rule}` });
+  });
+  return items;
+}
+
+/**
+ * 5-bar strength meter (reset-password page). Score is the number of policy
+ * requirements met; level labels are clamped so a fully-compliant password
+ * (e.g. 5/5) still maps to "very strong".
+ */
+export function getPasswordStrength(password, policy = getPasswordPolicy()) {
+  const checks = getChecks(password, policy);
   const score = Object.values(checks).filter(Boolean).length;
+
   const levels = ['', 'weak', 'fair', 'strong', 'very strong'];
   const colors = ['', 'bg-red-500', 'bg-orange-500', 'bg-yellow-500', 'bg-green-500'];
   const textColors = ['', 'text-red-500', 'text-orange-500', 'text-yellow-500', 'text-green-500'];
+  const levelIndex = Math.min(score, levels.length - 1);
 
   return {
     checks,
     score,
-    label: levels[score],
-    barColor: colors[score],
-    textColor: textColors[score],
-    isValid: score >= 4, // Must meet all 5 requirements
+    label: levels[levelIndex],
+    barColor: colors[levelIndex],
+    textColor: textColors[levelIndex],
+    // True only when every policy requirement is met.
+    isValid: allChecksMet(checks),
   };
 }
 
 /**
  * Issue #656: 4-level password strength model for the Register page.
  *
- * Scored across four dimensions surfaced in the checklist (length, uppercase,
- * number, special character) and four character classes used for the level
- * thresholds (lowercase, uppercase, number, special):
- *   - Weak (red):        < 8 chars OR only one character class
- *   - Fair (orange):     >= 8 chars and 2 character classes
- *   - Strong (blue):     >= 8 chars and 3 character classes
- *   - Very Strong (green): >= 12 chars and all 4 character classes
+ * Scored across the character-class requirements surfaced in the checklist and
+ * the character classes used for the level thresholds:
+ *   - Weak (red):        < min_length chars OR only one character class
+ *   - Fair (orange):     >= min_length chars and 2 character classes
+ *   - Strong (blue):     >= min_length chars and 3 character classes
+ *   - Very Strong (green): >= 12 chars and all character classes
  *
- * Returns score 0 for an empty password (nothing to render).
+ * Returns score 0 for an empty password (nothing to render). isAcceptable is
+ * true only when every policy requirement is met — i.e. exactly what the
+ * backend accepts at registration time.
  */
-export function getRegisterPasswordStrength(password = '') {
-  const checks = {
-    length: password.length >= 8,
-    uppercase: /[A-Z]/.test(password),
-    number: /[0-9]/.test(password),
-    special: /[^A-Za-z0-9]/.test(password),
-  };
+export function getRegisterPasswordStrength(password = '', policy = getPasswordPolicy()) {
+  const checks = getChecks(password, policy);
 
-  const classes =
-    (/[a-z]/.test(password) ? 1 : 0) +
-    (/[A-Z]/.test(password) ? 1 : 0) +
-    (/[0-9]/.test(password) ? 1 : 0) +
-    (/[^A-Za-z0-9]/.test(password) ? 1 : 0);
+  const classRules = enabledRules(policy).filter(([rule]) => RULE_REGEXES[rule]);
+  const classes = classRules.filter(([rule]) => RULE_REGEXES[rule].test(password)).length;
 
   const len = password.length;
+  const veryStrongLength = Math.max(12, policy.min_length);
 
   // 0 = empty, 1 = weak, 2 = fair, 3 = strong, 4 = very strong
   let score;
   if (len === 0) {
     score = 0;
-  } else if (len >= 12 && classes === 4) {
+  } else if (len >= veryStrongLength && classes === classRules.length) {
     score = 4;
-  } else if (len >= 8 && classes >= 3) {
+  } else if (len >= policy.min_length && classes >= 3) {
     score = 3;
-  } else if (len >= 8 && classes >= 2) {
+  } else if (len >= policy.min_length && classes >= 2) {
     score = 2;
   } else {
     score = 1;
@@ -85,8 +147,9 @@ export function getRegisterPasswordStrength(password = '') {
     label: meta.label,
     barColor: meta.barColor,
     textColor: meta.textColor,
-    // The Create Account button is enabled at "Fair" strength or above.
-    isAcceptable: score >= 2,
+    // The Create Account button is enabled only when the password meets every
+    // policy requirement — matching the backend's acceptance exactly.
+    isAcceptable: allChecksMet(checks),
   };
 }
 
@@ -101,17 +164,23 @@ export function getEmailError(email) {
   return '';
 }
 
-export function getPasswordError(password) {
+/**
+ * Human-readable error describing which policy requirements are unmet, or ''
+ * when the password satisfies the policy.
+ */
+export function getPasswordError(password, policy = getPasswordPolicy()) {
   if (!password) return 'Password is required';
-  if (password.length < 8) return 'Password must be at least 8 characters';
 
-  const strength = getPasswordStrength(password);
+  if (password.length < policy.min_length) {
+    return `Password must be at least ${policy.min_length} characters`;
+  }
+
   const unmet = [];
-
-  if (!strength.checks.uppercase) unmet.push('uppercase letter');
-  if (!strength.checks.lowercase) unmet.push('lowercase letter');
-  if (!strength.checks.number) unmet.push('number');
-  if (!strength.checks.special) unmet.push('special character');
+  enabledRules(policy).forEach(([rule]) => {
+    if (!RULE_REGEXES[rule].test(password)) {
+      unmet.push(RULE_ERROR_LABELS[rule] || rule);
+    }
+  });
 
   if (unmet.length > 0) {
     return `Password must contain at least one ${unmet.join(', ')}`;

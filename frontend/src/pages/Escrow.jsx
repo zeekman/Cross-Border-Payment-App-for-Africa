@@ -1,13 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
+import { useConfirm } from '../context/ConfirmContext';
+import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 
 export default function Escrow() {
+  const confirm = useConfirm();
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState('create');
   const [escrows, setEscrows] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [role, setRole] = useState('sender');
+  const [statusFilter, setStatusFilter] = useState('');
 
   // Create escrow form
   const [createForm, setCreateForm] = useState({
@@ -44,15 +51,20 @@ export default function Escrow() {
     if (activeTab === 'list') {
       fetchEscrows();
     }
-  }, [activeTab]);
+  }, [activeTab, role, statusFilter]);
 
   const fetchEscrows = async () => {
     setLoading(true);
+    setError(null);
     try {
-      const { data } = await api.get('/escrow');
+      const params = { role };
+      if (statusFilter) params.status = statusFilter;
+      const { data } = await api.get('/escrow', { params });
       setEscrows(data.escrows || []);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to fetch escrows');
+      const message = err.response?.data?.error || 'Failed to fetch escrows';
+      setError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -102,9 +114,10 @@ export default function Escrow() {
 
   const handleConfirmEscrow = async (escrowId, escrow) => {
     const remaining = remainingBalance(escrow);
-    if (!window.confirm(
-      `Are you sure you want to fully release the remaining ${remaining} ${escrow.asset}? This action cannot be undone.`
-    )) return;
+    if (!(await confirm(
+      t('confirm.release_escrow', 'Fully release the remaining {{amount}} {{asset}}? This action cannot be undone.', { amount: remaining, asset: escrow.asset }),
+      { title: t('confirm.release_escrow_title', 'Release escrow'), confirmLabel: t('confirm.release', 'Release') }
+    ))) return;
 
     setLoading(true);
     try {
@@ -120,7 +133,7 @@ export default function Escrow() {
   };
 
   const handleCancelEscrow = async (escrowId) => {
-    if (!window.confirm('Are you sure you want to cancel this escrow?')) return;
+    if (!(await confirm(t('confirm.cancel_escrow', 'Cancel this escrow? Locked funds will be returned to the sender.'), { title: t('confirm.cancel_escrow_title', 'Cancel escrow'), confirmLabel: t('confirm.cancel_escrow_btn', 'Cancel escrow') }))) return;
 
     setLoading(true);
     try {
@@ -187,9 +200,13 @@ export default function Escrow() {
         <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-6">Agent Escrow</h1>
 
         {/* Tabs */}
-        <div className="flex gap-4 mb-6 border-b border-gray-200 dark:border-gray-800">
+        <div className="flex gap-4 mb-6 border-b border-gray-200 dark:border-gray-800" role="tablist" aria-label="Escrow views">
           <button
             onClick={() => setActiveTab('create')}
+            role="tab"
+            aria-selected={activeTab === 'create'}
+            id="escrow-tab-create"
+            aria-controls="escrow-panel-create"
             className={`px-4 py-2 font-medium transition-colors ${
               activeTab === 'create'
                 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400'
@@ -200,6 +217,10 @@ export default function Escrow() {
           </button>
           <button
             onClick={() => setActiveTab('list')}
+            role="tab"
+            aria-selected={activeTab === 'list'}
+            id="escrow-tab-list"
+            aria-controls="escrow-panel-list"
             className={`px-4 py-2 font-medium transition-colors ${
               activeTab === 'list'
                 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400'
@@ -212,59 +233,69 @@ export default function Escrow() {
 
         {/* Create Escrow Tab */}
         {activeTab === 'create' && (
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow p-6">
-            <form onSubmit={handleCreateEscrow} className="space-y-4">
+          <div
+            className="bg-white dark:bg-gray-900 rounded-lg shadow p-6"
+            role="tabpanel"
+            id="escrow-panel-create"
+            aria-labelledby="escrow-tab-create"
+          >
+            <form onSubmit={handleCreateEscrow} className="space-y-4" aria-busy={loading}>
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                <label htmlFor="escrow-agent-wallet" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Agent Wallet Address
                 </label>
                 <input
+                  id="escrow-agent-wallet"
                   type="text"
                   value={createForm.agent_wallet}
                   onChange={(e) => setCreateForm({ ...createForm, agent_wallet: e.target.value })}
                   placeholder="G..."
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                <label htmlFor="escrow-recipient-wallet" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Recipient Wallet Address
                 </label>
                 <input
+                  id="escrow-recipient-wallet"
                   type="text"
                   value={createForm.recipient_wallet}
                   onChange={(e) => setCreateForm({ ...createForm, recipient_wallet: e.target.value })}
                   placeholder="G..."
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  <label htmlFor="escrow-amount" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     Amount
                   </label>
                   <input
+                    id="escrow-amount"
                     type="number"
-                    step="0.01"
+                    step="0.0000001"
+                    min="0"
                     value={createForm.amount}
                     onChange={(e) => setCreateForm({ ...createForm, amount: e.target.value })}
                     placeholder="0.00"
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
-
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  <label htmlFor="escrow-asset" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     Asset
                   </label>
                   <select
+                    id="escrow-asset"
                     value={createForm.asset}
                     onChange={(e) => setCreateForm({ ...createForm, asset: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     <option value="USDC">USDC</option>
+                    <option value="XLM">XLM</option>
                   </select>
                 </div>
               </div>
@@ -272,7 +303,7 @@ export default function Escrow() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium py-2 rounded-lg transition-colors"
               >
                 {loading ? 'Creating...' : 'Create Escrow'}
               </button>
@@ -282,163 +313,179 @@ export default function Escrow() {
 
         {/* List Escrows Tab */}
         {activeTab === 'list' && (
-          <div className="space-y-4">
-            {loading && !escrows.length ? (
-              <div className="text-center py-8 text-gray-500 dark:text-gray-400">Loading...</div>
-            ) : escrows.length === 0 ? (
-              <div className="text-center py-8 text-gray-500 dark:text-gray-400">No escrows found</div>
-            ) : (
-              escrows.map((escrow) => (
-                <div
-                  key={escrow.id}
-                  className="bg-white dark:bg-gray-900 rounded-lg shadow p-4 cursor-pointer hover:shadow-lg transition-shadow"
-                  onClick={() => setSelectedEscrow(selectedEscrow?.id === escrow.id ? null : escrow)}
+          <div
+            className="bg-white dark:bg-gray-900 rounded-lg shadow p-6"
+            role="tabpanel"
+            id="escrow-panel-list"
+            aria-labelledby="escrow-tab-list"
+          >
+            <div className="flex flex-wrap gap-4 mb-4">
+              <div>
+                <label htmlFor="escrow-role-filter" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Role
+                </label>
+                <select
+                  id="escrow-role-filter"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <p className="font-medium text-gray-900 dark:text-white">
-                        {escrow.amount} {escrow.asset}
-                      </p>
-                      {parseFloat(escrow.released_amount || 0) > 0 && (
-                        <p className="text-sm text-blue-600 dark:text-blue-400">
-                          Remaining: {remainingBalance(escrow)} {escrow.asset}
+                  <option value="sender">Sender</option>
+                  <option value="agent">Agent</option>
+                </select>
+              </div>
+              <div>
+                <label htmlFor="escrow-status-filter" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Status
+                </label>
+                <select
+                  id="escrow-status-filter"
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">All</option>
+                  <option value="pending">Pending</option>
+                  <option value="confirmed">Confirmed</option>
+                  <option value="cancelled">Cancelled</option>
+                  <option value="released">Released</option>
+                </select>
+              </div>
+            </div>
+
+            {loading && (
+              <div className="text-center py-8 text-gray-600 dark:text-gray-400" role="status">
+                Loading escrows...
+              </div>
+            )}
+
+            {!loading && error && (
+              <div className="text-center py-8 text-red-600 dark:text-red-400" role="alert">
+                {error}
+              </div>
+            )}
+
+            {!loading && !error && escrows.length === 0 && (
+              <div className="text-center py-8 text-gray-600 dark:text-gray-400">
+                No escrows found.
+              </div>
+            )}
+
+            {!loading && !error && escrows.length > 0 && (
+              <div className="space-y-3">
+                {escrows.map((escrow) => (
+                  <div
+                    key={escrow.id}
+                    className="border border-gray-200 dark:border-gray-800 rounded-lg p-4"
+                  >
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <p className="font-medium text-gray-900 dark:text-white">
+                          {escrow.amount} {escrow.asset}
                         </p>
-                      )}
-                      <p className="text-sm text-gray-500 dark:text-gray-400">
-                        Status: <span className="font-medium capitalize">{escrow.status}</span>
-                      </p>
+                        <p className="text-sm text-gray-600 dark:text-gray-400">
+                          Status: {escrow.status}
+                        </p>
+                      </div>
+                      <span className="text-xs px-2 py-1 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">
+                        {escrow.status}
+                      </span>
                     </div>
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                      escrow.status === 'pending'
-                        ? 'bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200'
-                        : escrow.status === 'completed'
-                        ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
-                        : 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200'
-                    }`}>
-                      {escrow.status}
-                    </span>
-                  </div>
-
-                  {selectedEscrow?.id === escrow.id && (
-                    <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700 space-y-2">
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
-                        <span className="font-medium">Agent:</span> {escrow.agent_wallet.slice(0, 10)}...
-                      </p>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
-                        <span className="font-medium">Recipient:</span> {escrow.recipient_wallet.slice(0, 10)}...
-                      </p>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
-                        <span className="font-medium">Created:</span> {new Date(escrow.created_at).toLocaleDateString()}
-                      </p>
-
+                    <div className="flex gap-2 mt-3">
                       {escrow.status === 'pending' && (
-                        <div className="flex flex-wrap gap-2 mt-4">
+                        <>
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleConfirmEscrow(escrow.id, escrow);
-                            }}
-                            disabled={loading}
-                            className="flex-1 min-w-[120px] bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
+                            onClick={() => handleConfirmEscrow(escrow.id, escrow)}
+                            className="px-3 py-1 text-sm bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
                           >
-                            Full Release
+                            Confirm
                           </button>
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openPartialRelease(escrow);
-                            }}
-                            disabled={loading}
-                            className="flex-1 min-w-[120px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
-                          >
-                            Partial Release
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleCancelEscrow(escrow.id);
-                            }}
-                            disabled={loading}
-                            className="flex-1 min-w-[120px] bg-red-600 hover:bg-red-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
+                            onClick={() => handleCancelEscrow(escrow.id)}
+                            className="px-3 py-1 text-sm bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
                           >
                             Cancel
                           </button>
-                        </div>
+                        </>
+                      )}
+                      {escrow.status !== 'cancelled' && escrow.status !== 'released' && (
+                        <button
+                          onClick={() => openPartialRelease(escrow)}
+                          className="px-3 py-1 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                        >
+                          Partial Release
+                        </button>
                       )}
                     </div>
-                  )}
-                </div>
-              ))
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         )}
-      </div>
 
-      {/* Partial Release Modal (issue #657) */}
-      {partialEscrow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
-          <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 w-full max-w-sm">
-            <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-1">Partial Release</h3>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Escrowed balance: {remainingBalance(partialEscrow)} {partialEscrow.asset}
-            </p>
-
-            <form onSubmit={handlePartialRelease} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Amount to release
-                </label>
-                <input
-                  type="number"
-                  step="0.0000001"
-                  min="0"
-                  max={remainingBalance(partialEscrow)}
-                  value={partialAmount}
-                  onChange={(e) => setPartialAmount(e.target.value)}
-                  autoFocus
-                  className={`w-full px-3 py-2 border rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none ${
-                    partialError ? 'border-red-500' : 'border-gray-300 dark:border-gray-700'
-                  }`}
-                />
-                {partialError && <p className="text-xs text-red-500 mt-1">{partialError}</p>}
-              </div>
-
-              {/* Preview */}
-              <div className="rounded-lg bg-gray-50 dark:bg-gray-800 p-3 space-y-1 text-sm">
-                <div className="flex justify-between text-gray-600 dark:text-gray-400">
-                  <span>Amount to release</span>
-                  <span className="text-gray-900 dark:text-white">{previewAmount.toFixed(7)} {partialEscrow.asset}</span>
+        {/* Partial Release Modal */}
+        {partialEscrow && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-md w-full p-6">
+              <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-4">
+                Partial Release
+              </h2>
+              <form onSubmit={handlePartialRelease} className="space-y-4">
+                <div>
+                  <label htmlFor="partial-amount" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    Amount
+                  </label>
+                  <input
+                    id="partial-amount"
+                    type="number"
+                    step="0.0000001"
+                    min="0"
+                    value={partialAmount}
+                    onChange={(e) => setPartialAmount(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  {partialError && (
+                    <p className="text-sm text-red-600 dark:text-red-400 mt-1">{partialError}</p>
+                  )}
                 </div>
-                <div className="flex justify-between text-gray-600 dark:text-gray-400">
-                  <span>Platform fee ({(feeBps / 100).toFixed(2)}%)</span>
-                  <span className="text-red-500">-{previewFee.toFixed(7)} {partialEscrow.asset}</span>
-                </div>
-                <div className="flex justify-between font-medium border-t border-gray-200 dark:border-gray-700 pt-1 mt-1">
-                  <span className="text-gray-700 dark:text-gray-300">Net to agent</span>
-                  <span className="text-green-600 dark:text-green-400">{previewNet.toFixed(7)} {partialEscrow.asset}</span>
-                </div>
-              </div>
 
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={closePartialRelease}
-                  className="flex-1 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-900 dark:text-white font-medium py-2 rounded-lg transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={partialLoading || !!partialError || previewAmount <= 0}
-                  className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
-                >
-                  {partialLoading ? 'Releasing…' : 'Confirm Release'}
-                </button>
-              </div>
-            </form>
+                <div className="bg-gray-50 dark:bg-gray-800 rounded p-3 text-sm space-y-1">
+                  <div className="flex justify-between text-gray-700 dark:text-gray-300">
+                    <span>Amount</span>
+                    <span>{previewAmount.toFixed(7)}</span>
+                  </div>
+                  <div className="flex justify-between text-gray-700 dark:text-gray-300">
+                    <span>Fee ({(feeBps / 100).toFixed(2)}%)</span>
+                    <span>{previewFee.toFixed(7)}</span>
+                  </div>
+                  <div className="flex justify-between font-medium text-gray-900 dark:text-white">
+                    <span>Net</span>
+                    <span>{previewNet.toFixed(7)}</span>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={closePartialRelease}
+                    className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={partialLoading || !!partialError}
+                    className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg transition-colors"
+                  >
+                    {partialLoading ? 'Releasing...' : 'Release'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-const { getActiveConfig, listAllConfigs, getHistory, createConfig, patchConfig } = require('../services/feeConfigService');
+const { getActiveConfig, listAllConfigs, getHistory, createConfig, patchConfig, previewFeeConfig } = require('../services/feeConfigService');
 
 async function listConfigs(req, res, next) {
   try {
@@ -66,9 +66,36 @@ async function listHistory(req, res, next) {
   }
 }
 
+/**
+ * POST /api/admin/fee-configs/preview
+ * Simulates a proposed fee config against recent historical transaction
+ * volume and returns the estimated fee-revenue delta, without applying
+ * any change.
+ */
+async function previewFeeConfigChange(req, res, next) {
+  try {
+    const { fee_type, asset_code, fee_bps, max_fee_usdc, min_fee_usdc, lookback_days } = req.body;
+    const preview = await previewFeeConfig(
+      fee_type,
+      asset_code,
+      fee_bps,
+      max_fee_usdc,
+      min_fee_usdc,
+      lookback_days
+    );
+    res.json(preview);
+  } catch (err) {
+    if (err.message.includes('must not exceed')) {
+      return res.status(400).json({ error: err.message });
+    }
+    next(err);
+  }
+}
+
 module.exports = {
   listConfigs,
   createFeeConfig,
   updateFeeConfig,
   listHistory,
+  previewFeeConfigChange,
 };

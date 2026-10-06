@@ -214,6 +214,92 @@ async function patchConfig(id, updates, createdBy, actorRole, ip, userAgent) {
   }
 }
 
+/**
+ * Simulate a proposed (or existing scheduled) fee config against recent
+ * historical transaction volume, without applying anything. Returns the
+ * estimated fee-revenue delta versus what actually happened under the
+ * currently active config for the same window.
+ *
+ * @param {string} feeType
+ * @param {string} assetCode
+ * @param {number} feeBps          - proposed fee_bps to simulate
+ * @param {number} maxFeeUsdc      - proposed max_fee_usdc cap
+ * @param {number} minFeeUsdc      - proposed min_fee_usdc floor
+ * @param {number} [lookbackDays]  - historical window to simulate against (default 7)
+ */
+async function previewFeeConfig(feeType, assetCode, feeBps, maxFeeUsdc, minFeeUsdc, lookbackDays = 7) {
+  if (feeBps > 1000) {
+    throw new Error('fee_bps must not exceed 1000 (10% max)');
+  }
+  if (minFeeUsdc > maxFeeUsdc) {
+    throw new Error('min_fee_usdc must not exceed max_fee_usdc');
+  }
+
+  const days = Math.min(Math.max(parseInt(lookbackDays, 10) || 7, 1), 90);
+  const from = new Date();
+  from.setDate(from.getDate() - days);
+
+  const { rows } = await db.query(
+    `SELECT amount, fee_amount
+     FROM transactions
+     WHERE created_at >= $1 AND status = 'completed' AND asset_code = $2`,
+    [from, assetCode]
+  );
+
+  let actualFeeTotal = 0;
+  let simulatedFeeTotal = 0;
+  let volumeTotal = 0;
+
+  for (const row of rows) {
+    const amount = parseFloat(row.amount) || 0;
+    const actualFee = parseFloat(row.fee_amount) || 0;
+    volumeTotal += amount;
+    actualFeeTotal += actualFee;
+
+    let simulatedFee = (amount * feeBps) / 10000;
+    simulatedFee = Math.max(minFeeUsdc, Math.min(maxFeeUsdc, simulatedFee));
+    simulatedFeeTotal += simulatedFee;
+  }
+
+  return {
+    fee_type: feeType,
+    asset_code: assetCode,
+    proposed: { fee_bps: feeBps, max_fee_usdc: maxFeeUsdc, min_fee_usdc: minFeeUsdc },
+    window_days: days,
+    transaction_count: rows.length,
+    volume_total: volumeTotal,
+    actual_fee_revenue: actualFeeTotal,
+    simulated_fee_revenue: simulatedFeeTotal,
+    estimated_delta: simulatedFeeTotal - actualFeeTotal,
+  };
+}
+
+/**
+ * Send a reminder notification to admins for scheduled fee configs that will
+ * activate within `windowHours` hours but haven't been reminded about yet.
+ * Intended to be invoked by a scheduled job (see jobs/remindScheduledFeeConfigs.js).
+ */
+async function findConfigsDueForReminder(windowHours = 24) {
+  const { rows } = await db.query(
+    `SELECT id, fee_type, asset_code, fee_bps, max_fee_usdc, min_fee_usdc, effective_from, created_by
+     FROM fee_configs
+     WHERE is_active = false
+       AND effective_from > NOW()
+       AND effective_from <= NOW() + ($1 || ' hours')::interval
+       AND reminder_sent_at IS NULL
+     ORDER BY effective_from ASC`,
+    [windowHours]
+  );
+  return rows;
+}
+
+async function markReminderSent(id) {
+  await db.query(
+    `UPDATE fee_configs SET reminder_sent_at = NOW() WHERE id = $1`,
+    [id]
+  );
+}
+
 module.exports = {
   getActiveConfig,
   listAllConfigs,
@@ -221,4 +307,7 @@ module.exports = {
   createConfig,
   patchConfig,
   refreshCache,
+  previewFeeConfig,
+  findConfigsDueForReminder,
+  markReminderSent,
 };

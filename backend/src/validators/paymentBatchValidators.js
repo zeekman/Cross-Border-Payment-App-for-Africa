@@ -5,7 +5,14 @@ const MEMO_ID_MAX = 2n ** 64n - 1n;
 const STELLAR_MIN_AMOUNT = 0.0000001;
 const MAX_TRANSACTION_AMOUNT = parseFloat(process.env.MAX_TRANSACTION_AMOUNT || "1000000");
 
-module.exports = [
+/**
+ * Maximum number of recipients allowed in a single batch payment.
+ * Must match the on-chain escrow contract's MAX_BATCH_SIZE (batch_create_escrow).
+ * Keeping them in sync prevents late-stage failures after Horizon submission.
+ */
+const MAX_BATCH_SIZE = 20;
+
+const validators = [
   body("asset").optional().isIn(["XLM", "USDC", "NGN", "GHS", "KES"]),
   body("memo").optional().trim(),
   body("memo_type")
@@ -13,8 +20,8 @@ module.exports = [
     .isIn(["text", "id", "hash", "return"])
     .withMessage("memo_type must be text, id, hash, or return"),
   body("recipients")
-    .isArray({ min: 1, max: 100 })
-    .withMessage("recipients must be an array with between 1 and 100 items"),
+    .isArray({ min: 1, max: MAX_BATCH_SIZE })
+    .withMessage(`recipients must be an array with between 1 and ${MAX_BATCH_SIZE} items`),
   body("recipients.*.recipient_address")
     .notEmpty()
     .withMessage("Recipient address is required")
@@ -73,3 +80,6 @@ module.exports = [
     return true;
   }),
 ];
+
+module.exports = validators;
+module.exports.MAX_BATCH_SIZE = MAX_BATCH_SIZE;

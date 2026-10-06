@@ -223,7 +223,7 @@ async function approveKYC(req, res, next) {
     }
 
     const adminWallet = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     const adminPublicKey = adminWallet.rows[0]?.public_key;
@@ -278,7 +278,7 @@ async function revokeKYC(req, res, next) {
     }
 
     const adminWallet = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     const adminPublicKey = adminWallet.rows[0]?.public_key;
@@ -702,12 +702,12 @@ async function indexContractEventsEndpoint(req, res, next) {
 // ---------------------------------------------------------------------------
 // Fraud Rule Engine (#690)
 // ---------------------------------------------------------------------------
-const { loadRules, invalidateRulesCache } = require('../services/fraudDetection');
+const { loadRules, invalidateRulesCache, getShadowRuleReport } = require('../services/fraudDetection');
 
 async function getFraudRules(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, name, rule_type, parameters, is_active, created_at FROM fraud_rules ORDER BY created_at ASC`
+      `SELECT id, name, rule_type, parameters, is_active, mode, created_at FROM fraud_rules ORDER BY created_at ASC`
     );
     res.json(rows);
   } catch (err) {
@@ -717,15 +717,19 @@ async function getFraudRules(req, res, next) {
 
 async function createFraudRule(req, res, next) {
   try {
-    const { name, rule_type, parameters } = req.body;
+    const { name, rule_type, parameters, mode } = req.body;
+    // BE-033: new rules default to 'shadow' unless explicitly created as
+    // 'active', so a rule can be validated against live traffic (logged, not
+    // enforced) before an admin promotes it via updateFraudRule.
+    const ruleMode = mode === 'active' ? 'active' : 'shadow';
     const { rows } = await db.query(
-      `INSERT INTO fraud_rules (name, rule_type, parameters)
-       VALUES ($1, $2, $3) RETURNING *`,
-      [name, rule_type, JSON.stringify(parameters)]
+      `INSERT INTO fraud_rules (name, rule_type, parameters, mode)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [name, rule_type, JSON.stringify(parameters), ruleMode]
     );
     await invalidateRulesCache();
     await audit.log(req.user.userId, 'fraud_rule_created', req.ip, req.headers['user-agent'],
-      { rule_name: name, rule_type });
+      { rule_name: name, rule_type, mode: ruleMode });
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Rule name already exists' });
@@ -736,21 +740,39 @@ async function createFraudRule(req, res, next) {
 async function updateFraudRule(req, res, next) {
   try {
     const { id } = req.params;
-    const { name, parameters, is_active } = req.body;
+    const { name, parameters, is_active, mode } = req.body;
+    if (mode !== undefined && mode !== 'shadow' && mode !== 'active') {
+      const err = new Error("mode must be 'shadow' or 'active'");
+      err.status = 400;
+      throw err;
+    }
     const { rows } = await db.query(
       `UPDATE fraud_rules
        SET name = COALESCE($1, name),
            parameters = COALESCE($2, parameters),
            is_active = COALESCE($3, is_active),
+           mode = COALESCE($4, mode),
            updated_at = NOW()
-       WHERE id = $4 RETURNING *`,
-      [name || null, parameters ? JSON.stringify(parameters) : null, is_active ?? null, id]
+       WHERE id = $5 RETURNING *`,
+      [name || null, parameters ? JSON.stringify(parameters) : null, is_active ?? null, mode || null, id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Rule not found' });
     await invalidateRulesCache();
     await audit.log(req.user.userId, 'fraud_rule_updated', req.ip, req.headers['user-agent'],
       { rule_id: id, changes: req.body });
     res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/admin/fraud-rules/shadow-report — BE-033 admin view comparing
+// shadow-rule outcomes (would-block vs would-pass) before promoting a rule.
+async function getFraudShadowReport(req, res, next) {
+  try {
+    const sinceDays = Math.min(90, parseInt(req.query.days, 10) || 7);
+    const report = await getShadowRuleReport(sinceDays);
+    res.json({ since_days: sinceDays, rules: report });
   } catch (err) {
     next(err);
   }
@@ -783,6 +805,8 @@ async function bulkSuspend(req, res, next) {
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
+    // Prevent long-running locks from degrading the platform under large batches
+    await client.query("SET LOCAL statement_timeout = '10s'");
     const { rows: affectedUsers } = await client.query(
       `UPDATE users SET is_suspended = true, suspension_reason = $1, suspended_at = NOW()
        WHERE id = ANY($2::uuid[]) AND is_suspended = false
@@ -820,6 +844,8 @@ async function bulkUnsuspend(req, res, next) {
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
+    // Prevent long-running locks from degrading the platform under large batches
+    await client.query("SET LOCAL statement_timeout = '10s'");
     const { rows: affectedUsers } = await client.query(
       `UPDATE users SET is_suspended = false, suspension_reason = NULL, suspended_at = NULL
        WHERE id = ANY($1::uuid[]) AND is_suspended = true
@@ -852,15 +878,25 @@ async function bulkUnsuspend(req, res, next) {
 async function bulkExport(req, res, next) {
   if (!validateBulkRequest(req, res)) return;
   const { userIds } = req.body;
+  const client = await db.pool.connect();
   try {
-    const { rows } = await db.query(
+    await client.query('BEGIN');
+    // Prevent long-running locks on the export_jobs table during large batches
+    await client.query("SET LOCAL statement_timeout = '10s'");
+    const { rows } = await client.query(
       `INSERT INTO export_jobs (admin_id, status, operation, filters)
        VALUES ($1, 'pending', 'bulk_export', $2) RETURNING id`,
       [req.user.userId, JSON.stringify({ userIds })]
     );
+    await client.query('COMMIT');
     const jobId = rows[0].id;
-    await audit.log(req.user.userId, 'bulk_export_queued', req.ip, req.headers['user-agent'],
-      { user_count: userIds.length, job_id: jobId });
+
+    // Structured audit log including batch size and requesting admin
+    await audit.auditLog(req, 'bulk_export_queued', {
+      type: 'bulk_user',
+      id: jobId,
+      newValue: { user_count: userIds.length, job_id: jobId },
+    });
 
     // Process async (fire-and-forget)
     processBulkExportJob(jobId, userIds).catch(err =>
@@ -870,7 +906,10 @@ async function bulkExport(req, res, next) {
 
     res.status(202).json({ jobId, message: 'Export job queued' });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     next(err);
+  } finally {
+    client.release();
   }
 }
 
@@ -989,7 +1028,7 @@ async function bulkKycUpdate(req, res, next) {
 
     // Get admin wallet for on-chain operations
     const adminWallet = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     const adminPublicKey = adminWallet.rows[0]?.public_key;
@@ -1033,6 +1072,25 @@ async function bulkKycUpdate(req, res, next) {
     next(err);
   } finally {
     client.release();
+  }
+}
+
+/**
+ * GET /api/admin/compliance/geo-denials
+ * BE-037: Compliance report summarizing geo-restriction denials over a date
+ * range - "how many attempts did we see from jurisdiction X in period Y",
+ * grouped by country/route/day, backed by the audit_logs entries the
+ * geoRestriction middleware writes for every denied request.
+ *
+ * Query params: from, to (ISO date strings; default last 30 days).
+ */
+async function getGeoDenialsReport(req, res, next) {
+  try {
+    const { from, to } = req.query;
+    const report = await audit.getGeoDenialReport({ from, to });
+    res.json(report);
+  } catch (err) {
+    next(err);
   }
 }
 
@@ -1096,6 +1154,91 @@ async function getAuditLogs(req, res, next) {
   }
 }
 
+// BE-032: override an AML flag on a wallet/user.
+//
+// Every override is compliance-sensitive — it must be traceable to the admin
+// who made the call, with a timestamp and a mandatory free-text reason, in
+// case of a future regulatory audit or fraud investigation. `reason` is
+// required and validated (non-empty) at the route layer (see routes/admin.js)
+// *and* re-checked here as defense in depth. The override is persisted via
+// audit.auditLog() as an 'aml_override' entry — actor id/role and created_at
+// are captured automatically by auditLog, and reason + the override decision
+// are recorded in `new_value` for the compliance report endpoint below.
+async function overrideAmlFlag(req, res, next) {
+  try {
+    const { wallet_address, user_id, reason, new_status } = req.body;
+
+    if (!reason || typeof reason !== 'string' || !reason.trim()) {
+      const err = new Error('A non-empty reason is required to override an AML flag');
+      err.status = 400;
+      throw err;
+    }
+    if (!wallet_address && !user_id) {
+      const err = new Error('wallet_address or user_id is required');
+      err.status = 400;
+      throw err;
+    }
+
+    const resolvedStatus = new_status || 'cleared';
+
+    await audit.auditLog(req, 'aml_override', {
+      type: 'aml_flag',
+      id: wallet_address || user_id,
+      oldValue: { status: 'flagged' },
+      newValue: {
+        status: resolvedStatus,
+        reason: reason.trim(),
+        reviewing_admin_id: req.user.userId,
+        wallet_address: wallet_address || null,
+        user_id: user_id || null,
+      },
+    });
+
+    res.json({
+      success: true,
+      wallet_address: wallet_address || null,
+      user_id: user_id || null,
+      new_status: resolvedStatus,
+      reviewing_admin_id: req.user.userId,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/admin/aml/overrides?from=&to= — compliance report of every AML
+// override in a date range, sourced from the audit trail written above.
+async function getAmlOverrides(req, res, next) {
+  try {
+    const { from, to } = req.query;
+    const conditions = [`action = 'aml_override'`];
+    const params = [];
+
+    if (from) {
+      params.push(from);
+      conditions.push(`created_at >= $${params.length}`);
+    }
+    if (to) {
+      params.push(to);
+      conditions.push(`created_at <= $${params.length}`);
+    }
+
+    const { rows } = await db.query(
+      `SELECT id, user_id AS reviewing_admin_id, actor_role, resource_id,
+              old_value, new_value, created_at
+       FROM audit_logs
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY created_at DESC
+       LIMIT 500`,
+      params
+    );
+
+    res.json({ data: rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getStats,
   getUsers,
@@ -1116,6 +1259,8 @@ module.exports = {
   getFraudRules,
   createFraudRule,
   updateFraudRule,
+  // #980 (BE-033)
+  getFraudShadowReport,
   // #692
   bulkSuspend,
   bulkUnsuspend,
@@ -1124,4 +1269,8 @@ module.exports = {
   bulkKycUpdate,
   // #698
   getAuditLogs,
+  getGeoDenialsReport,
+  // #979 (BE-032)
+  overrideAmlFlag,
+  getAmlOverrides,
 };

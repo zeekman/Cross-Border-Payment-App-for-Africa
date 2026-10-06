@@ -139,13 +139,26 @@ async function executeSwap({
   sellAmount,
   buyAsset,
   slippagePct = 1,
+  minReceived,
 }) {
   // Find best path and quoted destination amount
   const { findPaymentPath } = require('./stellar');
   const quote = await findPaymentPath(sellAsset, sellAmount, buyAsset);
   if (!quote) throw Object.assign(new Error('No DEX path found for this pair'), { status: 400 });
 
-  const destMin = (parseFloat(quote.destinationAmount) * (1 - slippagePct / 100)).toFixed(7);
+  let destMin;
+  if (minReceived !== undefined && minReceived !== null && minReceived !== '') {
+    // Client-supplied minimum is binding, but must be achievable against the current quote
+    if (parseFloat(minReceived) > parseFloat(quote.destinationAmount)) {
+      throw Object.assign(
+        new Error('min_received exceeds the current quoted amount; please refresh the quote'),
+        { status: 400 }
+      );
+    }
+    destMin = String(minReceived);
+  } else {
+    destMin = (parseFloat(quote.destinationAmount) * (1 - slippagePct / 100)).toFixed(7);
+  }
 
   const result = await sendPathPayment({
     senderPublicKey: publicKey,
