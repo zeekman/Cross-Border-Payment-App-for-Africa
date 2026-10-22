@@ -12,11 +12,11 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import AdminDashboard from '../../pages/AdminDashboard';
 import api from '../../utils/api';
 
-jest.mock('../../utils/api');
+vi.mock('../../utils/api');
 
 // recharts ResizeObserver is not available in jsdom
-jest.mock('recharts', () => {
-  const OriginalRecharts = jest.requireActual('recharts');
+vi.mock('recharts', async () => {
+  const OriginalRecharts = await vi.importActual('recharts');
   return {
     ...OriginalRecharts,
     ResponsiveContainer: ({ children }) => (
@@ -49,7 +49,7 @@ const mockUsers = [
 ];
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
   api.get.mockImplementation((url) => {
     if (url.includes('/admin/stats')) return Promise.resolve({ data: mockStats });
     if (url.includes('/admin/daily-stats')) return Promise.resolve({ data: mockDailyStats });

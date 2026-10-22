@@ -12,13 +12,13 @@
  *     middleware receives the key on both attempts and deduplicates).
  *
  * Strategy: mock `idb` with a fully in-memory fake that lives inside the
- * jest.mock factory (the only safe place when Babel hoists jest.mock above
+ * vi.mock factory (the only safe place when Babel hoists vi.mock above
  * all other declarations).  Expose a reset helper via a custom module-level
  * symbol so beforeEach can clear state between tests without re-requiring.
  */
 
 // ─── idb fake — everything self-contained inside the factory ─────────────────
-jest.mock('idb', () => {
+vi.mock('idb', () => {
   // In-memory IndexedDB substitute used by offlineDB.js via openDB()
   const state = {
     store: new Map(),
@@ -54,16 +54,16 @@ jest.mock('idb', () => {
   };
 
   // openDB always resolves with the same in-memory db instance
-  const openDB = jest.fn(() => Promise.resolve(fakeDb));
+  const openDB = vi.fn(() => Promise.resolve(fakeDb));
 
   // Attach the reset helper directly to openDB so tests can call it via
-  //   require('idb').openDB.__resetState()
+  //   (await import('idb')).openDB.__resetState()
   openDB.__resetState = () => state.reset();
 
   return { openDB };
 });
 
-// ─── Imports (after jest.mock) ────────────────────────────────────────────────
+// ─── Imports (after vi.mock) ────────────────────────────────────────────────
 import {
   enqueuePayment,
   getQueuedPayments,
@@ -86,25 +86,25 @@ const OWNER = { userId: 'user-1' };
 
 // ─── Setup / Teardown ─────────────────────────────────────────────────────────
 
-beforeEach(() => {
+beforeEach(async () => {
   // Reset in-memory store between tests via the reset helper attached to openDB
-  const { openDB } = require('idb');
+  const { openDB } = await import('idb');
   openDB.__resetState();
 
   // Also reset the offlineDB singleton so it re-calls openDB on the next access
   // (needed because offlineDB caches the db promise in a module-level variable).
-  jest.resetModules();
+  vi.resetModules();
 
   // Stable UUID for assertions
   Object.defineProperty(global, 'crypto', {
-    value: { randomUUID: jest.fn().mockReturnValue(MOCK_UUID) },
+    value: { randomUUID: vi.fn().mockReturnValue(MOCK_UUID) },
     configurable: true,
     writable: true,
   });
 });
 
 afterEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
 });
 
 // ─── Helper: mirrored syncQueue logic ────────────────────────────────────────
@@ -116,7 +116,7 @@ afterEach(() => {
 async function runSyncQueue(mockPost) {
   // Re-require to get the module with the fresh singleton state
   const { getQueuedPayments: gqp, removeQueuedPayment: rqp, updateQueuedPaymentStatus: uqps } =
-    require('../offlineDB');
+    await import('../offlineDB');
 
   const items       = await gqp();
   const capturedKeys = [];
@@ -141,7 +141,7 @@ async function runSyncQueue(mockPost) {
 
 describe('offline queue idempotency', () => {
   test('enqueuePayment assigns idempotency key at queue time', async () => {
-    const { enqueuePayment: eq, getQueuedPayments: gqp } = require('../offlineDB');
+    const { enqueuePayment: eq, getQueuedPayments: gqp } = await import('../offlineDB');
     await eq(PAYMENT, OWNER);
 
     const items = await gqp();
@@ -150,7 +150,7 @@ describe('offline queue idempotency', () => {
   });
 
   test('idempotency key is stable across multiple getQueuedPayments calls', async () => {
-    const { enqueuePayment: eq, getQueuedPayments: gqp } = require('../offlineDB');
+    const { enqueuePayment: eq, getQueuedPayments: gqp } = await import('../offlineDB');
     await eq(PAYMENT, OWNER);
 
     const [first]  = await gqp();
@@ -161,7 +161,7 @@ describe('offline queue idempotency', () => {
 
   test('key is NOT regenerated when status transitions to syncing or failed', async () => {
     const { enqueuePayment: eq, getQueuedPayments: gqp, updateQueuedPaymentStatus: uqps } =
-      require('../offlineDB');
+      await import('../offlineDB');
 
     await eq(PAYMENT, OWNER);
     const [item]      = await gqp();
@@ -175,7 +175,7 @@ describe('offline queue idempotency', () => {
   });
 
   test('queue → replay → connectivity drop mid-replay → replay again: single backend effect', async () => {
-    const { enqueuePayment: eq, getQueuedPayments: gqp } = require('../offlineDB');
+    const { enqueuePayment: eq, getQueuedPayments: gqp } = await import('../offlineDB');
 
     // Phase 1: queue while offline
     await eq(PAYMENT, OWNER);
@@ -184,7 +184,7 @@ describe('offline queue idempotency', () => {
     expect(idempotencyKey).toBeTruthy();
 
     // Phase 2: first replay — network fails mid-request
-    const mockPost = jest.fn().mockRejectedValueOnce(new Error('Network lost'));
+    const mockPost = vi.fn().mockRejectedValueOnce(new Error('Network lost'));
     const keys1    = await runSyncQueue(mockPost);
 
     expect(keys1).toEqual([idempotencyKey]);
@@ -213,7 +213,7 @@ describe('offline queue idempotency', () => {
   });
 
   test('each independently queued payment gets its own unique idempotency key', async () => {
-    const { enqueuePayment: eq, getQueuedPayments: gqp } = require('../offlineDB');
+    const { enqueuePayment: eq, getQueuedPayments: gqp } = await import('../offlineDB');
 
     let counter = 0;
     global.crypto.randomUUID.mockImplementation(

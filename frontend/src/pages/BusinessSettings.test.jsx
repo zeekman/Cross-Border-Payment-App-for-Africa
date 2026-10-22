@@ -15,12 +15,15 @@ import { AuthContext } from '../context/AuthContext';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
 
-jest.mock('../utils/api', () => ({
+vi.mock('../utils/api', () => ({
   __esModule: true,
-  default: { get: jest.fn(), post: jest.fn(), delete: jest.fn() },
+  default: { get: vi.fn(), post: vi.fn(), delete: vi.fn() },
 }));
 
-jest.mock('react-hot-toast', () => ({ success: jest.fn(), error: jest.fn() }));
+vi.mock('react-hot-toast', () => {
+  const toast = { success: vi.fn(), error: vi.fn() };
+  return { default: toast, ...toast };
+});
 
 const OWNER_WALLET = 'GOWNER1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF123456';
 const SIGNER_A = 'GSIGNER1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF123456';
@@ -46,9 +49,9 @@ function signersFail(status, error) {
   });
 }
 
-function renderPage(user = businessUser, updateUser = jest.fn()) {
+function renderPage(user = businessUser, updateUser = vi.fn()) {
   return render(
-    <MemoryRouter>
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <AuthContext.Provider value={{ user, updateUser }}>
         <BusinessSettings />
       </AuthContext.Provider>
@@ -57,7 +60,7 @@ function renderPage(user = businessUser, updateUser = jest.fn()) {
 }
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
 });
 
 describe('BusinessSettings — FE-023 non-owner / authorization handling', () => {
@@ -184,7 +187,7 @@ describe('BusinessSettings — destructive removal requires confirmation', () =>
   test('removing the last signer downgrades the account through updateUser', async () => {
     signersOk([{ signer_public_key: SIGNER_A, label: 'CFO' }]);
     api.delete.mockResolvedValue({});
-    const updateUser = jest.fn();
+    const updateUser = vi.fn();
     renderPage(businessUser, updateUser);
     await screen.findByText('CFO');
 

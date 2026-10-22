@@ -9,10 +9,10 @@ import { CurrencyProvider } from './context/CurrencyContext';
 export const defaultAuth = {
   user: { id: 'user-1', email: 'test@example.com', full_name: 'Test User', walletAddress: 'GTESTWALLET' },
   loading: false,
-  login: jest.fn(),
-  register: jest.fn(),
-  logout: jest.fn(),
-  updateUser: jest.fn(),
+  login: vi.fn(),
+  register: vi.fn(),
+  logout: vi.fn(),
+  updateUser: vi.fn(),
 };
 
 /**
@@ -23,7 +23,7 @@ export function renderWithProviders(ui, { route = '/', auth = {}, ...options } =
   const authValue = { ...defaultAuth, ...auth };
   function Wrapper({ children }) {
     return (
-      <MemoryRouter initialEntries={[route]}>
+      <MemoryRouter initialEntries={[route]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <AuthContext.Provider value={authValue}>
           <ThemeProvider>
             <CurrencyProvider>{children}</CurrencyProvider>

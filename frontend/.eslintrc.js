@@ -4,6 +4,10 @@ module.exports = {
     es2021: true,
     jest: true,
   },
+  // Vitest globals (see vite.config.mjs `test.globals`).
+  globals: {
+    vi: 'readonly',
+  },
   extends: [
     'airbnb',
     'plugin:react/recommended',

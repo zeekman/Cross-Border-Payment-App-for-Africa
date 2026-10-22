@@ -12,20 +12,20 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import LedgerSignModal from './LedgerSignModal';
 
 // The Ledger transport mock (frontend/src/__mocks__/@ledgerhq/hw-transport-webusb.js)
-// and hw-app-str mock are auto-used by Jest.
+// and hw-app-str mock are aliased in vite.config.mjs.
 
 // XDRInspectorModal is a real modal; stub it out so we can assert open/close without
 // needing a real @stellar/stellar-sdk decode in unit tests.
-jest.mock('./XDRInspectorModal', () =>
-  function MockXDRInspectorModal({ isOpen, onClose }) {
+vi.mock('./XDRInspectorModal', () => ({
+  default: function MockXDRInspectorModal({ isOpen, onClose }) {
     if (!isOpen) return null;
     return (
       <div data-testid="xdr-inspector-modal">
         <button onClick={onClose} data-testid="xdr-inspector-close">Close Inspector</button>
       </div>
     );
-  }
-);
+  },
+}));
 
 // Minimal stub XDR for tests — doesn't need to be a valid base64 Stellar XDR because
 // the real SDK is not used in the mocked test environment.
@@ -35,10 +35,10 @@ const STUB_PASSPHRASE = 'Test SDF Network ; September 2015';
 function renderModal(props = {}) {
   const defaults = {
     show: true,
-    onClose: jest.fn(),
+    onClose: vi.fn(),
     xdr: STUB_XDR,
     networkPassphrase: STUB_PASSPHRASE,
-    onSigned: jest.fn(),
+    onSigned: vi.fn(),
   };
   return render(<LedgerSignModal {...defaults} {...props} />);
 }
@@ -89,7 +89,7 @@ describe('LedgerSignModal — FE-027', () => {
   });
 
   it('calls onClose when Cancel is clicked', () => {
-    const onClose = jest.fn();
+    const onClose = vi.fn();
     renderModal({ onClose });
     fireEvent.click(screen.getByText('Cancel'));
     expect(onClose).toHaveBeenCalledTimes(1);

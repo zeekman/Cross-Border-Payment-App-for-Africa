@@ -7,15 +7,18 @@ import i18n from '../i18n';
 import { AuthContext } from '../context/AuthContext';
 import SendMoney from './SendMoney';
 
-jest.mock('../utils/api', () => ({
+vi.mock('../utils/api', () => ({
   __esModule: true,
-  default: { get: jest.fn(), post: jest.fn() },
+  default: { get: vi.fn(), post: vi.fn() },
 }));
-jest.mock('react-hot-toast', () => ({ error: jest.fn(), success: jest.fn() }));
-jest.mock('../components/QRScanner', () => () => null);
-jest.mock('../components/PINVerificationModal', () => () => null);
-jest.mock('../components/XDRInspectorModal', () => () => null);
-jest.mock('../components/LedgerSignModal', () => () => null);
+vi.mock('react-hot-toast', () => {
+  const toast = { error: vi.fn(), success: vi.fn() };
+  return { default: toast, ...toast };
+});
+vi.mock('../components/QRScanner', () => ({ default: () => null }));
+vi.mock('../components/PINVerificationModal', () => ({ default: () => null }));
+vi.mock('../components/XDRInspectorModal', () => ({ default: () => null }));
+vi.mock('../components/LedgerSignModal', () => ({ default: () => null }));
 
 import api from '../utils/api';
 
@@ -25,8 +28,8 @@ const feeStatsResponse = { data: { fee_bps: 50, fee_xlm: 0.00001 } };
 function renderSendMoney() {
   return render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter>
-        <AuthContext.Provider value={{ user: mockUser, updateUser: jest.fn() }}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <AuthContext.Provider value={{ user: mockUser, updateUser: vi.fn() }}>
           <SendMoney />
         </AuthContext.Provider>
       </MemoryRouter>
@@ -35,17 +38,17 @@ function renderSendMoney() {
 }
 
 beforeEach(() => {
-  jest.useFakeTimers();
+  vi.useFakeTimers();
   api.get.mockResolvedValue(feeStatsResponse);
 });
 afterEach(() => {
-  jest.useRealTimers();
-  jest.clearAllMocks();
+  vi.useRealTimers();
+  vi.clearAllMocks();
 });
 
 test('fee panel hidden when amount is empty', async () => {
   renderSendMoney();
-  await act(async () => jest.runAllTimers());
+  await act(async () => vi.runAllTimers());
   expect(screen.queryByText(/Recipient receives/i)).not.toBeInTheDocument();
 });
 
@@ -62,7 +65,7 @@ test('fee panel displays breakdown after debounce resolves', async () => {
   renderSendMoney();
   const amountInput = screen.getByPlaceholderText('0.00');
   await userEvent.type(amountInput, '100');
-  await act(async () => jest.advanceTimersByTime(300));
+  await act(async () => vi.advanceTimersByTime(300));
   await waitFor(() =>
     expect(screen.getByText(/Recipient receives/i)).toBeInTheDocument()
   );
@@ -75,7 +78,7 @@ test('fee panel shows error fallback when API fails', async () => {
   renderSendMoney();
   const amountInput = screen.getByPlaceholderText('0.00');
   await userEvent.type(amountInput, '50');
-  await act(async () => jest.advanceTimersByTime(300));
+  await act(async () => vi.advanceTimersByTime(300));
   await waitFor(() =>
     expect(
       screen.getByText(/Fee estimate unavailable/i)

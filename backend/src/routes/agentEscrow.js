@@ -3,7 +3,15 @@ const { body, param, query, validationResult } = require("express-validator");
 const StellarSdk = require("@stellar/stellar-sdk");
 const authMiddleware = require("../middleware/auth");
 const idempotency = require("../middleware/idempotency");
-const { create, confirm, cancel, getEscrow, listEscrows } = require("../controllers/agentEscrowController");
+const { readLimiter } = require("../middleware/rateLimiter");
+const {
+  create,
+  confirm,
+  cancel,
+  getEscrow,
+  listEscrows,
+  getAgentStatus,
+} = require("../controllers/agentEscrowController");
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -55,6 +63,14 @@ router.post(
   ],
   validate,
   create
+);
+
+// Lets the create form check that an agent is registered before submitting.
+router.get(
+  "/agents/:wallet",
+  [param("wallet").custom(isValidAddress)],
+  validate,
+  getAgentStatus
 );
 
 router.post(

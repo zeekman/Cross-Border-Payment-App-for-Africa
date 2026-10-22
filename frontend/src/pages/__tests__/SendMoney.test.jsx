@@ -55,19 +55,23 @@ i18n.use(initReactI18next).init({
 });
 
 // ── mocks ──────────────────────────────────────────────────────────────────
-jest.mock('../../utils/api');
-jest.mock('react-hot-toast', () => ({ success: jest.fn(), error: jest.fn() }));
-jest.mock('react-router-dom', () => ({
-  ...jest.requireActual('react-router-dom'),
-  useNavigate: () => jest.fn(),
+vi.mock('../../utils/api');
+vi.mock('react-hot-toast', () => {
+  const toast = { success: vi.fn(), error: vi.fn() };
+  return { default: toast, ...toast };
+});
+vi.mock('react-router-dom', async () => ({
+  ...(await vi.importActual('react-router-dom')),
+  useNavigate: () => vi.fn(),
   useBeforeUnload: () => {},
 }));
-jest.mock('../../components/LedgerSignModal', () => () => null);
-jest.mock('../../components/QRScanner', () => () => null);
-jest.mock('../../components/PINVerificationModal', () => ({ isOpen, onClose, onSuccess }) =>
-  isOpen ? <div role="dialog"><button onClick={onSuccess}>Enter PIN verification</button></div> : null
-);
-jest.mock('../../components/XDRInspectorModal', () => () => null);
+vi.mock('../../components/LedgerSignModal', () => ({ default: () => null }));
+vi.mock('../../components/QRScanner', () => ({ default: () => null }));
+vi.mock('../../components/PINVerificationModal', () => ({
+  default: ({ isOpen, onClose, onSuccess }) =>
+    isOpen ? <div role="dialog"><button onClick={onSuccess}>Enter PIN verification</button></div> : null,
+}));
+vi.mock('../../components/XDRInspectorModal', () => ({ default: () => null }));
 
 const CONTACTS = [
   {
@@ -91,7 +95,7 @@ const RECIPIENT = 'GBOB0000000000000000000000000000000000000000000000000001';
 function renderComponent() {
   return render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <SendMoney />
       </MemoryRouter>
     </I18nextProvider>
@@ -99,9 +103,9 @@ function renderComponent() {
 }
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
   localStorage.clear();
-  global.fetch = jest.fn(() =>
+  global.fetch = vi.fn(() =>
     Promise.resolve({
       ok: true,
       json: () =>
@@ -268,7 +272,7 @@ test('shows "No contacts match" when search returns no results', async () => {
 
 test('keyboard navigation works in contacts dropdown', async () => {
   // jsdom doesn't implement scrollIntoView
-  window.HTMLElement.prototype.scrollIntoView = jest.fn();
+  window.HTMLElement.prototype.scrollIntoView = vi.fn();
   api.get.mockImplementation((url) => {
     if (url === '/payments/fee-stats') return Promise.resolve({ data: { priorities: { economy: 100, standard: 200, priority: 500 } } });
     if (url === '/wallet/list') return Promise.resolve({ data: { wallets: [] } });
@@ -365,7 +369,7 @@ test('pre-fills form from payment request when only requestId is in URL', async 
 
   render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={[`/send?request=${REQUEST_ID}`]}>
+      <MemoryRouter initialEntries={[`/send?request=${REQUEST_ID}`]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <SendMoney />
       </MemoryRouter>
     </I18nextProvider>

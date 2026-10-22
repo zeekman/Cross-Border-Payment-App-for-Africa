@@ -14,20 +14,23 @@ import { I18nextProvider } from 'react-i18next';
 import i18n from '../i18n';
 import api from '../utils/api';
 
-jest.mock('../utils/api', () => ({
+vi.mock('../utils/api', () => ({
   __esModule: true,
-  default: { get: jest.fn(), post: jest.fn(), delete: jest.fn() },
+  default: { get: vi.fn(), post: vi.fn(), delete: vi.fn() },
 }));
-jest.mock('../context/AuthContext', () => ({
-  ...jest.requireActual('../context/AuthContext'),
+vi.mock('../context/AuthContext', async () => ({
+  ...(await vi.importActual('../context/AuthContext')),
   useAuth: () => ({
     user: { full_name: 'Musa', email: 'musa@test.com', wallet_address: 'GC...123' },
-    logout: jest.fn(),
+    logout: vi.fn(),
   }),
 }));
-jest.mock('react-hot-toast', () => ({ error: jest.fn(), success: jest.fn() }));
+vi.mock('react-hot-toast', () => {
+  const toast = { error: vi.fn(), success: vi.fn() };
+  return { default: toast, ...toast };
+});
 
-const Profile = require('./Profile').default;
+import Profile from './Profile';
 
 function mockMountCalls() {
   api.get
@@ -42,7 +45,7 @@ async function renderInHausa() {
   });
   await act(async () => {
     render(
-      <BrowserRouter>
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Profile />
         </I18nextProvider>
@@ -52,12 +55,12 @@ async function renderInHausa() {
 }
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
   localStorage.clear();
 });
 afterEach(() => i18n.changeLanguage('en'));
 
-jest.setTimeout(15000);
+vi.setConfig({ testTimeout: 15000 });
 
 describe('Hausa (ha) locale integration', () => {
   test('profile.title renders "Bayanan Kai" in Hausa', async () => {
@@ -136,7 +139,7 @@ describe('Hausa (ha) locale integration', () => {
     await act(async () => { await i18n.changeLanguage('en'); });
     await act(async () => {
       render(
-        <BrowserRouter>
+        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <I18nextProvider i18n={i18n}>
             <Profile />
           </I18nextProvider>

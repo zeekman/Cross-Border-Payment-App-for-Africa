@@ -13,7 +13,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ActiveSessions } from './ActiveSessions';
 import api from '../utils/api';
 
-jest.mock('../utils/api');
+vi.mock('../utils/api');
 
 const CURRENT_SESSION_ID = 'sess-current';
 
@@ -39,7 +39,7 @@ const mockSessions = [
 ];
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
   api.get.mockResolvedValue({ data: { sessions: mockSessions } });
 });
 

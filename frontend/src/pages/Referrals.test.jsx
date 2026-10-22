@@ -6,13 +6,16 @@ import { I18nextProvider } from 'react-i18next';
 import i18n from '../i18n';
 import Referrals from './Referrals';
 
-jest.mock('../utils/api', () => ({
+vi.mock('../utils/api', () => ({
   __esModule: true,
-  default: { get: jest.fn() },
+  default: { get: vi.fn() },
 }));
 
-jest.mock('react-hot-toast', () => ({ error: jest.fn(), success: jest.fn() }));
-jest.mock('qrcode.react', () => ({
+vi.mock('react-hot-toast', () => {
+  const toast = { error: vi.fn(), success: vi.fn() };
+  return { default: toast, ...toast };
+});
+vi.mock('qrcode.react', () => ({
   QRCodeCanvas: () => <div data-testid="qr-code">QR Code</div>,
 }));
 
@@ -21,10 +24,10 @@ import toast from 'react-hot-toast';
 
 describe('Referrals Page', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     Object.assign(navigator, {
       clipboard: {
-        writeText: jest.fn(),
+        writeText: vi.fn(),
       },
     });
   });
@@ -74,7 +77,7 @@ describe('Referrals Page', () => {
     api.get.mockImplementation(() => new Promise(() => {})); // Never resolves
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Referrals />
         </I18nextProvider>
@@ -95,7 +98,7 @@ describe('Referrals Page', () => {
     });
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Referrals />
         </I18nextProvider>
@@ -124,7 +127,7 @@ describe('Referrals Page', () => {
     });
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Referrals />
         </I18nextProvider>
@@ -153,7 +156,7 @@ describe('Referrals Page', () => {
     });
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Referrals />
         </I18nextProvider>
@@ -180,7 +183,7 @@ describe('Referrals Page', () => {
     navigator.clipboard.writeText.mockResolvedValue(undefined);
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Referrals />
         </I18nextProvider>
@@ -213,7 +216,7 @@ describe('Referrals Page', () => {
     const user = userEvent.setup();
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Referrals />
         </I18nextProvider>
@@ -251,7 +254,7 @@ describe('Referrals Page', () => {
     });
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Referrals />
         </I18nextProvider>
@@ -270,7 +273,7 @@ describe('Referrals Page', () => {
     api.get.mockRejectedValue(new Error('API Error'));
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Referrals />
         </I18nextProvider>

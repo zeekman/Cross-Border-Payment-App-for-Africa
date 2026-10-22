@@ -6,26 +6,26 @@ import { MemoryRouter } from 'react-router-dom';
 import { I18nextProvider } from 'react-i18next';
 import i18n from '../i18n';
 
-jest.mock('../utils/api', () => ({
+vi.mock('../utils/api', () => ({
   __esModule: true,
-  default: { get: jest.fn() },
+  default: { get: vi.fn() },
 }));
 
-jest.mock('../utils/offlineDB', () => ({
-  getCacheEntry: jest.fn().mockResolvedValue(null),
-  setCacheEntry: jest.fn().mockResolvedValue(undefined),
+vi.mock('../utils/offlineDB', () => ({
+  getCacheEntry: vi.fn().mockResolvedValue(null),
+  setCacheEntry: vi.fn().mockResolvedValue(undefined),
 }));
 
-jest.mock('../hooks/useOnlineStatus', () => ({
+vi.mock('../hooks/useOnlineStatus', () => ({
   useOnlineStatus: () => ({ isOnline: true, wasOffline: false }),
 }));
 
 import TransactionHistory from './TransactionHistory';
 import api from '../utils/api';
 
-jest.mock('react-router-dom', () => ({
-  ...jest.requireActual('react-router-dom'),
-  useNavigate: () => jest.fn(),
+vi.mock('react-router-dom', async () => ({
+  ...(await vi.importActual('react-router-dom')),
+  useNavigate: () => vi.fn(),
 }));
 
 const emptyHistory = {
@@ -39,7 +39,7 @@ const emptyHistory = {
 function renderComponent() {
   return render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <TransactionHistory />
       </MemoryRouter>
     </I18nextProvider>
@@ -51,7 +51,7 @@ describe('TransactionHistory', () => {
     Object.defineProperty(navigator, 'onLine', { value: true, writable: true, configurable: true });
   });
 
-  afterEach(() => jest.clearAllMocks());
+  afterEach(() => vi.clearAllMocks());
 
   it('shows loading skeletons initially', () => {
     api.get.mockReturnValue(new Promise(() => {}));
