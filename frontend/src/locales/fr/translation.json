@@ -191,5 +191,36 @@
     "verify_pin_title": "Vérifier la transaction",
     "confirming_transaction": "Confirmez cette transaction :",
     "pin_verified": "Code PIN vérifié ! Envoi du paiement..."
+  },
+  "escrow": {
+    "asset_hint": "L'entiercement agent ne prend en charge que {{asset}}.",
+    "available_balance": "Disponible : {{balance}} {{asset}}",
+    "errors": {
+      "agent_required": "Saisissez l'adresse du portefeuille de l'agent.",
+      "agent_invalid": "Le portefeuille de l'agent n'est pas une adresse Stellar valide. Vérifiez les fautes de frappe.",
+      "recipient_required": "Saisissez l'adresse du portefeuille du destinataire.",
+      "recipient_invalid": "Le portefeuille du destinataire n'est pas une adresse Stellar valide. Vérifiez les fautes de frappe.",
+      "agent_is_sender": "Vous ne pouvez pas être l'agent de votre propre entiercement.",
+      "recipient_is_sender": "Vous ne pouvez pas envoyer un entiercement vers votre propre portefeuille.",
+      "recipient_is_agent": "L'agent et le destinataire doivent être des portefeuilles différents.",
+      "agent_not_registered": "Ce portefeuille n'est pas un agent AfriPay enregistré.",
+      "asset_unsupported": "Seul {{asset}} est pris en charge pour l'entiercement agent.",
+      "amount_required": "Saisissez un montant.",
+      "amount_format": "Le montant peut avoir au maximum 7 décimales.",
+      "amount_positive": "Saisissez un montant supérieur à 0.",
+      "insufficient_balance": "Le montant dépasse votre solde disponible ({{balance}} {{asset}}).",
+      "exceeds_escrow": "Le montant ne peut pas dépasser le solde en entiercement."
+    },
+    "toast": {
+      "created": "Entiercement créé avec succès",
+      "create_failed": "Échec de la création de l'entiercement",
+      "fetch_failed": "Échec du chargement des entiercements",
+      "confirmed": "Entiercement confirmé",
+      "confirm_failed": "Échec de la confirmation de l'entiercement",
+      "cancelled": "Entiercement annulé",
+      "cancel_failed": "Échec de l'annulation de l'entiercement",
+      "partial_released": "Libération partielle réussie",
+      "release_failed": "Échec de la libération de l'entiercement"
+    }
   }
 }

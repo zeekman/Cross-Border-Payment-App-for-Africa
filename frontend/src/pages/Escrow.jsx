@@ -1,9 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 import { useConfirm } from '../context/ConfirmContext';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
+import { validateEscrowForm, ESCROW_ASSET } from '../utils/escrowValidation';
+
+const EMPTY_FORM = { agent_wallet: '', recipient_wallet: '', amount: '', asset: ESCROW_ASSET };
 
 export default function Escrow() {
   const confirm = useConfirm();
@@ -17,12 +20,11 @@ export default function Escrow() {
   const [statusFilter, setStatusFilter] = useState('');
 
   // Create escrow form
-  const [createForm, setCreateForm] = useState({
-    agent_wallet: '',
-    recipient_wallet: '',
-    amount: '',
-    asset: 'USDC',
-  });
+  const [createForm, setCreateForm] = useState(EMPTY_FORM);
+  const [formError, setFormError] = useState(null);
+  // Sender's own wallet and available USDC, used for client-side checks.
+  const [senderWallet, setSenderWallet] = useState(null);
+  const [usdcBalance, setUsdcBalance] = useState(null);
 
   // Confirm/Cancel escrow
   const [selectedEscrow, setSelectedEscrow] = useState(null);
@@ -48,12 +50,36 @@ export default function Escrow() {
   };
 
   useEffect(() => {
-    if (activeTab === 'list') {
-      fetchEscrows();
-    }
-  }, [activeTab, role, statusFilter]);
+    if (activeTab !== 'create') return;
+    let cancelled = false;
+    api
+      .get('/wallet/balance')
+      .then(({ data }) => {
+        if (cancelled) return;
+        setSenderWallet(data?.public_key || null);
+        const usdc = (data?.balances || []).find(
+          (b) => (b.asset || b.asset_code) === ESCROW_ASSET
+        );
+        // No USDC trustline means a zero balance.
+        setUsdcBalance(usdc ? usdc.available_balance ?? usdc.balance : '0');
+      })
+      .catch(() => {
+        // Leave checks to the backend if the balance can't be loaded.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab]);
 
-  const fetchEscrows = async () => {
+  const updateField = (field, value) => {
+    setCreateForm((prev) => ({ ...prev, [field]: value }));
+    if (formError?.field === field) setFormError(null);
+  };
+
+  const formErrorMessage = (err) =>
+    t(`escrow.errors.${err.key}`, { ...(err.params || {}) });
+
+  const fetchEscrows = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -62,51 +88,65 @@ export default function Escrow() {
       const { data } = await api.get('/escrow', { params });
       setEscrows(data.escrows || []);
     } catch (err) {
-      const message = err.response?.data?.error || 'Failed to fetch escrows';
+      const message = err.response?.data?.error || t('escrow.toast.fetch_failed');
       setError(message);
       toast.error(message);
     } finally {
       setLoading(false);
     }
-  };
+  }, [role, statusFilter, t]);
+
+  useEffect(() => {
+    if (activeTab === 'list') {
+      fetchEscrows();
+    }
+  }, [activeTab, fetchEscrows]);
 
   const handleCreateEscrow = async (e) => {
     e.preventDefault();
-    if (!createForm.agent_wallet || !createForm.recipient_wallet || !createForm.amount) {
-      toast.error('Please fill in all fields');
+
+    const err = validateEscrowForm(createForm, { senderWallet, balance: usdcBalance });
+    if (err) {
+      setFormError(err);
+      toast.error(formErrorMessage(err));
       return;
     }
+    setFormError(null);
 
-    // Validate Stellar address format (56 chars, starts with 'G')
-    const validateWallet = (addr, label) => {
-      const trimmed = addr.trim();
-      if (!trimmed.startsWith('G')) {
-        toast.error(`${label} must be a valid Stellar address (starts with G)`);
-        return false;
-      }
-      if (trimmed.length !== 56) {
-        toast.error(`${label} must be 56 characters (got ${trimmed.length})`);
-        return false;
-      }
-      if (!/^[A-Z0-9]+$/.test(trimmed)) {
-        toast.error(`${label} contains invalid characters`);
-        return false;
-      }
-      return true;
+    const payload = {
+      agent_wallet: createForm.agent_wallet.trim(),
+      recipient_wallet: createForm.recipient_wallet.trim(),
+      amount: createForm.amount.trim(),
+      asset: ESCROW_ASSET,
     };
-
-    if (!validateWallet(createForm.agent_wallet, 'Agent wallet')) return;
-    if (!validateWallet(createForm.recipient_wallet, 'Recipient wallet')) return;
 
     setLoading(true);
     try {
-      const { data } = await api.post('/escrow/create', createForm);
-      toast.success('Escrow created successfully');
-      setCreateForm({ agent_wallet: '', recipient_wallet: '', amount: '', asset: 'USDC' });
+      // Reject unregistered agents before submitting. If the lookup itself
+      // fails, carry on: the backend runs the same check on create.
+      let registered = true;
+      try {
+        const { data } = await api.get(`/escrow/agents/${payload.agent_wallet}`);
+        registered = data?.registered !== false;
+      } catch {
+        registered = true;
+      }
+      if (!registered) {
+        const agentErr = { field: 'agent_wallet', key: 'agent_not_registered' };
+        setFormError(agentErr);
+        toast.error(formErrorMessage(agentErr));
+        return;
+      }
+
+      await api.post('/escrow/create', payload);
+      toast.success(t('escrow.toast.created'));
+      setCreateForm(EMPTY_FORM);
       setActiveTab('list');
-      fetchEscrows();
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to create escrow');
+    } catch (error) {
+      const data = error.response?.data;
+      const message =
+        data?.error || data?.errors?.[0]?.msg || t('escrow.toast.create_failed');
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -122,11 +162,11 @@ export default function Escrow() {
     setLoading(true);
     try {
       await api.post(`/escrow/${escrowId}/confirm`);
-      toast.success('Escrow confirmed');
+      toast.success(t('escrow.toast.confirmed'));
       fetchEscrows();
       setSelectedEscrow(null);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to confirm escrow');
+      toast.error(err.response?.data?.error || t('escrow.toast.confirm_failed'));
     } finally {
       setLoading(false);
     }
@@ -138,11 +178,11 @@ export default function Escrow() {
     setLoading(true);
     try {
       await api.post(`/escrow/${escrowId}/cancel`);
-      toast.success('Escrow cancelled');
+      toast.success(t('escrow.toast.cancelled'));
       fetchEscrows();
       setSelectedEscrow(null);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to cancel escrow');
+      toast.error(err.response?.data?.error || t('escrow.toast.cancel_failed'));
     } finally {
       setLoading(false);
     }
@@ -156,11 +196,11 @@ export default function Escrow() {
     const remaining = remainingBalance(partialEscrow);
 
     if (!Number.isFinite(amount) || amount <= 0) {
-      toast.error('Enter an amount greater than 0');
+      toast.error(t('escrow.errors.amount_positive'));
       return;
     }
     if (amount > remaining) {
-      toast.error('Amount cannot exceed the escrowed balance');
+      toast.error(t('escrow.errors.exceeds_escrow'));
       return;
     }
 
@@ -169,7 +209,7 @@ export default function Escrow() {
       const { data } = await api.post(`/contracts/escrow/${partialEscrow.id}/partial-release`, {
         amount,
       });
-      toast.success('Partial release successful');
+      toast.success(t('escrow.toast.partial_released'));
       // Update the affected row in place without a full reload.
       setEscrows((prev) =>
         prev.map((esc) =>
@@ -178,7 +218,7 @@ export default function Escrow() {
       );
       closePartialRelease();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to release escrow');
+      toast.error(err.response?.data?.error || t('escrow.toast.release_failed'));
     } finally {
       setPartialLoading(false);
     }
@@ -189,9 +229,9 @@ export default function Escrow() {
   const previewNet = previewAmount - previewFee;
   const partialError =
     partialEscrow && previewAmount > 0 && previewAmount > remainingBalance(partialEscrow)
-      ? 'Amount cannot exceed the escrowed balance'
+      ? t('escrow.errors.exceeds_escrow')
       : partialEscrow && partialAmount !== '' && previewAmount <= 0
-      ? 'Amount must be greater than 0'
+      ? t('escrow.errors.amount_positive')
       : '';
 
   return (
@@ -248,8 +288,10 @@ export default function Escrow() {
                   id="escrow-agent-wallet"
                   type="text"
                   value={createForm.agent_wallet}
-                  onChange={(e) => setCreateForm({ ...createForm, agent_wallet: e.target.value })}
+                  onChange={(e) => updateField('agent_wallet', e.target.value)}
                   placeholder="G..."
+                  aria-invalid={formError?.field === 'agent_wallet'}
+                  aria-describedby={formError?.field === 'agent_wallet' ? 'escrow-form-error' : undefined}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
@@ -262,8 +304,10 @@ export default function Escrow() {
                   id="escrow-recipient-wallet"
                   type="text"
                   value={createForm.recipient_wallet}
-                  onChange={(e) => setCreateForm({ ...createForm, recipient_wallet: e.target.value })}
+                  onChange={(e) => updateField('recipient_wallet', e.target.value)}
                   placeholder="G..."
+                  aria-invalid={formError?.field === 'recipient_wallet'}
+                  aria-describedby={formError?.field === 'recipient_wallet' ? 'escrow-form-error' : undefined}
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
@@ -279,8 +323,10 @@ export default function Escrow() {
                     step="0.0000001"
                     min="0"
                     value={createForm.amount}
-                    onChange={(e) => setCreateForm({ ...createForm, amount: e.target.value })}
+                    onChange={(e) => updateField('amount', e.target.value)}
                     placeholder="0.00"
+                    aria-invalid={formError?.field === 'amount'}
+                    aria-describedby={formError?.field === 'amount' ? 'escrow-form-error' : undefined}
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
@@ -288,17 +334,33 @@ export default function Escrow() {
                   <label htmlFor="escrow-asset" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     Asset
                   </label>
+                  {/* Agent escrow only supports USDC, so the asset is fixed. */}
                   <select
                     id="escrow-asset"
-                    value={createForm.asset}
-                    onChange={(e) => setCreateForm({ ...createForm, asset: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={ESCROW_ASSET}
+                    disabled
+                    aria-describedby="escrow-asset-hint"
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white cursor-not-allowed"
                   >
-                    <option value="USDC">USDC</option>
-                    <option value="XLM">XLM</option>
+                    <option value={ESCROW_ASSET}>{ESCROW_ASSET}</option>
                   </select>
+                  <p id="escrow-asset-hint" className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    {t('escrow.asset_hint', { asset: ESCROW_ASSET })}
+                  </p>
                 </div>
               </div>
+
+              {usdcBalance !== null && (
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  {t('escrow.available_balance', { balance: usdcBalance, asset: ESCROW_ASSET })}
+                </p>
+              )}
+
+              {formError && (
+                <p id="escrow-form-error" role="alert" className="text-sm text-red-600 dark:text-red-400">
+                  {formErrorMessage(formError)}
+                </p>
+              )}
 
               <button
                 type="submit"

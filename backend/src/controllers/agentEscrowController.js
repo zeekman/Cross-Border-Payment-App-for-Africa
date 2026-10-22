@@ -157,6 +157,18 @@ async function create(req, res, next) {
     }
     const { public_key, encrypted_secret_key } = walletResult.rows[0];
 
+    // Sender, agent and recipient must be three different wallets.
+    if (
+      agent_wallet === recipient_wallet ||
+      agent_wallet === public_key ||
+      recipient_wallet === public_key
+    ) {
+      return res.status(400).json({
+        error: "Sender, agent and recipient must be different wallets",
+        code: "DUPLICATE_PARTIES",
+      });
+    }
+
     // Issue #1156: Apply compliance checks to escrow creation (value-moving endpoint)
     const { ensureKycIfNeeded, amlRescreenForPayment, dailyLimitExceeded, checkFraud, logFraudBlock } = require("./paymentController");
     const { estimateUSDValue } = require("./paymentController");
@@ -425,4 +437,59 @@ async function partialRelease(req, res, next) {
   }
 }
 
-/* … truncated 4758 chars — edit only what you need near the top … */
+/**
+ * GET /api/escrow/:id
+ * Only the sender, the agent, or an admin may view an escrow.
+ */
+async function getEscrow(req, res, next) {
+  try {
+    const result = await db.query(
+      "SELECT * FROM agent_escrows WHERE id = $1",
+      [req.params.id]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: "Escrow not found" });
+    }
+    const escrow = result.rows[0];
+
+    const isParty =
+      req.user.walletAddress === escrow.sender_wallet ||
+      req.user.walletAddress === escrow.agent_wallet;
+    if (!isParty && req.user.role !== "admin") {
+      return res.status(403).json({ error: "You are not authorized to view this escrow" });
+    }
+
+    res.json({ escrow });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/escrow/agents/:wallet
+ * Returns whether `wallet` belongs to an approved AfriPay agent, so the
+ * create form can reject an unregistered agent before submitting. Uses the
+ * same check as `create`.
+ */
+async function getAgentStatus(req, res, next) {
+  try {
+    const result = await db.query(
+      "SELECT id FROM agents WHERE wallet_address = $1 AND status = 'approved'",
+      [req.params.wallet]
+    );
+    res.json({ registered: Boolean(result.rows[0]) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = {
+  list,
+  listEscrows: list,
+  create,
+  confirm,
+  cancel,
+  partialRelease,
+  getEscrow,
+  getAgentStatus,
+};

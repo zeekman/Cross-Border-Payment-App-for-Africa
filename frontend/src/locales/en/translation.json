@@ -206,5 +206,36 @@
     "dex_rate": "DEX rate",
     "slippage_tolerance": "Slippage Tolerance",
     "custom": "Custom"
+  },
+  "escrow": {
+    "asset_hint": "Agent escrow only supports {{asset}}.",
+    "available_balance": "Available: {{balance}} {{asset}}",
+    "errors": {
+      "agent_required": "Enter the agent's wallet address.",
+      "agent_invalid": "Agent wallet is not a valid Stellar address. Check for typos.",
+      "recipient_required": "Enter the recipient's wallet address.",
+      "recipient_invalid": "Recipient wallet is not a valid Stellar address. Check for typos.",
+      "agent_is_sender": "You can't be the agent for your own escrow.",
+      "recipient_is_sender": "You can't send an escrow to your own wallet.",
+      "recipient_is_agent": "The agent and the recipient must be different wallets.",
+      "agent_not_registered": "This wallet is not a registered AfriPay agent.",
+      "asset_unsupported": "Only {{asset}} is supported for agent escrow.",
+      "amount_required": "Enter an amount.",
+      "amount_format": "Amount can have at most 7 decimal places.",
+      "amount_positive": "Enter an amount greater than 0.",
+      "insufficient_balance": "Amount is more than your available balance ({{balance}} {{asset}}).",
+      "exceeds_escrow": "Amount cannot exceed the escrowed balance."
+    },
+    "toast": {
+      "created": "Escrow created successfully",
+      "create_failed": "Failed to create escrow",
+      "fetch_failed": "Failed to fetch escrows",
+      "confirmed": "Escrow confirmed",
+      "confirm_failed": "Failed to confirm escrow",
+      "cancelled": "Escrow cancelled",
+      "cancel_failed": "Failed to cancel escrow",
+      "partial_released": "Partial release successful",
+      "release_failed": "Failed to release escrow"
+    }
   }
 }
