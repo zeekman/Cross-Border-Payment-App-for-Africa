@@ -4,17 +4,17 @@ import PushNotificationPrompt from '../PushNotificationPrompt';
 
 // Mock localStorage so we can assert on what gets persisted
 const localStorageMock = {
-  getItem: jest.fn(),
-  setItem: jest.fn(),
-  removeItem: jest.fn(),
-  clear: jest.fn(),
+  getItem: vi.fn(),
+  setItem: vi.fn(),
+  removeItem: vi.fn(),
+  clear: vi.fn(),
 };
 Object.defineProperty(window, 'localStorage', { value: localStorageMock });
 
 // jsdom has no Notification; the component falls back to 'default'
 describe('PushNotificationPrompt', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   test('renders Enable and Not now buttons when permission is default', () => {
@@ -25,7 +25,7 @@ describe('PushNotificationPrompt', () => {
   });
 
   test('"Not now" stores a deferral timestamp and dismisses', () => {
-    const onDismiss = jest.fn();
+    const onDismiss = vi.fn();
     render(<PushNotificationPrompt onDismiss={onDismiss} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
@@ -38,7 +38,7 @@ describe('PushNotificationPrompt', () => {
   });
 
   test('"Don\'t ask again" stores a durable opt-out and dismisses', () => {
-    const onDismiss = jest.fn();
+    const onDismiss = vi.fn();
     render(<PushNotificationPrompt onDismiss={onDismiss} />);
 
     fireEvent.click(screen.getByRole('button', { name: "Don't ask again" }));

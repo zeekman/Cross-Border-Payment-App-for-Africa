@@ -224,7 +224,7 @@ export default function App() {
       <AuthProvider>
         <ThemeProvider>
           <CurrencyProvider>
-          <BrowserRouter>
+          <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <Toaster
               position="top-center"
               toastOptions={{

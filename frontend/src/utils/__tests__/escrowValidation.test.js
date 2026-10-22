@@ -54,7 +54,7 @@ describe('validateEscrowForm', () => {
     ['1e3', 'amount_format'],
     ['0', 'amount_positive'],
     ['0.0000000', 'amount_positive'],
-  ])('rejects amount %p with %s', (amount, key) => {
+  ])('rejects amount %j with %s', (amount, key) => {
     expect(validateEscrowForm({ ...valid, amount }).key).toBe(key);
   });
 

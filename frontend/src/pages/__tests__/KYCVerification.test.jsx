@@ -4,9 +4,9 @@ import userEvent from "@testing-library/user-event";
 import KYCVerification from "../KYCVerification";
 import api from "../../services/api";
 
-jest.mock("../../services/api", () => ({
+vi.mock("../../services/api", () => ({
   __esModule: true,
-  default: { get: jest.fn(), post: jest.fn() },
+  default: { get: vi.fn(), post: vi.fn() },
 }));
 
 const makeFile = (name, type, size = 1024) => {
@@ -17,7 +17,7 @@ const makeFile = (name, type, size = 1024) => {
 
 describe("KYCVerification submission", () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     api.get.mockResolvedValue({ data: { status: "not_started" } });
     api.post.mockResolvedValue({ data: { status: "pending" } });
   });

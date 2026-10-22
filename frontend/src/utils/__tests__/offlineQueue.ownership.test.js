@@ -7,7 +7,7 @@
  */
 
 // ─── idb fake — same in-memory substitute as the idempotency tests ───────────
-jest.mock('idb', () => {
+vi.mock('idb', () => {
   const state = {
     store: new Map(),
     nextId: 1,
@@ -37,7 +37,7 @@ jest.mock('idb', () => {
     clear() { state.store.clear(); return Promise.resolve(); },
   };
 
-  const openDB = jest.fn(() => Promise.resolve(fakeDb));
+  const openDB = vi.fn(() => Promise.resolve(fakeDb));
   openDB.__resetState = () => state.reset();
   openDB.__rawAdd = (record) => fakeDb.add('queue', record);
   return { openDB };
@@ -51,20 +51,20 @@ const PAYMENT = {
 
 let db;
 
-beforeEach(() => {
-  require('idb').openDB.__resetState();
-  jest.resetModules();
-  db = require('../offlineDB');
+beforeEach(async () => {
+  (await import('idb')).openDB.__resetState();
+  vi.resetModules();
+  db = await import('../offlineDB');
 });
 
 afterEach(() => {
-  jest.restoreAllMocks();
+  vi.restoreAllMocks();
 });
 
 describe('offline queue ownership (FE-137)', () => {
   test('stores userId, walletId and expiresAt with each entry', async () => {
     const now = 1_700_000_000_000;
-    jest.spyOn(Date, 'now').mockReturnValue(now);
+    vi.spyOn(Date, 'now').mockReturnValue(now);
 
     await db.enqueuePayment({ ...PAYMENT, wallet_id: 'wallet-a' }, { userId: 'user-a' });
 
@@ -108,7 +108,7 @@ describe('offline queue ownership (FE-137)', () => {
 
   test('expired entries are not returned for replay', async () => {
     const now = 1_700_000_000_000;
-    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
     await db.enqueuePayment(PAYMENT, { userId: 'user-a' });
 
     clock.mockReturnValue(now + db.QUEUE_TTL_MS - 1);
@@ -119,7 +119,7 @@ describe('offline queue ownership (FE-137)', () => {
   });
 
   test('legacy entries without an owner are never returned', async () => {
-    await require('idb').openDB.__rawAdd({
+    await (await import('idb')).openDB.__rawAdd({
       payload: PAYMENT,
       idempotencyKey: 'legacy',
       createdAt: Date.now(),
@@ -130,13 +130,13 @@ describe('offline queue ownership (FE-137)', () => {
 
   test('purgeStaleQueuedPayments removes expired, ownerless and foreign entries', async () => {
     const now = 1_700_000_000_000;
-    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
 
     await db.enqueuePayment({ ...PAYMENT, amount: 'old' }, { userId: 'user-a' });
     clock.mockReturnValue(now + db.QUEUE_TTL_MS + 1);
     await db.enqueuePayment({ ...PAYMENT, amount: 'fresh-a' }, { userId: 'user-a' });
     await db.enqueuePayment({ ...PAYMENT, amount: 'fresh-b' }, { userId: 'user-b' });
-    await require('idb').openDB.__rawAdd({
+    await (await import('idb')).openDB.__rawAdd({
       payload: { ...PAYMENT, amount: 'legacy' },
       idempotencyKey: 'legacy',
       createdAt: Date.now(),

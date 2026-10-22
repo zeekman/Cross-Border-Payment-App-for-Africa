@@ -1,4 +1,4 @@
-// Jest globals (react-scripts test) provide describe/it/expect.
+// Vitest globals (see vite.config.mjs) provide describe/it/expect.
 
 // Exercise the real shared validator, not a copy of it.
 import { validateStellarAddress } from '../utils/validation';

@@ -34,8 +34,11 @@ testI18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
-jest.mock('../utils/api');
-jest.mock('react-hot-toast', () => ({ success: jest.fn(), error: jest.fn() }));
+vi.mock('../utils/api');
+vi.mock('react-hot-toast', () => {
+  const toast = { success: vi.fn(), error: vi.fn() };
+  return { default: toast, ...toast };
+});
 
 import PINVerificationModal from './PINVerificationModal';
 
@@ -44,8 +47,8 @@ function renderModal(props) {
     <I18nextProvider i18n={testI18n}>
       <PINVerificationModal
         isOpen={true}
-        onClose={jest.fn()}
-        onSuccess={jest.fn()}
+        onClose={vi.fn()}
+        onSuccess={vi.fn()}
         {...props}
       />
     </I18nextProvider>

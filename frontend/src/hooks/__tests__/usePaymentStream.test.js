@@ -1,22 +1,23 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
+import { Horizon } from '@stellar/stellar-sdk';
 import { usePaymentStream } from '../usePaymentStream';
 
 // ─── Mock Stellar SDK ────────────────────────────────────────────────────────
-// jest.mock is hoisted, so the factory must be self-contained.
+// vi.mock is hoisted, so the factory must be self-contained.
 // We expose mutable state via a module-level object that tests can read/write.
 
 const mockState = {
   handlers: {},
-  close: jest.fn(),
+  close: vi.fn(),
 };
 
-jest.mock('@stellar/stellar-sdk', () => ({
+vi.mock('@stellar/stellar-sdk', () => ({
   Horizon: {
-    Server: jest.fn().mockImplementation(() => ({
-      payments: jest.fn().mockReturnValue({
-        forAccount: jest.fn().mockReturnThis(),
-        cursor: jest.fn().mockReturnThis(),
-        stream: jest.fn().mockImplementation((handlers) => {
+    Server: vi.fn().mockImplementation(() => ({
+      payments: vi.fn().mockReturnValue({
+        forAccount: vi.fn().mockReturnThis(),
+        cursor: vi.fn().mockReturnThis(),
+        stream: vi.fn().mockImplementation((handlers) => {
           mockState.handlers = handlers;
           return mockState.close;
         }),
@@ -46,16 +47,15 @@ const makePayment = (overrides = {}) => ({
 // ─── Setup / Teardown ─────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  jest.useFakeTimers();
+  vi.useFakeTimers();
   mockState.handlers = {};
-  mockState.close = jest.fn();
+  mockState.close = vi.fn();
   // Re-wire the stream mock so each test gets a fresh close fn
-  const { Horizon } = require('@stellar/stellar-sdk');
   Horizon.Server.mockImplementation(() => ({
-    payments: jest.fn().mockReturnValue({
-      forAccount: jest.fn().mockReturnThis(),
-      cursor: jest.fn().mockReturnThis(),
-      stream: jest.fn().mockImplementation((handlers) => {
+    payments: vi.fn().mockReturnValue({
+      forAccount: vi.fn().mockReturnThis(),
+      cursor: vi.fn().mockReturnThis(),
+      stream: vi.fn().mockImplementation((handlers) => {
         mockState.handlers = handlers;
         return mockState.close;
       }),
@@ -64,7 +64,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  jest.useRealTimers();
+  vi.useRealTimers();
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -72,23 +72,21 @@ afterEach(() => {
 describe('usePaymentStream', () => {
   describe('initial state', () => {
     it('returns disconnected state before stream opens', () => {
-      const { result } = renderHook(() => usePaymentStream(null, jest.fn()));
+      const { result } = renderHook(() => usePaymentStream(null, vi.fn()));
       expect(result.current.isConnected).toBe(false);
       expect(result.current.isReconnecting).toBe(false);
       expect(result.current.error).toBe(null);
     });
 
     it('does not open a stream when publicKey is null', () => {
-      const { Horizon } = require('@stellar/stellar-sdk');
-      renderHook(() => usePaymentStream(null, jest.fn()));
+      renderHook(() => usePaymentStream(null, vi.fn()));
       expect(Horizon.Server).not.toHaveBeenCalled();
     });
   });
 
   describe('normal subscription flow', () => {
     it('opens a stream for the given publicKey with cursor "now"', () => {
-      const { Horizon } = require('@stellar/stellar-sdk');
-      renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
       const server = Horizon.Server.mock.results[0].value;
       expect(server.payments).toHaveBeenCalled();
       const builder = server.payments();
@@ -98,7 +96,7 @@ describe('usePaymentStream', () => {
     });
 
     it('calls onPayment with normalised payload on native payment', () => {
-      const onPayment = jest.fn();
+      const onPayment = vi.fn();
       renderHook(() => usePaymentStream(PUBLIC_KEY, onPayment));
 
       act(() => { mockState.handlers.onmessage(makePayment()); });
@@ -116,7 +114,7 @@ describe('usePaymentStream', () => {
     });
 
     it('maps non-native asset_code to asset field', () => {
-      const onPayment = jest.fn();
+      const onPayment = vi.fn();
       renderHook(() => usePaymentStream(PUBLIC_KEY, onPayment));
 
       act(() => {
@@ -129,7 +127,7 @@ describe('usePaymentStream', () => {
     });
 
     it('sets isConnected true after first payment message', async () => {
-      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
       act(() => { mockState.handlers.onmessage(makePayment()); });
 
@@ -140,14 +138,14 @@ describe('usePaymentStream', () => {
 
   describe('cleanup on unmount', () => {
     it('calls close() on the stream when the component unmounts', () => {
-      const { unmount } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const { unmount } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
       const closeFn = mockState.close;
       unmount();
       expect(closeFn).toHaveBeenCalledTimes(1);
     });
 
     it('does not invoke onPayment after unmount', () => {
-      const onPayment = jest.fn();
+      const onPayment = vi.fn();
       const { unmount } = renderHook(() => usePaymentStream(PUBLIC_KEY, onPayment));
 
       unmount();
@@ -158,7 +156,7 @@ describe('usePaymentStream', () => {
     });
 
     it('suppresses state updates after unmount', () => {
-      const { result, unmount } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const { result, unmount } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
       unmount();
 
@@ -173,8 +171,8 @@ describe('usePaymentStream', () => {
     });
 
     it('cancels pending reconnect timer on unmount', () => {
-      const clearTimeoutSpy = jest.spyOn(global, 'clearTimeout');
-      const { unmount } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
+      const { unmount } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
       act(() => { mockState.handlers.onerror(new Error('disconnect')); });
       unmount();
@@ -186,7 +184,7 @@ describe('usePaymentStream', () => {
     it('calls close() when publicKey changes (dependency cleanup)', () => {
       const closeFn = mockState.close;
       const { rerender } = renderHook(
-        ({ pk }) => usePaymentStream(pk, jest.fn()),
+        ({ pk }) => usePaymentStream(pk, vi.fn()),
         { initialProps: { pk: PUBLIC_KEY } },
       );
 
@@ -196,8 +194,8 @@ describe('usePaymentStream', () => {
     });
 
     it('removes online/offline listeners on unmount', () => {
-      const removeSpy = jest.spyOn(window, 'removeEventListener');
-      const { unmount } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const removeSpy = vi.spyOn(window, 'removeEventListener');
+      const { unmount } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
       unmount();
 
@@ -209,7 +207,7 @@ describe('usePaymentStream', () => {
 
   describe('error handling and reconnection', () => {
     it('sets error and isReconnecting on stream error', async () => {
-      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
       act(() => { mockState.handlers.onerror(new Error('network failure')); });
 
@@ -219,25 +217,24 @@ describe('usePaymentStream', () => {
     });
 
     it('schedules reconnect with exponential backoff on error', () => {
-      const { Horizon } = require('@stellar/stellar-sdk');
-      renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
       const callsBefore = Horizon.Server.mock.calls.length;
 
       act(() => { mockState.handlers.onerror(new Error('disconnect')); });
-      act(() => { jest.advanceTimersByTime(1000); });
+      act(() => { vi.advanceTimersByTime(1000); });
 
       expect(Horizon.Server.mock.calls.length).toBeGreaterThan(callsBefore);
     });
 
     it('stops reconnecting after MAX_RECONNECT_ATTEMPTS', async () => {
-      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
       // Each onerror schedules a reconnect; running timers fires connect() which
       // overwrites mockState.handlers with the new stream's handlers.
       // We must trigger onerror on the *current* handlers after each reconnect.
       for (let i = 0; i < 10; i += 1) {
         act(() => { mockState.handlers.onerror(new Error('fail')); });
-        act(() => { jest.runAllTimers(); }); // fires reconnect, updates mockState.handlers
+        act(() => { vi.runAllTimers(); }); // fires reconnect, updates mockState.handlers
       }
       // On the 10th attempt the counter is exhausted — no more timer is scheduled
       act(() => { mockState.handlers.onerror(new Error('fail')); });
@@ -247,7 +244,7 @@ describe('usePaymentStream', () => {
     });
 
     it('sets isConnected false on onclose', async () => {
-      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
       act(() => { mockState.handlers.onmessage(makePayment()); });
       await waitFor(() => expect(result.current.isConnected).toBe(true));
@@ -259,7 +256,7 @@ describe('usePaymentStream', () => {
 
   describe('manual controls', () => {
     it('disconnect() closes the stream and sets isConnected false', async () => {
-      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
       const closeFn = mockState.close;
 
       act(() => { mockState.handlers.onmessage(makePayment()); });
@@ -272,8 +269,7 @@ describe('usePaymentStream', () => {
     });
 
     it('reconnect() opens a new stream', () => {
-      const { Horizon } = require('@stellar/stellar-sdk');
-      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
       const callsBefore = Horizon.Server.mock.calls.length;
 
       act(() => { result.current.reconnect(); });
@@ -284,8 +280,7 @@ describe('usePaymentStream', () => {
 
   describe('online/offline events', () => {
     it('triggers reconnect when browser comes back online while disconnected', () => {
-      const { Horizon } = require('@stellar/stellar-sdk');
-      renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+      renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
       const callsBefore = Horizon.Server.mock.calls.length;
 
       act(() => { window.dispatchEvent(new Event('online')); });

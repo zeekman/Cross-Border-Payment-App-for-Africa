@@ -5,27 +5,27 @@ import { MemoryRouter } from 'react-router-dom';
 import Analytics from '../Analytics';
 import api from '../../services/api';
 
-jest.mock('../../services/api', () => ({
-  get: jest.fn(),
-  post: jest.fn(),
+vi.mock('../../services/api', () => ({
+  get: vi.fn(),
+  post: vi.fn(),
 }));
 
 const mockUser = { id: 1, role: 'admin' };
 
-jest.mock('../../context/AuthContext', () => ({
+vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({ user: mockUser }),
 }));
 
 const renderPage = () =>
   render(
-    <MemoryRouter>
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Analytics />
     </MemoryRouter>
   );
 
 describe('Analytics page', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockUser.role = 'admin';
   });
 

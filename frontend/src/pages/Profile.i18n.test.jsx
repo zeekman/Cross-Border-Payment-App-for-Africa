@@ -6,29 +6,29 @@ import i18n from '../i18n';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
 
-jest.mock('../utils/api', () => ({
+vi.mock('../utils/api', () => ({
   __esModule: true,
   default: {
-    get: jest.fn(),
-    post: jest.fn(),
-    delete: jest.fn(),
+    get: vi.fn(),
+    post: vi.fn(),
+    delete: vi.fn(),
   },
 }));
 
-jest.mock('../context/AuthContext', () => ({
-  ...jest.requireActual('../context/AuthContext'),
+vi.mock('../context/AuthContext', async () => ({
+  ...(await vi.importActual('../context/AuthContext')),
   useAuth: () => ({
     user: { full_name: 'John Doe', email: 'john@test.com', wallet_address: 'GC...123' },
-    logout: jest.fn(),
+    logout: vi.fn(),
   }),
 }));
 
-jest.mock('react-hot-toast');
+vi.mock('react-hot-toast');
 
 // Import Profile after mocks are set up
-const Profile = require('./Profile').default;
+import Profile from './Profile';
 
-jest.setTimeout(15000);
+vi.setConfig({ testTimeout: 15000 });
 
 function mockMountCalls({ contacts = [], trustlines = [], activity = [] } = {}) {
   api.get
@@ -40,7 +40,7 @@ function mockMountCalls({ contacts = [], trustlines = [], activity = [] } = {}) 
 const renderProfileWithI18n = async () => {
   await act(async () => {
     render(
-      <BrowserRouter>
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <I18nextProvider i18n={i18n}>
           <Profile />
         </I18nextProvider>
@@ -51,10 +51,10 @@ const renderProfileWithI18n = async () => {
 
 describe('Profile Language Selector', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     localStorage.clear();
     i18n.changeLanguage('en');
-    window.confirm = jest.fn(() => true);
+    window.confirm = vi.fn(() => true);
   });
 
   test('language selector is displayed on Profile page', async () => {

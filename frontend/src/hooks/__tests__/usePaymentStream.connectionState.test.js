@@ -11,22 +11,23 @@
  */
 
 import { renderHook, act, waitFor } from '@testing-library/react';
+import { Horizon } from '@stellar/stellar-sdk';
 import { usePaymentStream, CONNECTION_STATE } from '../usePaymentStream';
 
 // ─── Mock Stellar SDK ─────────────────────────────────────────────────────────
 
 const mockState = {
   handlers: {},
-  close: jest.fn(),
+  close: vi.fn(),
 };
 
-jest.mock('@stellar/stellar-sdk', () => ({
+vi.mock('@stellar/stellar-sdk', () => ({
   Horizon: {
-    Server: jest.fn().mockImplementation(() => ({
-      payments: jest.fn().mockReturnValue({
-        forAccount: jest.fn().mockReturnThis(),
-        cursor: jest.fn().mockReturnThis(),
-        stream: jest.fn().mockImplementation((handlers) => {
+    Server: vi.fn().mockImplementation(() => ({
+      payments: vi.fn().mockReturnValue({
+        forAccount: vi.fn().mockReturnThis(),
+        cursor: vi.fn().mockReturnThis(),
+        stream: vi.fn().mockImplementation((handlers) => {
           mockState.handlers = handlers;
           return mockState.close;
         }),
@@ -55,16 +56,14 @@ const makePayment = (overrides = {}) => ({
 // ─── Setup / Teardown ─────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  jest.useFakeTimers();
+  vi.useFakeTimers();
   mockState.handlers = {};
-  mockState.close = jest.fn();
-
-  const { Horizon } = require('@stellar/stellar-sdk');
+  mockState.close = vi.fn();
   Horizon.Server.mockImplementation(() => ({
-    payments: jest.fn().mockReturnValue({
-      forAccount: jest.fn().mockReturnThis(),
-      cursor: jest.fn().mockReturnThis(),
-      stream: jest.fn().mockImplementation((handlers) => {
+    payments: vi.fn().mockReturnValue({
+      forAccount: vi.fn().mockReturnThis(),
+      cursor: vi.fn().mockReturnThis(),
+      stream: vi.fn().mockImplementation((handlers) => {
         mockState.handlers = handlers;
         return mockState.close;
       }),
@@ -73,19 +72,19 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  jest.useRealTimers();
+  vi.useRealTimers();
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('usePaymentStream — connectionState enum', () => {
   test('starts as DISCONNECTED before any message arrives', () => {
-    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
     expect(result.current.connectionState).toBe(CONNECTION_STATE.DISCONNECTED);
   });
 
   test('transitions to CONNECTED after first payment message', async () => {
-    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
     act(() => {
       mockState.handlers.onmessage(makePayment());
@@ -97,7 +96,7 @@ describe('usePaymentStream — connectionState enum', () => {
   });
 
   test('transitions to RECONNECTING on stream error (exponential backoff scheduled)', async () => {
-    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
     // First establish connected state
     act(() => { mockState.handlers.onmessage(makePayment()); });
@@ -114,7 +113,7 @@ describe('usePaymentStream — connectionState enum', () => {
   });
 
   test('transitions from RECONNECTING back to CONNECTED when stream re-opens and delivers a message', async () => {
-    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
     act(() => { mockState.handlers.onmessage(makePayment()); });
     await waitFor(() => expect(result.current.connectionState).toBe(CONNECTION_STATE.CONNECTED));
@@ -125,7 +124,7 @@ describe('usePaymentStream — connectionState enum', () => {
 
     // Advance timers so the backoff fires and connect() is called again
     // (this updates mockState.handlers to the new stream's handlers)
-    act(() => { jest.runAllTimers(); });
+    act(() => { vi.runAllTimers(); });
 
     // Deliver a message on the new stream
     act(() => { mockState.handlers.onmessage(makePayment({ paging_token: 'tok-2' })); });
@@ -136,12 +135,12 @@ describe('usePaymentStream — connectionState enum', () => {
   });
 
   test('transitions to DISCONNECTED after max reconnect attempts exhausted', async () => {
-    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
     // Exhaust all 10 attempts
     for (let i = 0; i < 10; i++) {
       act(() => { mockState.handlers.onerror(new Error('fail')); });
-      act(() => { jest.runAllTimers(); }); // fires reconnect → updates handlers
+      act(() => { vi.runAllTimers(); }); // fires reconnect → updates handlers
     }
     // 11th error with no more budget
     act(() => { mockState.handlers.onerror(new Error('final fail')); });
@@ -153,7 +152,7 @@ describe('usePaymentStream — connectionState enum', () => {
   });
 
   test('transitions to DISCONNECTED when browser goes offline', async () => {
-    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
     act(() => { mockState.handlers.onmessage(makePayment()); });
     await waitFor(() => expect(result.current.connectionState).toBe(CONNECTION_STATE.CONNECTED));
@@ -166,7 +165,7 @@ describe('usePaymentStream — connectionState enum', () => {
   });
 
   test('transitions back to CONNECTED when browser comes back online', async () => {
-    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
     // Confirm initial disconnected state
     expect(result.current.connectionState).toBe(CONNECTION_STATE.DISCONNECTED);
@@ -184,7 +183,7 @@ describe('usePaymentStream — connectionState enum', () => {
   });
 
   test('disconnect() sets connectionState to DISCONNECTED', async () => {
-    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+    const { result } = renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
     act(() => { mockState.handlers.onmessage(makePayment()); });
     await waitFor(() => expect(result.current.connectionState).toBe(CONNECTION_STATE.CONNECTED));
@@ -197,15 +196,15 @@ describe('usePaymentStream — connectionState enum', () => {
   });
 
   test('backoff is exponential: second attempt waits longer than first', () => {
-    const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
 
-    renderHook(() => usePaymentStream(PUBLIC_KEY, jest.fn()));
+    renderHook(() => usePaymentStream(PUBLIC_KEY, vi.fn()));
 
     // First error → 1st reconnect timer (BASE_DELAY_MS * 2^0 = 1000ms)
     act(() => { mockState.handlers.onerror(new Error('drop 1')); });
     const firstDelay = setTimeoutSpy.mock.calls.at(-1)?.[1];
 
-    act(() => { jest.runAllTimers(); }); // fires 1st reconnect
+    act(() => { vi.runAllTimers(); }); // fires 1st reconnect
 
     // Second error → 2nd reconnect timer (BASE_DELAY_MS * 2^1 = 2000ms)
     act(() => { mockState.handlers.onerror(new Error('drop 2')); });

@@ -3,6 +3,8 @@
 module.exports = {
   root: true,
   env: { browser: true, es2021: true, jest: true, node: true },
+  // Vitest globals (see vite.config.mjs `test.globals`).
+  globals: { vi: 'readonly' },
   parserOptions: { ecmaVersion: 'latest', sourceType: 'module', ecmaFeatures: { jsx: true } },
   plugins: ['react', 'react-hooks'],
   settings: { react: { version: 'detect' } },

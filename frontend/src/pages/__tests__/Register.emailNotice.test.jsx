@@ -38,19 +38,22 @@ testI18n.use(initReactI18next).init({
 });
 
 // ── mocks ──────────────────────────────────────────────────────────────────
-const mockNavigate = jest.fn();
-jest.mock('react-router-dom', () => ({
-  ...jest.requireActual('react-router-dom'),
+const mockNavigate = vi.fn();
+vi.mock('react-router-dom', async () => ({
+  ...(await vi.importActual('react-router-dom')),
   useNavigate: () => mockNavigate,
   useSearchParams: () => [new URLSearchParams()],
 }));
 
-const mockRegister = jest.fn();
-jest.mock('../../context/AuthContext', () => ({
+const mockRegister = vi.fn();
+vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({ register: mockRegister }),
 }));
 
-jest.mock('react-hot-toast', () => ({ success: jest.fn(), error: jest.fn() }));
+vi.mock('react-hot-toast', () => {
+  const toast = { success: vi.fn(), error: vi.fn() };
+  return { default: toast, ...toast };
+});
 
 import Register from '../Register';
 import Login from '../Login';
@@ -59,7 +62,7 @@ import Login from '../Login';
 function renderRegister() {
   return render(
     <I18nextProvider i18n={testI18n}>
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Register />
       </MemoryRouter>
     </I18nextProvider>
@@ -69,7 +72,7 @@ function renderRegister() {
 function renderLoginWithState(state) {
   return render(
     <I18nextProvider i18n={testI18n}>
-      <MemoryRouter initialEntries={[{ pathname: '/login', state }]}>
+      <MemoryRouter initialEntries={[{ pathname: '/login', state }]} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Login />
       </MemoryRouter>
     </I18nextProvider>

@@ -10,7 +10,7 @@ vi.mock('@sentry/react', () => ({
 describe('NotFound catch-all route', () => {
   it('renders the 404 page for an unknown path', () => {
     render(
-      <MemoryRouter initialEntries={['/this/route/does/not/exist']}>
+      <MemoryRouter initialEntries={['/this/route/does/not/exist']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <App />
       </MemoryRouter>
     );
@@ -20,7 +20,7 @@ describe('NotFound catch-all route', () => {
 
   it('provides a link back home', () => {
     render(
-      <MemoryRouter initialEntries={['/nope']}>
+      <MemoryRouter initialEntries={['/nope']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <App />
       </MemoryRouter>
     );

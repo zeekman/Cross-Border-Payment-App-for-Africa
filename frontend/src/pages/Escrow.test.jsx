@@ -8,11 +8,11 @@ import { ConfirmProvider } from '../context/ConfirmContext';
 import { AuthContext } from '../context/AuthContext';
 import '../i18n';
 
-jest.mock('../utils/api', () => ({
+vi.mock('../utils/api', () => ({
   __esModule: true,
-  default: { get: jest.fn(), post: jest.fn() },
+  default: { get: vi.fn(), post: vi.fn() },
 }));
-jest.mock('react-hot-toast', () => ({ __esModule: true, default: { success: jest.fn(), error: jest.fn() } }));
+vi.mock('react-hot-toast', () => ({ __esModule: true, default: { success: vi.fn(), error: vi.fn() } }));
 
 const SENDER = Keypair.random().publicKey();
 const AGENT = Keypair.random().publicKey();
@@ -51,7 +51,7 @@ async function fillAndSubmit({ agent = AGENT, recipient = RECIPIENT, amount = '1
   fireEvent.click(screen.getAllByRole('button', { name: /Create Escrow/i }).pop());
 }
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => vi.clearAllMocks());
 
 describe('Escrow create form', () => {
   test('asset is fixed to USDC', async () => {

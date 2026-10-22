@@ -3,9 +3,8 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import ErrorBoundary from './ErrorBoundary';
 
-// Module @sentry/react is mocked via moduleNameMapper in package.json
-// pointing to src/__mocks__/@sentry/react.js
-const Sentry = require('@sentry/react');
+// @sentry/react is aliased to src/__mocks__/@sentry/react.js in vite.config.mjs
+import * as Sentry from '@sentry/react';
 
 // Component that throws an error
 const ThrowError = () => {
@@ -19,10 +18,10 @@ describe('ErrorBoundary', () => {
   });
 
   test('captures exception and displays fallback UI when child throws', () => {
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <ErrorBoundary>
           <ThrowError />
         </ErrorBoundary>
@@ -43,10 +42,10 @@ describe('ErrorBoundary', () => {
   });
 
   test('renders feedback form, captures input, submits and shows thank-you state', () => {
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <ErrorBoundary>
           <ThrowError />
         </ErrorBoundary>
@@ -84,7 +83,7 @@ describe('ErrorBoundary', () => {
 
   test('renders children when no error', () => {
     render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <ErrorBoundary key="test-normal">
           <div>Normal content</div>
         </ErrorBoundary>

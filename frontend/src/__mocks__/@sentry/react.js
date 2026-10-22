@@ -1,9 +1,10 @@
-module.exports = {
-  captureException: jest.fn(() => 'test-event-id'),
-  captureMessage: jest.fn(),
-  captureUserFeedback: jest.fn(),
-  setUser: jest.fn(),
-  withScope: jest.fn(),
-  init: jest.fn(),
-  withProfiler: (component) => component,
-};
+import { vi } from 'vitest';
+
+export const captureException = vi.fn(() => 'test-event-id');
+export const captureMessage = vi.fn();
+export const captureUserFeedback = vi.fn();
+export const setUser = vi.fn();
+export const withScope = vi.fn();
+export const init = vi.fn();
+export const withProfiler = (component) => component;
+export const ErrorBoundary = ({ children }) => children;

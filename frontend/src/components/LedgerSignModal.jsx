@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import TransportWebUSB from '@ledgerhq/hw-transport-webusb';
 import Str from '@ledgerhq/hw-app-str';
+import { TransactionBuilder } from '@stellar/stellar-sdk';
 import { X, Usb, AlertTriangle, Eye } from 'lucide-react';
 import toast from 'react-hot-toast';
 import XDRInspectorModal from './XDRInspectorModal';
@@ -51,10 +52,7 @@ function mapLedgerError(err) {
  */
 function tryDecodePaymentFields(xdr, networkPassphrase) {
   try {
-    // Dynamic import is intentional here; stellar-sdk is a large dep and we only
-    // need it for this narrow decode path.
-    const StellarSdk = require('@stellar/stellar-sdk');
-    const tx = StellarSdk.TransactionBuilder.fromXDR(xdr, networkPassphrase);
+    const tx = TransactionBuilder.fromXDR(xdr, networkPassphrase);
     const op = tx.operations[0];
     if (!op) return null;
     if (op.type === 'payment') {

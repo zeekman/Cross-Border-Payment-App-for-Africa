@@ -3,8 +3,11 @@ import { render, screen, waitFor } from '@testing-library/react';
 import Webhooks from '../Webhooks';
 import api from '../../utils/api';
 
-jest.mock('../../utils/api');
-jest.mock('react-hot-toast', () => ({ success: jest.fn(), error: jest.fn() }));
+vi.mock('../../utils/api');
+vi.mock('react-hot-toast', () => {
+  const toast = { success: vi.fn(), error: vi.fn() };
+  return { default: toast, ...toast };
+});
 
 describe('Webhooks secret display', () => {
   const webhook = {

@@ -11,29 +11,29 @@ import * as offlineDB from '../../utils/offlineDB';
 import { useOnlineStatus } from '../../hooks/useOnlineStatus';
 import { useAuth } from '../../context/AuthContext';
 
-jest.mock('react-hot-toast', () => {
-  const toast = jest.fn();
-  toast.success = jest.fn();
-  toast.error = jest.fn();
+vi.mock('react-hot-toast', () => {
+  const toast = vi.fn();
+  toast.success = vi.fn();
+  toast.error = vi.fn();
   return { __esModule: true, default: toast };
 });
 
-jest.mock('../../utils/api', () => ({
+vi.mock('../../utils/api', () => ({
   __esModule: true,
-  default: { post: jest.fn(), get: jest.fn() },
+  default: { post: vi.fn(), get: vi.fn() },
 }));
 
-jest.mock('../../utils/offlineDB', () => ({
-  getQueuedPaymentsForUser: jest.fn(),
-  removeQueuedPayment: jest.fn(() => Promise.resolve()),
-  updateQueuedPaymentStatus: jest.fn(() => Promise.resolve()),
+vi.mock('../../utils/offlineDB', () => ({
+  getQueuedPaymentsForUser: vi.fn(),
+  removeQueuedPayment: vi.fn(() => Promise.resolve()),
+  updateQueuedPaymentStatus: vi.fn(() => Promise.resolve()),
 }));
 
-jest.mock('../../hooks/useOnlineStatus', () => ({ useOnlineStatus: jest.fn() }));
-jest.mock('../../context/AuthContext', () => ({ useAuth: jest.fn() }));
+vi.mock('../../hooks/useOnlineStatus', () => ({ useOnlineStatus: vi.fn() }));
+vi.mock('../../context/AuthContext', () => ({ useAuth: vi.fn() }));
 
 // Stand-in for the PIN modal: "Confirm PIN" simulates a successful verification.
-jest.mock('../PINVerificationModal', () => ({
+vi.mock('../PINVerificationModal', () => ({
   __esModule: true,
   default: ({ isOpen, onSuccess, onClose }) =>
     isOpen ? (
@@ -54,7 +54,7 @@ const itemFor = (id, userId, amount = '10') => ({
 });
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
   Object.defineProperty(window.navigator, 'onLine', { value: true, configurable: true });
   useOnlineStatus.mockReturnValue({ isOnline: true, wasOffline: true });
   useAuth.mockReturnValue({ user: { id: 'user-a' } });

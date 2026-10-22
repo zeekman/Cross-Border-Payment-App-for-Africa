@@ -5,26 +5,26 @@ import Profile from './Profile';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
 
-jest.mock('../utils/api', () => ({
+vi.mock('../utils/api', () => ({
   __esModule: true,
   default: {
-    get: jest.fn(),
-    post: jest.fn(),
-    delete: jest.fn(),
+    get: vi.fn(),
+    post: vi.fn(),
+    delete: vi.fn(),
   },
 }));
 
-jest.mock('../context/AuthContext', () => ({
-  ...jest.requireActual('../context/AuthContext'),
+vi.mock('../context/AuthContext', async () => ({
+  ...(await vi.importActual('../context/AuthContext')),
   useAuth: () => ({
     user: { full_name: 'John Doe', email: 'john@test.com', wallet_address: 'GC...123' },
-    logout: jest.fn(),
+    logout: vi.fn(),
   }),
 }));
 
-jest.mock('react-hot-toast');
+vi.mock('react-hot-toast');
 
-jest.setTimeout(15000);
+vi.setConfig({ testTimeout: 15000 });
 
 // The component fires api.get in this order on mount:
 //   1. /wallet/trustlines  (first useEffect)
@@ -40,7 +40,7 @@ function mockMountCalls({ contacts = [], trustlines = [], activity = [] } = {}) 
 const renderProfile = async () => {
   await act(async () => {
     render(
-      <BrowserRouter>
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Profile />
       </BrowserRouter>
     );
@@ -49,14 +49,14 @@ const renderProfile = async () => {
 
 describe('Profile Component', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    window.confirm = jest.fn(() => true);
+    vi.clearAllMocks();
+    window.confirm = vi.fn(() => true);
   });
 
   test('shows loading state while contacts are being fetched', () => {
     api.get.mockReturnValue(new Promise(() => {})); // never resolves
     render(
-      <BrowserRouter>
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Profile />
       </BrowserRouter>
     );

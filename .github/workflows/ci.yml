@@ -116,8 +116,8 @@ jobs:
 
     - name: Audit dependencies (frontend)
       if: matrix.component == 'frontend'
-      # continue-on-error: known pre-existing advisories in transitive deps
-      # (e.g. ws, websocket-driver via react-scripts/webpack-dev-server); informational for now
+      # continue-on-error: informational for now; most advisories came from
+      # react-scripts/webpack-dev-server, which are gone since the Vite migration
       continue-on-error: true
       run: |
         cd frontend
@@ -137,7 +137,7 @@ jobs:
       if: matrix.component == 'frontend'
       run: |
         cd frontend
-        npm test -- --coverage --watchAll=false --coverageReporters=lcov --coverageDirectory=../coverage/frontend
+        npm test -- --coverage --coverage.reporter=lcov --coverage.reportsDirectory=../coverage/frontend
     
     - name: Coverage report
       if: always()

@@ -2,6 +2,9 @@
   "name": "cbpa-frontend",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@headlessui/react": "^1.7.17",
     "@ledgerhq/hw-app-str": "^7.7.1",
@@ -19,7 +22,6 @@
     "react-i18next": "^16.6.2",
     "react-qr-reader": "^3.0.0-beta-1",
     "react-router-dom": "^6.20.1",
-    "react-scripts": "5.0.1",
     "react-window": "^1.8.10",
     "recharts": "^2.10.3",
     "socket.io-client": "^4.8.3",
@@ -30,29 +32,29 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "@vitest/coverage-v8": "^3.2.7",
     "autoprefixer": "^10.4.16",
+    "eslint": "^8.57.1",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "jsdom": "^26.1.0",
     "postcss": "^8.4.32",
-    "tailwindcss": "^3.3.6"
+    "tailwindcss": "^3.3.6",
+    "vite": "6.4.4",
+    "vitest": "^3.2.7"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "npm run lint:build && DISABLE_ESLINT_PLUGIN=true react-scripts build",
+    "start": "vite",
+    "build": "npm run lint:build && vite build",
+    "preview": "vite preview",
     "lint:build": "eslint src --ext .js,.jsx --no-eslintrc -c .eslintrc.build.js --max-warnings=0",
-    "test": "react-scripts test",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "eslint src/**/*.{js,jsx}",
     "lint:fix": "eslint src/**/*.{js,jsx} --fix",
     "format": "prettier --write \"**/*.{js,jsx,json,md,html,css}\"",
     "format:check": "prettier --check \"**/*.{js,jsx,json,md,html,css}\""
-  },
-  "jest": {
-    "transformIgnorePatterns": [
-      "/node_modules/(?!(axios)/)"
-    ],
-    "moduleNameMapper": {
-      "^@sentry/react$": "<rootDir>/src/__mocks__/@sentry/react.js",
-      "^@ledgerhq/hw-transport-webusb$": "<rootDir>/src/__mocks__/@ledgerhq/hw-transport-webusb.js",
-      "^@ledgerhq/hw-app-str$": "<rootDir>/src/__mocks__/@ledgerhq/hw-app-str.js"
-    }
   },
   "browserslist": {
     "production": [

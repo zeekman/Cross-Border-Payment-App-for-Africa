@@ -18,7 +18,7 @@ import { useStellarStatus } from '../useStellarStatus';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
-global.fetch = jest.fn();
+global.fetch = vi.fn();
 
 // Drive localStorage through a plain object — no `this` binding issues.
 // We reassign `lsStore` in beforeEach to clear between tests.
@@ -43,14 +43,14 @@ Object.defineProperty(window, 'localStorage', {
 // ─── Setup / Teardown ─────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  jest.useFakeTimers();
+  vi.useFakeTimers();
   lsStore = {};                         // reset storage between tests
   fetch.mockReset();                    // clear call history + return values
   Sentry.captureException.mockReset();  // clear call history
 });
 
 afterEach(() => {
-  jest.useRealTimers();
+  vi.useRealTimers();
 });
 
 // ─── Constants (must match the hook) ──────────────────────────────────────────

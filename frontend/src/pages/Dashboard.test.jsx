@@ -7,12 +7,15 @@ import i18n from '../i18n';
 import { AuthContext } from '../context/AuthContext';
 import Dashboard from './Dashboard';
 
-jest.mock('../utils/api', () => ({
+vi.mock('../utils/api', () => ({
   __esModule: true,
-  default: { get: jest.fn(), post: jest.fn() },
+  default: { get: vi.fn(), post: vi.fn() },
 }));
 
-jest.mock('react-hot-toast', () => ({ error: jest.fn(), success: jest.fn() }));
+vi.mock('react-hot-toast', () => {
+  const toast = { error: vi.fn(), success: vi.fn() };
+  return { default: toast, ...toast };
+});
 
 import api from '../utils/api';
 import { convertFromXLM } from '../utils/currency';
@@ -52,7 +55,7 @@ const sampleTxs = [
 function renderDashboard(Component = Dashboard) {
   return render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <AuthContext.Provider value={{ user: mockUser }}>
           <Component />
         </AuthContext.Provider>
@@ -61,12 +64,12 @@ function renderDashboard(Component = Dashboard) {
   );
 }
 
-function renderDashboardWithEnv(env) {
+async function renderDashboardWithEnv(env) {
   const originalNetwork = process.env.REACT_APP_STELLAR_NETWORK;
   process.env.REACT_APP_STELLAR_NETWORK = env;
-  jest.resetModules();
+  vi.resetModules();
   try {
-    const DashboardModule = require('./Dashboard').default;
+    const DashboardModule = (await import('./Dashboard')).default;
     return renderDashboard(DashboardModule);
   } finally {
     process.env.REACT_APP_STELLAR_NETWORK = originalNetwork;
@@ -79,9 +82,9 @@ const COINGECKO_FIXTURE = {
 
 describe('Dashboard', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     localStorage.clear();
-    global.fetch = jest.fn(() =>
+    global.fetch = vi.fn(() =>
       Promise.resolve({
         ok: true,
         json: () => Promise.resolve(COINGECKO_FIXTURE),
@@ -212,7 +215,7 @@ describe('Dashboard', () => {
       .mockResolvedValueOnce({ data: { wallets: [{ id: '1', public_key: walletResponse.data.public_key, balances: [{ asset: 'XLM', balance: '0' }], account_exists: false }] } })
       .mockResolvedValueOnce(historyResponse());
 
-    const { rerender } = renderDashboardWithEnv('mainnet');
+    const { rerender } = await renderDashboardWithEnv('mainnet');
 
     await waitFor(() =>
       expect(document.querySelector('.animate-spin')).not.toBeInTheDocument()
