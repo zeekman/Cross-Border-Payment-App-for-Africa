@@ -264,6 +264,7 @@
     "sequence": "Numéro de séquence",
     "memo": "Mémo",
     "txHash": "Hash de la transaction"
+  },
   "nav": {
     "dashboard": "Tableau de bord",
     "send": "Envoyer",

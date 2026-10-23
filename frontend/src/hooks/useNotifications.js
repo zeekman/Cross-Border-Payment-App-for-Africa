@@ -32,7 +32,11 @@ export function useNotifications() {
       const { data } = await api.get('/notifications/notifications', {
         params: { limit: 20, ...(cursor ? { cursor } : {}) },
       });
-      setItems((prev) => (cursor ? [...prev, ...data.data] : data.data));
+      setItems((prev) => {
+        if (!cursor) return data.data;
+        const seen = new Set(prev.map((n) => n.id));
+        return [...prev, ...data.data.filter((n) => !seen.has(n.id))];
+      });
       setNextCursor(data.next_cursor);
       setHasMore(data.has_more);
     } catch { /* surfaced as empty list */ } finally {
@@ -75,8 +79,13 @@ export function useNotifications() {
       if (!token) return;
       socket = io(socketURL, { auth: { token }, withCredentials: true });
       socket.on('notification:new', (notification) => {
-        setItems((prev) => [notification, ...prev]);
-        setUnreadCount((c) => c + 1);
+        let isNew = false;
+        setItems((prev) => {
+          if (prev.some((n) => n.id === notification.id)) return prev;
+          isNew = true;
+          return [notification, ...prev];
+        });
+        if (isNew) setUnreadCount((c) => c + 1);
       });
     };
     connect(tokenStore.get());

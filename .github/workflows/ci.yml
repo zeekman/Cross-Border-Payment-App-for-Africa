@@ -304,6 +304,11 @@ jobs:
         REACT_APP_API_URL: http://localhost:5000/api
         REACT_APP_STELLAR_NETWORK: testnet
     
+    - name: Check e2e selectors and routes
+      run: |
+        cd e2e
+        npm run check:selectors
+
     - name: Run E2E tests
       run: |
         cd e2e

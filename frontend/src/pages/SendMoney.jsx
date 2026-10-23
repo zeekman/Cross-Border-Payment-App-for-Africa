@@ -59,7 +59,7 @@ function stepReducer(state, action) {
 export default function SendMoney() {
   const confirm = useConfirm();
   const navigate = useNavigate();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [searchParams] = useSearchParams();
   const submitButtonRef = React.useRef(null);
   const [form, setForm] = useState({
@@ -103,17 +103,21 @@ export default function SendMoney() {
   const [quoteRefreshed, setQuoteRefreshed] = useState(false);
   const [quoteRefreshing, setQuoteRefreshing] = useState(false);
   const [requestId] = useState(searchParams.get('request'));
+  const [requestError, setRequestError] = useState(null);
+  const [requestExpiry, setRequestExpiry] = useState(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [showPushPrompt, setShowPushPrompt] = useState(false);
   const { shouldShowPrompt } = usePushNotifications();
 
   // Pre-fill form from payment request when only requestId is in the URL
   useEffect(() => {
-    if (!requestId || form.recipient_address || form.amount) return;
+    if (!requestId) return;
     api
       .get(`/payment-requests/${requestId}`)
       .then((r) => {
-        const { requester_wallet, amount, asset, memo } = r.data;
+        const { requester_wallet, amount, asset, memo, expires_at, claimed } = r.data;
+        setRequestExpiry(expires_at || null);
+        if (claimed) setRequestError(t('send.request_claimed', 'This payment request has already been paid.'));
         setForm((f) => ({
           ...f,
           recipient_address: requester_wallet || f.recipient_address,
@@ -122,8 +126,16 @@ export default function SendMoney() {
           memo: memo || f.memo,
         }));
       })
-      .catch(() => {});
-  }, [requestId]); // eslint-disable-line react-hooks/exhaustive-deps
+      .catch((err) => {
+        const status = err.response?.status;
+        setRequestError(
+          status === 410
+            ? t('send.request_expired', 'This payment request has expired.')
+            : status === 404
+              ? t('send.request_not_found', 'Payment request not found.')
+              : t('send.request_load_failed', 'Could not load this payment request.'),
+        );
+      });
   }, [requestId]); // eslint-disable-line react-hooks/exhaustive-deps -- prefill once per request id; must not overwrite later user edits
   const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
   const [pathResult, setPathResult] = useState(null);
@@ -150,9 +162,6 @@ export default function SendMoney() {
 
   const isCrossAsset = usePathPayment && form.destination_asset && form.destination_asset !== form.asset;
 
-  /** Returns true for a valid Ed25519 public key or a federation address */
-  const isValidStellarAddress = (addr) =>
-    (addr.startsWith('G') && addr.length === 56) || addr.includes('*');
   /** True for a checksum-valid Ed25519 key or a well-formed federation address. */
   const isValidStellarAddress = (addr) => validateStellarAddress(addr) === null;
 
@@ -310,38 +319,6 @@ export default function SendMoney() {
   }, [contacts, contactSearch]);
   const [error, setError] = useState('');
   const fileInputRef = useRef(null);
-
-  useEffect(() => {
-    api
-      .get('/wallet/list')
-      .then((r) => {
-        setWallets(r.data.wallets || []);
-        // If no wallet_id in URL, default to the user's default wallet
-        if (!selectedWalletId && r.data.wallets?.length) {
-          const def = r.data.wallets.find((w) => w.is_default) || r.data.wallets[0];
-          setSelectedWalletId(def.id);
-        }
-      })
-      .catch(() => {});
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- one-time initialisation on mount
-
-  useEffect(() => {
-    api
-      .get('/wallet/contacts')
-      .then((r) => setContacts(r.data.contacts || []))
-      .catch(() => {});
-  }, []);
-
-  // Filter contacts based on search term
-  const filteredContacts = useMemo(() => {
-    if (!contactSearch.trim()) return contacts;
-    const searchLower = contactSearch.toLowerCase();
-    return contacts.filter(
-      (contact) =>
-        contact.name.toLowerCase().includes(searchLower) ||
-        contact.wallet_address.toLowerCase().includes(searchLower)
-    );
-  }, [contacts, contactSearch]);
 
   // Reset selected index when search changes
   useEffect(() => {
@@ -720,6 +697,7 @@ export default function SendMoney() {
   };
 
   const handlePINVerified = async () => {
+    if (requestError) { toast.error(requestError); return; }
     setLoading(true);
     try {
       let res;
@@ -883,6 +861,13 @@ export default function SendMoney() {
       </button>
 
       <h2 className="text-2xl font-bold text-white mb-4">{t('send.title')}</h2>
+      {requestId && (requestError ? (
+        <div role="alert" className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-400">{requestError}</div>
+      ) : requestExpiry && (
+        <p className="mb-4 text-xs text-gray-400">
+          {t('send.request_expires', 'Payment request expires')} {new Date(requestExpiry).toLocaleString(i18n.language)}
+        </p>
+      ))}
 
       {/* Step indicator */}
       <div className="flex items-center mb-6" aria-label="Progress">
@@ -1027,6 +1012,7 @@ export default function SendMoney() {
           <input
             type="text"
             required
+            readOnly={!!requestId}
             placeholder={t('send.recipient_placeholder') || 'Wallet address or username*domain'}
             value={form.recipient_address}
             onChange={(e) => {
@@ -1187,6 +1173,7 @@ export default function SendMoney() {
                   min="0.0000001"
                   step="any"
                   placeholder="0.00"
+                  readOnly={!!requestId}
                   value={form.amount}
                   onChange={(e) => setForm({ ...form, amount: e.target.value })}
                   className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors"
@@ -1194,6 +1181,7 @@ export default function SendMoney() {
                 <div className="relative">
                   <select
                     value={form.asset}
+                    disabled={!!requestId}
                     onChange={(e) => setForm({ ...form, asset: e.target.value })}
                     className="appearance-none bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
                   >
@@ -1378,6 +1366,7 @@ export default function SendMoney() {
               <label className="text-sm text-gray-400 mb-1 block">{t('send.memo')}</label>
               <input
                 ref={memoRef}
+                readOnly={!!requestId}
                 type="text"
                 maxLength={memoMaxLen}
                 placeholder={t('send.memo_placeholder')}
@@ -1617,7 +1606,6 @@ export default function SendMoney() {
               )}
             </button>
 
-            {!isCrossAsset && (
             {!isCrossAsset && hasWebUSB() && (
               <button
                 type="button"
@@ -1739,7 +1727,6 @@ export default function SendMoney() {
                 Skip
               </button>
             </div>
-            </form>
           </div>
         </div>
       )}

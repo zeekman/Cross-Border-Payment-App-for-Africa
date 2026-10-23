@@ -279,6 +279,7 @@
     "sequence": "Sequence Number",
     "memo": "Memo",
     "txHash": "Transaction Hash"
+  },
   "nav": {
     "dashboard": "Dashboard",
     "send": "Send",
