@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { Activity, Users, DollarSign, TrendingUp, Server, BarChart3, ShieldAlert, CheckCircle, XCircle } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line,
@@ -6,6 +6,8 @@ import {
 import api from '../utils/api';
 import toast from 'react-hot-toast';
 import ConfirmModal from '../components/ConfirmModal';
+
+const ContractStateViewer = lazy(() => import('../components/ContractStateViewer'));
 
 const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -307,6 +309,10 @@ export default function AdminDashboard() {
           </a>
         </div>
       )}
+
+      <Suspense fallback={null}>
+        <ContractStateViewer />
+      </Suspense>
 
       {/* … rest of dashboard unchanged … */}
     </div>

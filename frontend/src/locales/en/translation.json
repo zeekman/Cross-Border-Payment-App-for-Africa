@@ -279,6 +279,25 @@
     "sequence": "Sequence Number",
     "memo": "Memo",
     "txHash": "Transaction Hash"
+  },
+  "loyalty": {
+    "title": "Loyalty Points",
+    "available": "Points available",
+    "tiers": "Redemption tiers",
+    "noTiers": "No redemption tiers are available right now.",
+    "cost": "{{points}} points",
+    "discount": "{{percent}}% fee discount",
+    "redeem": "Redeem",
+    "redeeming": "Redeeming…",
+    "needMore": "Need {{points}} more points",
+    "confirmTitle": "Redeem points?",
+    "confirmMsg": "This will burn {{points}} points for a {{percent}}% fee discount on your next transaction.",
+    "redeemed": "Redeemed {{points}} points for a {{percent}}% fee discount",
+    "redeemFailed": "Failed to redeem points",
+    "history": "Redemption history",
+    "noHistory": "No loyalty activity yet.",
+    "loading": "Loading…"
+  },
   "nav": {
     "dashboard": "Dashboard",
     "send": "Send",

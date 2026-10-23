@@ -5,10 +5,12 @@ import api from '../utils/api';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import ConfirmModal from '../components/ConfirmModal';
+import { useAuth } from '../context/AuthContext';
 
 export default function Sessions() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
+  const { logout } = useAuth();
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [revoking, setRevoking] = useState(null);
@@ -74,8 +76,8 @@ export default function Sessions() {
         toast.success(t('sessions.othersRevoked'));
       } else {
         // Revoke ALL sessions including the current one — user will be signed out.
-        await api.delete('/auth/sessions');
-        // After this the JWT is invalidated; navigate to login.
+        const res = await api.delete('/auth/sessions', { params: { include_current: true } });
+        if (res.data?.current_session_revoked) await logout();
         toast.success(t('sessions.allSignedOut'));
         navigate('/login');
       }

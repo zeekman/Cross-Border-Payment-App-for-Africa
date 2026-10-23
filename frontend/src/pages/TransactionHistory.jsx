@@ -277,20 +277,28 @@ export default function TransactionHistory() {
     if (exporting) return;
     setExporting(true);
     try {
-      const params = { format: 'csv' };
+      const params = {};
       if (dateFrom) params.from = dateFrom;
       if (dateTo) params.to = dateTo;
       if (asset) params.asset = asset;
       if (filter !== 'all') params.direction = filter;
-      const res = await api.get('/payments/history', { params, responseType: 'blob' });
+      const res = await api.get('/payments/export', { params, responseType: 'blob' });
       const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `transactions_${new Date().toISOString().split('T')[0]}.csv`;
+      const cd = res.headers?.['content-disposition'] || '';
+      const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+      a.download = m ? decodeURIComponent(m[1]) : `transactions_${new Date().toISOString().split('T')[0]}.csv`;
       a.click();
       URL.revokeObjectURL(url);
-    } catch {
-      toast.error('Export failed. Please try again.');
+    } catch (err) {
+      let msg = 'Export failed. Please try again.';
+      try {
+        const data = err.response?.data;
+        const text = data instanceof Blob ? await data.text() : null;
+        msg = (text && JSON.parse(text).error) || msg;
+      } catch { /* keep default message */ }
+      toast.error(msg);
     } finally {
       setExporting(false);
     }
