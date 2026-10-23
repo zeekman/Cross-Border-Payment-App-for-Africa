@@ -5,7 +5,7 @@ const { validateOutboundUrl } = require('../utils/ssrf');
 const { encryptSecret, decryptSecret } = require('../utils/symmetricEncryption');
 const { retryDelivery } = require('../services/webhook');
 
-const { WEBHOOK_EVENTS: VALID_EVENTS } = require('../services/webhookEvents');
+const { WEBHOOK_EVENTS: VALID_EVENTS, WEBHOOK_EVENT_DESCRIPTIONS } = require('../services/webhookEvents');
 
 // Shared URL validation for create/update: HTTPS-only + SSRF check.
 async function validateWebhookUrl(url) {
@@ -209,4 +209,10 @@ async function update(req, res, next) {
   }
 }
 
-module.exports = { create, update, list, listDeliveries, retry, rotateSecret };
+function listEvents(req, res) {
+  res.json({
+    events: VALID_EVENTS.map((name) => ({ name, description: WEBHOOK_EVENT_DESCRIPTIONS[name] })),
+  });
+}
+
+module.exports = { listEvents, create, update, list, listDeliveries, retry, rotateSecret };

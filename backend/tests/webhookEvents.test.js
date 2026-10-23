@@ -20,3 +20,9 @@ test('every emitted webhook event is in the catalogue', () => {
     }
   }
 });
+
+test('every catalogue event has a description and listEvents returns them all', () => {
+  const { WEBHOOK_EVENT_DESCRIPTIONS } = require('../src/services/webhookEvents');
+  for (const e of WEBHOOK_EVENTS) expect(typeof WEBHOOK_EVENT_DESCRIPTIONS[e]).toBe('string');
+  expect(Object.keys(WEBHOOK_EVENT_DESCRIPTIONS).sort()).toEqual([...WEBHOOK_EVENTS].sort());
+});

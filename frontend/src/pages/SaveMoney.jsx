@@ -87,6 +87,7 @@ function VaultCountdown({ unlockTimestamp, balance }) {
 }
 
 export default function SaveMoney() {
+  const { requestStepUp, stepUpModal } = useStepUp();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const [form, setForm] = useState({ amount: '', lock_period_days: '30' });
@@ -126,13 +127,15 @@ export default function SaveMoney() {
       return;
     }
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     setLoading(true);
     try {
       await api.post('/savings', {
         amount: amountXLM,
         asset: 'XLM',
         lock_period_days: parseInt(form.lock_period_days, 10),
-      });
+      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success(`Savings vault created! ${form.amount} XLM locked for ${form.lock_period_days} days`);
       setForm({ amount: '', lock_period_days: '30' });
       fetchVaults();
@@ -272,6 +275,7 @@ export default function SaveMoney() {
           </button>
         </form>
       </div>
+      {stepUpModal}
     </div>
   );
 }

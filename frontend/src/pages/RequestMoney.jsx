@@ -1,10 +1,121 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Copy, CheckCheck, Share2, Send, ExternalLink, Info } from 'lucide-react';
 import api from '../utils/api';
 import { CURRENCIES } from '../utils/currency';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+
+const PAGE_SIZE = 10;
+const STATUS_STYLES = {
+  pending: 'text-yellow-400',
+  paid: 'text-green-400',
+  expired: 'text-gray-500',
+  cancelled: 'text-red-400',
+};
+
+function MyRequests() {
+  const { t } = useTranslation();
+  const [items, setItems] = useState([]);
+  const [status, setStatus] = useState('');
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { data } = await api.get('/payment-requests', {
+        params: { page, limit: PAGE_SIZE, status: status || undefined },
+      });
+      setItems(data.requests);
+      setTotal(data.total);
+    } catch {
+      toast.error(t('request.error') || 'Failed to load requests');
+    } finally {
+      setLoading(false);
+    }
+  }, [page, status, t]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const reshare = async (id) => {
+    const link = `${window.location.origin}/send?request=${id}`;
+    try {
+      if (navigator.share) await navigator.share({ title: 'Payment Request', text: link });
+      else {
+        await navigator.clipboard.writeText(link);
+        toast.success(t('common.copied'));
+      }
+    } catch {
+      // share cancelled
+    }
+  };
+
+  const cancelRequest = async (id) => {
+    try {
+      await api.delete(`/payment-requests/${id}`);
+      toast.success('Request cancelled');
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to cancel request');
+    }
+  };
+
+  const pages = Math.max(Math.ceil(total / PAGE_SIZE), 1);
+
+  return (
+    <div className="space-y-3">
+      <select
+        aria-label="Filter by status"
+        value={status}
+        onChange={(e) => { setStatus(e.target.value); setPage(1); }}
+        className="bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-white text-sm"
+      >
+        <option value="">All</option>
+        {Object.keys(STATUS_STYLES).map((s) => <option key={s} value={s}>{s}</option>)}
+      </select>
+      {loading && <p className="text-gray-400 text-sm">Loading…</p>}
+      {!loading && items.length === 0 && <p className="text-gray-400 text-sm">No requests yet.</p>}
+      {items.map((r) => (
+        <div key={r.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-2">
+          <div className="flex justify-between items-center">
+            <span className="text-white font-semibold">{parseFloat(r.amount)} {r.asset}</span>
+            <span className={`text-xs uppercase font-semibold ${STATUS_STYLES[r.status]}`}>{r.status}</span>
+          </div>
+          <p className="text-xs text-gray-500">
+            Created {new Date(r.created_at).toLocaleDateString()} · Expires {new Date(r.expires_at).toLocaleDateString()}
+          </p>
+          {r.claimed_tx_hash && (
+            <a
+              href={`https://stellar.expert/explorer/public/tx/${r.claimed_tx_hash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-primary-400 font-mono break-all"
+            >
+              {r.claimed_tx_hash}
+            </a>
+          )}
+          {r.status === 'pending' && (
+            <div className="flex gap-2">
+              <button onClick={() => reshare(r.id)} className="flex-1 bg-gray-800 hover:bg-gray-700 rounded-lg py-2 text-sm text-white">
+                {t('common.share')}
+              </button>
+              <button onClick={() => cancelRequest(r.id)} className="flex-1 bg-gray-800 hover:bg-gray-700 rounded-lg py-2 text-sm text-red-400">
+                {t('common.cancel')}
+              </button>
+            </div>
+          )}
+        </div>
+      ))}
+      <div className="flex justify-between items-center text-sm text-gray-400">
+        <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)} className="disabled:opacity-40">Previous</button>
+        <span>{page} / {pages}</span>
+        <button disabled={page >= pages} onClick={() => setPage((p) => p + 1)} className="disabled:opacity-40">Next</button>
+      </div>
+    </div>
+  );
+}
 
 export default function RequestMoney() {
   const navigate = useNavigate();
@@ -14,6 +125,7 @@ export default function RequestMoney() {
     asset: 'XLM',
     memo: ''
   });
+  const [tab, setTab] = useState('new');
   const [paymentLink, setPaymentLink] = useState('');
   const [requestDetails, setRequestDetails] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -90,7 +202,23 @@ export default function RequestMoney() {
 
       <h2 className="text-2xl font-bold text-white mb-6">{t('request.title') || 'Request Payment'}</h2>
 
-      {!paymentLink ? (
+      <div className="flex gap-2 mb-6" role="tablist">
+        {[['new', t('request.title') || 'New request'], ['mine', 'My requests']].map(([key, label]) => (
+          <button
+            key={key}
+            role="tab"
+            aria-selected={tab === key}
+            onClick={() => setTab(key)}
+            className={`flex-1 py-2 rounded-xl text-sm font-medium ${tab === key ? 'bg-primary-500 text-white' : 'bg-gray-800 text-gray-400'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'mine' && <MyRequests />}
+
+      {tab === 'new' && (!paymentLink ? (
         <form onSubmit={handleCreate} className="space-y-4">
           <div>
             <label className="text-sm text-gray-400 mb-1 block">{t('send.amount')}</label>
@@ -191,7 +319,7 @@ export default function RequestMoney() {
             {t('request.create_another') || 'Create Another'}
           </button>
         </div>
-      )}
+      ))}
     </div>
   );
 }

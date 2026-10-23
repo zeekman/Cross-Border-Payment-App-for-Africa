@@ -4,12 +4,14 @@ import { ArrowLeft, Plus, Trash2, List, Calendar } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import useStepUp from '../hooks/useStepUp';
 import { useConfirm } from '../context/ConfirmContext';
 import { CURRENCIES } from '../utils/currency';
 import ScheduledPaymentsCalendar from '../components/ScheduledPaymentsCalendar';
 import { validateStellarAddress } from '../utils/validation';
 
 export default function ScheduledPayments() {
+  const { requestStepUp, stepUpModal } = useStepUp();
   const confirm = useConfirm();
   const navigate = useNavigate();
   const { t } = useTranslation();
@@ -69,6 +71,8 @@ export default function ScheduledPayments() {
       // If balance check fails, proceed — backend will validate anyway
     }
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     try {
       await api.post('/scheduled-payments', {
         execute_at: new Date(Date.now() + 3600000).toISOString(),
@@ -77,7 +81,7 @@ export default function ScheduledPayments() {
         asset: form.asset,
         frequency: form.frequency,
         memo: form.memo || undefined
-      });
+      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success(t('scheduled.created') || 'Scheduled payment created');
       setForm({ recipient_wallet: '', amount: '', asset: 'XLM', frequency: 'monthly', memo: '' });
       setShowForm(false);
@@ -240,6 +244,7 @@ export default function ScheduledPayments() {
           ))}
         </div>
       )}
+      {stepUpModal}
     </div>
   );
 }

@@ -4,7 +4,15 @@ import api from '../utils/api';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 
-const ALL_EVENTS = ['payment.sent', 'payment.received', 'payment.failed'];
+// Fallback used until GET /webhooks/events (the source of truth) responds.
+const FALLBACK_EVENTS = [
+  'payment.sent',
+  'payment.received',
+  'payment.failed',
+  'escrow.cancelled',
+  'claimable_balance.expired',
+  'claimable_balance.expiring_soon',
+].map((name) => ({ name, description: '' }));
 
 function DeliveryLog({ webhookId }) {
   const { t } = useTranslation();
@@ -127,8 +135,12 @@ export default function Webhooks() {
   const [rotating, setRotating] = useState(null);
   const revealTimerRef = useRef(null);
   const [copied, setCopied] = useState(null);
+  const [availableEvents, setAvailableEvents] = useState(FALLBACK_EVENTS);
 
   useEffect(() => {
+    api.get('/webhooks/events')
+      .then(r => setAvailableEvents(r.data.events))
+      .catch(() => {});
     api.get('/webhooks')
       .then(r => setWebhooks(r.data.webhooks.map(({ secret: _secret, ...webhook }) => webhook)))
       .catch(() => toast.error(t('webhooks.loadFailed')))
@@ -225,7 +237,7 @@ export default function Webhooks() {
           <div>
             <label className="text-sm text-gray-400 mb-2 block">{t('webhooks.events')}</label>
             <div className="space-y-2">
-              {ALL_EVENTS.map(event => (
+              {availableEvents.map(({ name: event, description }) => (
                 <label key={event} className="flex items-center gap-3 cursor-pointer">
                   <input
                     type="checkbox"
@@ -233,7 +245,10 @@ export default function Webhooks() {
                     onChange={() => toggleEvent(event)}
                     className="accent-primary-500 w-4 h-4"
                   />
-                  <span className="text-sm text-gray-300 font-mono">{event}</span>
+                  <span className="text-sm text-gray-300">
+                    <span className="font-mono">{event}</span>
+                    {description && <span className="block text-xs text-gray-500">{description}</span>}
+                  </span>
                 </label>
               ))}
             </div>

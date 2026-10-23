@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, AlertCircle, CheckCircle, CheckCircle2, Download, FileUp, Loader2, Plus, RotateCcw, Send, Trash2, Upload, XCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -172,66 +172,42 @@ export default function BatchPayment() {
   const [validationErrors, setValidationErrors] = useState([]);
   const [submitting, setSubmitting] = useState(false);
   const [results, setResults] = useState(null);
-  const [batchId, setBatchId] = useState(null);
   const [rowStatuses, setRowStatuses] = useState({}); // { [index]: { status, error, txHash } }
-  const [polling, setPolling] = useState(false);
-  const stoppedRef = useRef(false);
-
-  // Poll for per-row statuses after batch submission
-  useEffect(() => {
-    if (!polling || !batchId) return;
-    stoppedRef.current = false;
-
-    const pollOnce = async () => {
-      if (stoppedRef.current) return;
-      try {
-        const res = await api.get(`/payments/batch/${batchId}/status`);
-        const statuses = res.data.statuses || [];
-        setRowStatuses((prev) => {
-          const next = { ...prev };
-          statuses.forEach((s) => {
-            next[s.index] = { status: s.status, error: s.error, txHash: s.tx_hash };
-          });
-          return next;
-        });
-        const allTerminal =
-          statuses.length > 0 &&
-          statuses.every((s) => s.status === 'confirmed' || s.status === 'failed');
-        if (allTerminal) {
-          stoppedRef.current = true;
-          setPolling(false);
-        }
-      } catch {
-        // ignore polling errors
-      }
-    };
-
-    pollOnce();
-    const interval = setInterval(pollOnce, 3000);
-    return () => {
-      stoppedRef.current = true;
-      clearInterval(interval);
-    };
-  }, [polling, batchId]);
 
   const batchSummary = useMemo(() => {
     const values = Object.values(rowStatuses);
     return {
-      confirmed: values.filter((s) => s.status === 'confirmed').length,
+      confirmed: values.filter((s) => s.status === 'confirmed' || s.status === 'success').length,
       failed: values.filter((s) => s.status === 'failed').length,
-      processing: values.filter((s) => s.status !== 'confirmed' && s.status !== 'failed').length,
+      processing: values.filter((s) => s.status !== 'confirmed' && s.status !== 'success' && s.status !== 'failed').length,
     };
   }, [rowStatuses]);
 
   const handleRetry = async (rowIndex) => {
-    setRowStatuses((prev) => ({ ...prev, [rowIndex]: { ...prev[rowIndex], status: 'pending' } }));
+    const row = (results?.results || []).find((r) => r.index === rowIndex);
+    if (!row) return;
     try {
-      await api.post(`/payments/batch/${batchId}/retry`, { index: rowIndex });
-      if (!polling) setPolling(true);
-    } catch (err) {
+      const stepUpToken = await requestStepUp();
+      if (!stepUpToken) return;
+      setRowStatuses((prev) => ({ ...prev, [rowIndex]: { ...prev[rowIndex], status: 'pending' } }));
+      const { data } = await api.post(
+        '/payments/batch',
+        {
+          asset,
+          recipients: [{ recipient_address: row.recipient_address, amount: parseFloat(row.amount) }],
+        },
+        { headers: { 'X-Step-Up-Token': stepUpToken, 'Idempotency-Key': crypto.randomUUID() } }
+      );
+      const r = data.results?.[0] || {};
       setRowStatuses((prev) => ({
         ...prev,
-        [rowIndex]: { status: 'failed', error: err.response?.data?.error || t('batch.retryFailed') },
+        [rowIndex]: { status: r.status || 'failed', error: r.error, txHash: r.tx_hash || data.transaction?.tx_hash },
+      }));
+    } catch (err) {
+      const r = err.response?.data?.results?.[0];
+      setRowStatuses((prev) => ({
+        ...prev,
+        [rowIndex]: { status: 'failed', error: r?.error || err.response?.data?.error || t('batch.retryFailed') },
       }));
     }
   };
@@ -376,13 +352,11 @@ export default function BatchPayment() {
       setResults(data);
       toast.success(data.message || t('batch.submitted'));
 
-      if (data.batch_id) {
-        setBatchId(data.batch_id);
-        const initial = {};
-        filledRecipients.forEach((_, i) => { initial[i] = { status: 'pending' }; });
-        setRowStatuses(initial);
-        setPolling(true);
-      }
+      const initial = {};
+      (data.results || []).forEach((r) => {
+        initial[r.index] = { status: r.status, error: r.error, txHash: r.tx_hash };
+      });
+      setRowStatuses(initial);
     } catch (error) {
       const responseData = error.response?.data;
       if (responseData?.results) {
@@ -647,7 +621,7 @@ export default function BatchPayment() {
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 className="text-2xl font-bold text-white">{t('batch.results')}</h2>
-              {batchId ? (
+              {Object.keys(rowStatuses).length > 0 ? (
                 <div className="flex items-center gap-4 mt-1 text-sm">
                   <span className="text-green-400">{t('batch.confirmedCount', { count: batchSummary.confirmed })}</span>
                   <span className="text-red-400">{t('batch.failedCount', { count: batchSummary.failed })}</span>
@@ -671,15 +645,13 @@ export default function BatchPayment() {
                   <p className="font-mono text-xs">{results.transaction.tx_hash}</p>
                 </div>
               )}
-              {batchId && !polling && (
-                <button
-                  type="button"
-                  onClick={exportBatchCsv}
-                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors"
-                >
-                  <Download size={15} /> {t('batch.exportCsv')}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={exportBatchCsv}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors"
+              >
+                <Download size={15} /> {t('batch.exportCsv')}
+              </button>
             </div>
           </div>
 
@@ -724,7 +696,7 @@ export default function BatchPayment() {
                       }>
                         {isConfirmed ? t('batch.confirmed') : isFailed ? t('batch.failed') : isPending ? t('batch.pending') : t('batch.processing')}
                       </span>
-                      {isFailed && batchId && (
+                      {isFailed && (
                         <button
                           type="button"
                           onClick={() => handleRetry(result.index)}

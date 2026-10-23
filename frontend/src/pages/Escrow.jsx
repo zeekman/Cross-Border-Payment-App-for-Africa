@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
+import useStepUp from '../hooks/useStepUp';
 import { useConfirm } from '../context/ConfirmContext';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 
 export default function Escrow() {
+  const { requestStepUp, stepUpModal } = useStepUp();
   const confirm = useConfirm();
   const { t } = useTranslation();
   const { user } = useAuth();
@@ -98,9 +100,11 @@ export default function Escrow() {
     if (!validateWallet(createForm.agent_wallet, 'Agent wallet')) return;
     if (!validateWallet(createForm.recipient_wallet, 'Recipient wallet')) return;
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     setLoading(true);
     try {
-      const { data } = await api.post('/escrow/create', createForm);
+      const { data } = await api.post('/escrow/create', createForm, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success('Escrow created successfully');
       setCreateForm({ agent_wallet: '', recipient_wallet: '', amount: '', asset: 'USDC' });
       setActiveTab('list');
@@ -119,9 +123,11 @@ export default function Escrow() {
       { title: t('confirm.release_escrow_title', 'Release escrow'), confirmLabel: t('confirm.release', 'Release') }
     ))) return;
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     setLoading(true);
     try {
-      await api.post(`/escrow/${escrowId}/confirm`);
+      await api.post(`/escrow/${escrowId}/confirm`, null, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success('Escrow confirmed');
       fetchEscrows();
       setSelectedEscrow(null);
@@ -135,9 +141,11 @@ export default function Escrow() {
   const handleCancelEscrow = async (escrowId) => {
     if (!(await confirm(t('confirm.cancel_escrow', 'Cancel this escrow? Locked funds will be returned to the sender.'), { title: t('confirm.cancel_escrow_title', 'Cancel escrow'), confirmLabel: t('confirm.cancel_escrow_btn', 'Cancel escrow') }))) return;
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     setLoading(true);
     try {
-      await api.post(`/escrow/${escrowId}/cancel`);
+      await api.post(`/escrow/${escrowId}/cancel`, null, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success('Escrow cancelled');
       fetchEscrows();
       setSelectedEscrow(null);
@@ -164,11 +172,13 @@ export default function Escrow() {
       return;
     }
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     setPartialLoading(true);
     try {
       const { data } = await api.post(`/contracts/escrow/${partialEscrow.id}/partial-release`, {
         amount,
-      });
+      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success('Partial release successful');
       // Update the affected row in place without a full reload.
       setEscrows((prev) =>
@@ -486,6 +496,7 @@ export default function Escrow() {
           </div>
         )}
       </div>
+      {stepUpModal}
     </div>
   );
 }
