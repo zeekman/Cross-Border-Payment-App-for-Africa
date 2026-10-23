@@ -14,6 +14,7 @@ import {
   BookUser,
 } from 'lucide-react';
 import api from '../utils/api';
+import { useWallet } from '../context/WalletContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { validateStellarAddress } from '../utils/validation';
 import { useExchangeRates } from '../hooks/useExchangeRates';
@@ -188,9 +189,10 @@ export default function SendMoney() {
     form.memo !== cleanForm.memo ||
     (form.private_note || '') !== '';
 
+  const { activeWalletId } = useWallet();
   // Multi-wallet state
   const [wallets, setWallets] = useState([]);
-  const [selectedWalletId, setSelectedWalletId] = useState(searchParams.get('wallet_id') || null);
+  const [selectedWalletId, setSelectedWalletId] = useState(searchParams.get('wallet_id') || activeWalletId || null);
   const [showWalletDropdown, setShowWalletDropdown] = useState(false);
 
   const selectedWallet = wallets.find((w) => w.id === selectedWalletId) || wallets[0] || null;

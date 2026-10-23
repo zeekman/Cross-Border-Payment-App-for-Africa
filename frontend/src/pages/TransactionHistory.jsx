@@ -5,6 +5,7 @@ import { FixedSizeList } from 'react-window';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
+import { useWallet } from '../context/WalletContext';
 import { explorerTxUrl } from '../config/network';
 import { truncateAddress } from '../utils/currency';
 import { TransactionCardSkeleton } from '../components/Skeleton';
@@ -43,8 +44,9 @@ const DATE_PRESETS = [
   { label: 'Last 30 days', getFrom: () => getDateDaysAgo(30), getTo: () => new Date().toISOString().split('T')[0] },
 ];
 
-function buildHistoryParams(cursor, dateFrom, dateTo, asset, statuses, direction) {
+function buildHistoryParams(cursor, dateFrom, dateTo, asset, statuses, direction, walletId) {
   const params = { limit: 20 };
+  if (walletId) params.wallet_id = walletId;
   if (cursor) params.cursor = cursor;
   if (dateFrom) params.from = dateFrom;
   if (dateTo) params.to = dateTo;
@@ -56,6 +58,7 @@ function buildHistoryParams(cursor, dateFrom, dateTo, asset, statuses, direction
 
 export default function TransactionHistory() {
   const navigate = useNavigate();
+  const { activeWalletId } = useWallet();
   const [searchParams, setSearchParams] = useSearchParams();
   const { t } = useTranslation();
   const { isOnline } = useOnlineStatus();
@@ -177,7 +180,7 @@ export default function TransactionHistory() {
 
     // Online — fetch fresh and persist
     try {
-      const params = buildHistoryParams(null, dateFrom, dateTo, asset, selectedStatuses, filter);
+      const params = buildHistoryParams(null, dateFrom, dateTo, asset, selectedStatuses, filter, activeWalletId);
       const r = await api.get('/payments/history', { params });
       const txList = r.data.transactions;
       setTransactions(txList);
@@ -228,7 +231,7 @@ export default function TransactionHistory() {
   const loadMore = useCallback(() => {
     if (nextCursor && !loadingMore) {
       setLoadingMore(true);
-      const params = buildHistoryParams(nextCursor, dateFrom, dateTo, asset, selectedStatuses, filter);
+      const params = buildHistoryParams(nextCursor, dateFrom, dateTo, asset, selectedStatuses, filter, activeWalletId);
       api
         .get('/payments/history', { params })
         .then((r) => {

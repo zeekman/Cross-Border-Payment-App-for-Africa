@@ -23,6 +23,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { BalanceCardSkeleton, TransactionRowSkeleton } from '../components/Skeleton';
+import { useWallet } from '../context/WalletContext';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
 import { useExchangeRates } from '../hooks/useExchangeRates';
@@ -133,7 +134,7 @@ export default function Dashboard() {
 
   // Multi-wallet state
   const [wallets, setWallets] = useState([]);
-  const [activeWalletId, setActiveWalletId] = useState(null);
+  const { activeWalletId, setActiveWalletId } = useWallet();
   const [showWalletDropdown, setShowWalletDropdown] = useState(false);
   const [creatingWallet, setCreatingWallet] = useState(false);
   const [newWalletLabel, setNewWalletLabel] = useState('');

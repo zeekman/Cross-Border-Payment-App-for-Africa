@@ -4,6 +4,7 @@ import { ArrowLeft, Copy, CheckCheck, Share2, Link, Download, Printer } from 'lu
 import { QRCodeSVG } from 'qrcode.react';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
+import { useWallet } from '../context/WalletContext';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 
@@ -53,14 +54,27 @@ export default function ReceiveMoney() {
   const { t } = useTranslation();
   const qrRef = useRef(null);
   const cardRef = useRef(null);
-  const [walletAddress, setWalletAddress] = useState(user?.wallet_address || '');
+  const { activeWalletId } = useWallet();
+  const [walletAddress, setWalletAddress] = useState(activeWalletId ? '' : user?.wallet_address || '');
   const [federationAddress, setFederationAddress] = useState('');
   const [amount, setAmount] = useState('');
   const [memo, setMemo] = useState('');
   const [includeCard, setIncludeCard] = useState(false);
 
   useEffect(() => {
-    if (!walletAddress) {
+    if (activeWalletId) {
+      api
+        .get('/wallet/list')
+        .then((r) => {
+          const w = r.data.wallets?.find((x) => x.id === activeWalletId);
+          if (w?.public_key) setWalletAddress(w.public_key);
+        })
+        .catch(() => {});
+    }
+  }, [activeWalletId]);
+
+  useEffect(() => {
+    if (!walletAddress && !activeWalletId) {
       api
         .get('/wallet/balance')
         .then((r) => setWalletAddress(r.data.public_key))

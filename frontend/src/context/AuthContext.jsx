@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import * as Sentry from '@sentry/react';
+import i18n, { SUPPORTED_LANGUAGES } from '../i18n';
 import api, { refreshSession } from '../utils/api';
 import { clearUserStorage } from '../utils/userStorage';
 import {
@@ -27,8 +28,25 @@ export const tokenStore = {
   subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
 };
 
+// True while logout() is running so PrivateRoute doesn't treat the cleared
+// session as an expired one (no redirect to /login, no stale afripay_redirect).
+export const logoutState = { active: false };
+
+// Apply the account's saved language (FE-167); the explicit profile choice wins over detection.
+function applyPreferredLanguage(u) {
+  const lang = u?.preferred_language;
+  if (lang && SUPPORTED_LANGUAGES.includes(lang)) {
+    try { localStorage.setItem('afripay_lang', lang); } catch { /* storage unavailable */ }
+    if (i18n.language !== lang) i18n.changeLanguage(lang);
+  }
+}
+
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
+  const [user, setUserState] = useState(null);
+  const setUser = (u) => {
+    if (typeof u === 'object' && u) applyPreferredLanguage(u);
+    setUserState(u);
+  };
   const [loading, setLoading] = useState(true);
 
   // Bind the offline payment queue to whoever is logged in (FE-137): new
@@ -83,6 +101,7 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
+    logoutState.active = true;
     try {
       await api.post('/auth/logout');
     } catch {

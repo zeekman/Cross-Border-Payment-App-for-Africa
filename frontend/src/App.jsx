@@ -1,9 +1,10 @@
 import React, { useEffect, useState, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
-import { AuthProvider, useAuth } from "./context/AuthContext";
+import { AuthProvider, useAuth, logoutState } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
 import { CurrencyProvider } from "./context/CurrencyContext";
+import { WalletProvider } from "./context/WalletContext";
 import OfflineBanner from "./components/OfflineBanner";
 
 import Welcome from "./pages/Welcome";
@@ -54,6 +55,7 @@ function PrivateRoute({ children }) {
       </div>
     );
   if (!user) {
+    if (logoutState.active) return null;
     sessionStorage.setItem('afripay_redirect', location.pathname + location.search);
     return <Navigate to="/login" replace />;
   }
@@ -187,6 +189,7 @@ export default function App() {
       <AuthProvider>
         <ThemeProvider>
           <CurrencyProvider>
+          <WalletProvider>
           <BrowserRouter>
             <Toaster
               position="top-center"
@@ -204,6 +207,7 @@ export default function App() {
             <OfflineBanner />
             <UpdateBanner />
           </BrowserRouter>
+          </WalletProvider>
           </CurrencyProvider>
         </ThemeProvider>
       </AuthProvider>

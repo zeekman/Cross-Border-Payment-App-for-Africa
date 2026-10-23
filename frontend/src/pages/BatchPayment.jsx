@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import api from '../utils/api';
+import { createIdempotencyKey, postWithIdempotency } from '../utils/idempotency';
 import { CURRENCIES, truncateAddress } from '../utils/currency';
 import { validateStellarAddress } from '../utils/validation';
 import useStepUp from '../hooks/useStepUp';
@@ -176,6 +177,7 @@ export default function BatchPayment() {
   const [rowStatuses, setRowStatuses] = useState({}); // { [index]: { status, error, txHash } }
   const [polling, setPolling] = useState(false);
   const stoppedRef = useRef(false);
+  const idemRef = useRef(createIdempotencyKey());
 
   // Poll for per-row statuses after batch submission
   useEffect(() => {
@@ -369,9 +371,10 @@ export default function BatchPayment() {
         payload.memo_type = memoType;
       }
 
-      const response = await api.post('/payments/batch', payload, {
+      const response = await postWithIdempotency('/payments/batch', payload, idemRef.current.get(), {
         headers: { 'X-Step-Up-Token': stepUpToken },
       });
+      idemRef.current.reset();
       const data = response.data;
       setResults(data);
       toast.success(data.message || t('batch.submitted'));
@@ -384,6 +387,7 @@ export default function BatchPayment() {
         setPolling(true);
       }
     } catch (error) {
+      idemRef.current.resetUnlessLost(error);
       const responseData = error.response?.data;
       if (responseData?.results) {
         setResults(responseData);

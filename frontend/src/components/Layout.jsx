@@ -3,7 +3,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Outlet, NavLink, useNavigate, useLocation, useMatch } from 'react-router-dom';
 import { LayoutDashboard, Send, Download, Clock, Upload, User, LogOut, Sun, Moon, Bell, BellOff, AlertTriangle, ArrowUpDown, PiggyBank, Lock, Shield, MoreHorizontal, Layers, BarChart2, CalendarClock, Gift, Webhook, Briefcase } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, logoutState } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import { useStellarStatus } from '../hooks/useStellarStatus';
@@ -84,7 +84,18 @@ export default function Layout() {
   const { supported, subscribed, loading, subscribe, unsubscribe } = usePushNotifications();
   const { isDegraded, status } = useStellarStatus();
 
-  const handleLogout = () => { logout(); navigate('/'); };
+  const [loggingOut, setLoggingOut] = useState(false);
+  const handleLogout = async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await logout();
+      navigate('/', { replace: true });
+    } finally {
+      logoutState.active = false;
+      setLoggingOut(false);
+    }
+  };
 
   const [moreOpen, setMoreOpen] = useState(false);
   const sheetItems = user?.role === 'admin'
@@ -147,7 +158,7 @@ export default function Layout() {
               {subscribed ? <Bell size={18} className="text-primary-500" /> : <BellOff size={18} />}
             </button>
           )}
-          <button onClick={handleLogout} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors" title={t('layout.logout')} aria-label={t('layout.logout')}>
+          <button onClick={handleLogout} disabled={loggingOut} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors" title={t('layout.logout')} aria-label={t('layout.logout')}>
             <LogOut size={18} />
           </button>
         </div>
