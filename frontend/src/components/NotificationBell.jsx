@@ -1,13 +1,27 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Inbox } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useNotifications } from '../hooks/useNotifications';
 
 export default function NotificationBell() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const navigate = useNavigate();
   const { items, unreadCount, hasMore, loading, load, loadMore, markRead, markAllRead } = useNotifications();
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
+  const buttonRef = useRef(null);
+
+  const close = () => { setOpen(false); buttonRef.current?.focus(); };
+
+  const onItemClick = (n) => {
+    if (!n.read_at) markRead(n.id);
+    const hash = n.data?.txHash || n.data?.tx_hash;
+    if (hash) {
+      setOpen(false);
+      navigate(`/history?tx=${encodeURIComponent(hash)}`);
+    }
+  };
 
   useEffect(() => {
     if (open) load();
@@ -16,13 +30,19 @@ export default function NotificationBell() {
   useEffect(() => {
     if (!open) return undefined;
     const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
     document.addEventListener('mousedown', onClick);
-    return () => document.removeEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
   }, [open]);
 
   return (
     <div className="relative" ref={ref}>
       <button
+        ref={buttonRef}
         onClick={() => setOpen((o) => !o)}
         className="relative text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors"
         title={t('shared.notifications', 'Notifications')}
@@ -52,12 +72,12 @@ export default function NotificationBell() {
             {items.map((n) => (
               <li key={n.id}>
                 <button
-                  onClick={() => !n.read_at && markRead(n.id)}
+                  onClick={() => onItemClick(n)}
                   className={`w-full text-left px-4 py-3 border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 ${n.read_at ? 'opacity-60' : ''}`}
                 >
                   <p className="text-sm font-medium text-gray-900 dark:text-white">{n.title}</p>
                   {n.body && <p className="text-xs text-gray-600 dark:text-gray-400 mt-0.5">{n.body}</p>}
-                  <p className="text-[10px] text-gray-400 mt-1">{new Date(n.created_at).toLocaleString()}</p>
+                  <p className="text-[10px] text-gray-400 mt-1">{new Date(n.created_at).toLocaleString(i18n.language)}</p>
                 </button>
               </li>
             ))}

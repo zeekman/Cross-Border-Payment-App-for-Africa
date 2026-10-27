@@ -1,3 +1,5 @@
+import React from 'react';
+import { RefreshCw } from 'lucide-react';
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -35,47 +37,19 @@ import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { usePullToRefresh } from '../hooks/usePullToRefresh';
 import PINSetupModal from '../components/PINSetupModal';
-import { usePushNotifications } from '../hooks/usePushNotifications';
-import { getQueueCountForUser } from '../utils/offlineDB';
+import { useDashboard } from '../hooks/useDashboard';
+import DashboardBanners from '../components/dashboard/DashboardBanners';
+import DashboardGreeting from '../components/dashboard/DashboardGreeting';
+import WalletSelector from '../components/dashboard/WalletSelector';
+import BalanceCard from '../components/dashboard/BalanceCard';
+import WalletsSummary from '../components/dashboard/WalletsSummary';
+import ActionButtons from '../components/dashboard/ActionButtons';
+import FiatRamp from '../components/dashboard/FiatRamp';
+import AdminContractViewer from '../components/dashboard/AdminContractViewer';
+import ScheduledPayments from '../components/dashboard/ScheduledPayments';
+import RecentTransactions from '../components/dashboard/RecentTransactions';
 
-// FE-129: IS_TESTNET is now sourced from the shared network config module so
-// that Dashboard and every other Stellar-aware file agree on the same value.
-import { IS_TESTNET } from '../config/network';
-const MAX_WALLETS = 5;
-
-function BalanceDisplay({ balance }) {
-  const numericBalance = Number.isFinite(balance) ? balance : 0;
-  const animated = useCountUp(numericBalance);
-
-  return (
-    <span className="text-4xl font-bold text-white">
-      {animated.toLocaleString()}
-    </span>
-  );
-}
-
-function normalizeWalletsResponse(data) {
-  if (Array.isArray(data?.wallets)) return data.wallets;
-  if (data?.public_key) return [data];
-  return [];
-}
-
-const ANCHOR_DOMAINS = (process.env.REACT_APP_ANCHOR_DOMAINS || 'testanchor.stellar.org')
-  .split(',')
-  .map((d) => d.trim().toLowerCase())
-  .filter(Boolean);
-
-/** Returns the URL if it is HTTPS and on an allow-listed anchor domain, else null. */
-export function safeAnchorUrl(raw) {
-  try {
-    const u = new URL(raw);
-    const host = u.hostname.toLowerCase();
-    if (u.protocol !== 'https:') return null;
-    return ANCHOR_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`)) ? u.href : null;
-  } catch {
-    return null;
-  }
-}
+export { safeAnchorUrl } from '../utils/anchorUrl';
 
 export default function Dashboard() {
   const { user, updateUser } = useAuth();
@@ -174,224 +148,71 @@ export default function Dashboard() {
   );
 
   const {
+    accountExists,
+    activeWalletId,
+    allBalances,
+    anchorAction,
+    anchorLoading,
+    balanceIncreased,
+    copied,
+    copyAddress,
+    creatingWallet,
+    currencies,
+    dismissPushBanner,
+    displayBalance,
+    fromCache,
+    fundWallet,
+    funding,
+    handleAnchorAction,
+    handleCreateWallet,
     isConnected,
+    isOnline,
     isReconnecting,
-    error: streamError,
-  } = usePaymentStream(wallet?.public_key, handlePayment);
-
-  const loadDashboard = useCallback(async (isRefresh = false) => {
-    // Initial load shows full skeleton; manual refresh shows spinner on button only
-    if (isRefresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
-
-    if (!navigator.onLine) {
-      try {
-        const [cachedWallets, cachedHistory] = await Promise.all([
-          getCacheEntry('wallets'),
-          getCacheEntry('history'),
-        ]);
-        if (cachedWallets?.data) {
-          setWallets(cachedWallets.data);
-          setActiveWalletId((id) => id || cachedWallets.data[0]?.id || null);
-          setFromCache(true);
-          setWalletError(false);
-        }
-        if (cachedHistory?.data) {
-          setTransactions(cachedHistory.data.slice(0, 5));
-        }
-      } catch {
-        // IndexedDB unavailable
-      } finally {
-        setLoading(false);
-        setRefreshing(false);
-      }
-      return;
-    }
-
-    try {
-      const [walletsRes, txRes, scheduledRes] = await Promise.all([
-        api.get('/wallet/list'),
-        api.get('/payments/history'),
-        api.get('/scheduled-payments').catch(() => ({ data: { payments: [] } })),
-      ]);
-      const walletsData = normalizeWalletsResponse(walletsRes.data);
-      const txData = txRes.data.transactions;
-
-      setWallets(walletsData);
-      setActiveWalletId((id) => id || walletsData[0]?.id || null);
-      setTransactions(txData.slice(0, 5));
-      setTxError(false);
-      setScheduledPayments((scheduledRes.data.payments || []).filter((p) => p.active).slice(0, 3));
-      setScheduledLoading(false);
-      setFromCache(false);
-      setWalletError(walletsData.length === 0);
-      setTransactionsError(false);
-
-      await Promise.all([setCacheEntry('wallets', walletsData), setCacheEntry('history', txData)]).catch(
-        () => {}
-      );
-    } catch {
-      try {
-        const [cachedWallets, cachedHistory] = await Promise.all([
-          getCacheEntry('wallets'),
-          getCacheEntry('history'),
-        ]);
-        if (cachedWallets?.data) {
-          setWallets(cachedWallets.data);
-          setActiveWalletId((id) => id || cachedWallets.data[0]?.id || null);
-          setFromCache(true);
-          setWalletError(false);
-        }
-        if (cachedHistory?.data) {
-          setTransactions(cachedHistory.data.slice(0, 5));
-          setTxError(false);
-        } else {
-          setTxError(true);
-          setTransactionsError(true);
-        }
-        if (!cachedWallets?.data) {
-          setWallets([]);
-          setActiveWalletId(null);
-          setWalletError(true);
-          toast.error('Failed to load wallet data');
-        }
-      } catch {
-        setWallets([]);
-        setActiveWalletId(null);
-        setWalletError(true);
-        setTransactionsError(true);
-        toast.error('Failed to load wallet data');
-      }
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-      setScheduledLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadDashboard();
-    if (!isOnline) {
-      getQueueCountForUser(user?.id)
-        .then(setQueueCount)
-        .catch(() => {});
-    }
-  }, [loadDashboard, isOnline, user?.id]);
-
-  const copyAddress = async () => {
-    if (!wallet?.public_key) return;
-    try {
-      await navigator.clipboard.writeText(wallet.public_key);
-      setCopied(true);
-      setTimeout(() => {
-        if (mountedRef.current) setCopied(false);
-      }, 2000);
-    } catch {
-      toast.error('Failed to copy address');
-    }
-  };
-
-  const fundWallet = async () => {
-    setFunding(true);
-    try {
-      const res = await api.post('/dev/fund-wallet');
-      toast.success(res.data.message);
-      const walletsRes = await api.get('/wallet/list');
-      const walletsData = normalizeWalletsResponse(walletsRes.data);
-      setWallets(walletsData);
-      setWalletError(walletsData.length === 0);
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Funding failed');
-    } finally {
-      setFunding(false);
-    }
-  };
-
-  const handleAnchorAction = async (action) => {
-    setAnchorLoading(true);
-    setAnchorAction(action);
-    const win = window.open('', 'anchor', 'width=500,height=600');
-    // Prevent reverse tabnabbing: the third-party anchor must not get a handle to this tab.
-    if (win) win.opener = null;
-    try {
-      const asset = 'USDC';
-      const endpoint = action === 'deposit' ? '/anchor/deposit' : '/anchor/withdraw';
-      const res = await api.post(endpoint, { asset });
-      const url = safeAnchorUrl(res.data?.url);
-      if (!url) throw new Error('Refusing to open an untrusted anchor URL');
-      if (win) {
-        win.location.href = url;
-      } else {
-        toast(
-          (tst) => (
-            <a href={url} target="_blank" rel="noopener noreferrer" onClick={() => toast.dismiss(tst.id)}>
-              Continue to anchor
-            </a>
-          ),
-          { duration: 15000 }
-        );
-      }
-    } catch (err) {
-      if (win) win.close();
-      toast.error(err.response?.data?.error || err.message || `Failed to ${action}`);
-    } finally {
-      setAnchorLoading(false);
-      setAnchorAction(null);
-    }
-  };
-
-  const handleCreateWallet = async (e) => {
-    e.preventDefault();
-    setCreatingWallet(true);
-    try {
-      const res = await api.post('/wallet/create', { label: newWalletLabel.trim() || 'Wallet' });
-      toast.success(`Wallet "${res.data.wallet.label}" created`);
-      setNewWalletLabel('');
-      setShowCreateForm(false);
-      // Reload wallets and switch to the new one
-      const walletsRes = await api.get('/wallet/list');
-      setWallets(walletsRes.data.wallets);
-      setActiveWalletId(res.data.wallet.id);
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to create wallet');
-    } finally {
-      setCreatingWallet(false);
-    }
-  };
-
-  const xlmBalance = wallet?.balances?.find((b) => b.asset === 'XLM')?.balance ?? '0';
-  const xlmAvailable = wallet?.balances?.find((b) => b.asset === 'XLM')?.available_balance ?? null;
-  const accountExists = wallet?.account_exists !== false; // treat undefined (cached) as true
-  const showFundWalletButton =
-    IS_TESTNET && !!wallet && (xlmBalance === '0' || wallet.account_exists === false);
-
-  // All non-zero balances for the active wallet
-  const allBalances = wallet?.balances || [];
-  const visibleBalances = showZeroBalances
-    ? allBalances
-    : allBalances.filter((b) => parseFloat(b.balance) > 0);
-
-  // The selected asset's balance (for currency conversion display)
-  const selectedAssetBalance =
-    allBalances.find((b) => b.asset === selectedCurrency)?.balance || '0';
-  const displayBalance =
-    selectedCurrency === 'XLM'
-      ? selectedAssetBalance
-      : convertFromXLM(xlmBalance, selectedCurrency);
-  const walletUnavailable = !loading && walletError && !wallet;
-
-  const {
-    pullDistance,
-    refreshing: pullRefreshing,
-    onTouchStart,
-    onTouchMove,
+    loadDashboard,
+    loading,
+    navigate,
+    newWalletLabel,
     onTouchEnd,
-  } = usePullToRefresh(loadDashboard);
-
-  // Removed global loading block to allow granular skeleton loading
+    onTouchMove,
+    onTouchStart,
+    pullDistance,
+    pullRefreshing,
+    pushLoading,
+    pushSubscribe,
+    queueCount,
+    refreshing,
+    scheduledLoading,
+    scheduledPayments,
+    selectedCurrency,
+    setActiveWalletId,
+    setNewWalletLabel,
+    setSelectedCurrency,
+    setShowCreateForm,
+    setShowEmailBanner,
+    setShowPINSetup,
+    setShowWalletDropdown,
+    setShowZeroBalances,
+    showCreateForm,
+    showEmailBanner,
+    showFundWalletButton,
+    showPINSetup,
+    showPushBanner,
+    showWalletDropdown,
+    showZeroBalances,
+    streamError,
+    t,
+    transactions,
+    transactionsError,
+    txError,
+    updateUser,
+    user,
+    usingApproximateRates,
+    visibleBalances,
+    wallet,
+    walletUnavailable,
+    wallets,
+    xlmAvailable,
+  } = useDashboard();
 
   return (
     <div
@@ -415,287 +236,23 @@ export default function Dashboard() {
           />
         </div>
       )}
-      {/* Testnet banner */}
-      {IS_TESTNET && (
-        <div className="flex items-center justify-between bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3">
-          <div className="flex items-center gap-2 text-yellow-400 text-sm">
-            <FlaskConical size={15} />
-            <span>Testnet mode — funds have no real value</span>
-          </div>
-          {showFundWalletButton && (
-            <button
-              onClick={fundWallet}
-              disabled={funding}
-              className="text-xs bg-yellow-500 hover:bg-yellow-600 disabled:opacity-50 text-black font-semibold px-3 py-1.5 rounded-lg transition-colors"
-            >
-              {funding ? 'Funding…' : 'Fund wallet'}
-            </button>
-          )}
-        </div>
-      )}
+      <DashboardBanners user={user} t={t} pushLoading={pushLoading} pushSubscribe={pushSubscribe} showPushBanner={showPushBanner} dismissPushBanner={dismissPushBanner} wallet={wallet} funding={funding} queueCount={queueCount} isOnline={isOnline} showEmailBanner={showEmailBanner} setShowEmailBanner={setShowEmailBanner} isConnected={isConnected} isReconnecting={isReconnecting} streamError={streamError} loadDashboard={loadDashboard} fundWallet={fundWallet} accountExists={accountExists} showFundWalletButton={showFundWalletButton} />
 
-      {/* Email verification banner (issue #479) */}
-      {showEmailBanner && user?.email_verified === false && (
-        <div className="flex items-center justify-between bg-blue-500/10 border border-blue-500/30 rounded-xl px-4 py-3">
-          <div className="flex items-center gap-2 text-blue-400 text-sm">
-            <Mail size={15} />
-            <span>Please verify your email address to unlock full account features</span>
-          </div>
-          <button
-            onClick={() => setShowEmailBanner(false)}
-            className="text-blue-400 hover:text-blue-300 text-xs font-semibold px-2 py-1 rounded-lg transition-colors"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+      <DashboardGreeting user={user} t={t} wallet={wallet} refreshing={refreshing} isConnected={isConnected} isReconnecting={isReconnecting} loadDashboard={loadDashboard} walletUnavailable={walletUnavailable} />
 
-      {/* Unfunded account prompt */}
-      {!accountExists && (
-        <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/30 rounded-xl px-4 py-3">
-          <Download size={18} className="text-blue-400 shrink-0" />
-          <div className="flex-1">
-            <p className="text-blue-300 text-sm font-medium">Fund your wallet to get started</p>
-            <p className="text-blue-400/70 text-xs mt-0.5">
-              This account doesn't exist on-chain yet. Send XLM to activate it.
-            </p>
-          </div>
-        </div>
-      )}
+      <WalletSelector t={t} wallets={wallets} activeWalletId={activeWalletId} setActiveWalletId={setActiveWalletId} showWalletDropdown={showWalletDropdown} setShowWalletDropdown={setShowWalletDropdown} creatingWallet={creatingWallet} newWalletLabel={newWalletLabel} setNewWalletLabel={setNewWalletLabel} showCreateForm={showCreateForm} setShowCreateForm={setShowCreateForm} wallet={wallet} handleCreateWallet={handleCreateWallet} walletUnavailable={walletUnavailable} />
 
-      {/* Stream reconnecting indicator */}
-      {isReconnecting && (
-        <div className="flex items-center gap-2 bg-orange-500/10 border border-orange-500/30 rounded-xl px-4 py-2 text-orange-400 text-sm">
-          <div className="w-3 h-3 border-2 border-orange-400 border-t-transparent rounded-full animate-spin" />
-          <span>Reconnecting to live updates…</span>
-        </div>
-      )}
+      <BalanceCard t={t} wallet={wallet} loading={loading} copied={copied} selectedCurrency={selectedCurrency} setSelectedCurrency={setSelectedCurrency} balanceIncreased={balanceIncreased} fromCache={fromCache} showZeroBalances={showZeroBalances} setShowZeroBalances={setShowZeroBalances} currencies={currencies} usingApproximateRates={usingApproximateRates} copyAddress={copyAddress} xlmAvailable={xlmAvailable} allBalances={allBalances} visibleBalances={visibleBalances} displayBalance={displayBalance} walletUnavailable={walletUnavailable} />
 
-      {/* Stream disconnected banner — shows when not connected and not actively reconnecting */}
-      {!isConnected && !isReconnecting && streamError && (
-        <div
-          role="alert"
-          aria-live="polite"
-          className="flex items-center justify-between bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-red-400 text-sm"
-        >
-          <span>Live updates paused — pull to refresh</span>
-          <button
-            onClick={() => loadDashboard()}
-            className="text-xs bg-red-500/20 hover:bg-red-500/30 px-3 py-1 rounded-lg transition-colors"
-          >
-            Refresh
-          </button>
-        </div>
-      )}
+      <WalletsSummary user={user} wallets={wallets} activeWalletId={activeWalletId} setActiveWalletId={setActiveWalletId} />
 
-      {/* Issue #455: Push notification opt-in banner */}
-      {showPushBanner && (
-        <div className="flex items-center gap-3 bg-primary-500/10 border border-primary-500/30 rounded-xl px-4 py-3">
-          <Bell size={18} className="text-primary-400 shrink-0" />
-          <div className="flex-1">
-            <p className="text-primary-300 text-sm font-medium">Enable push notifications</p>
-            <p className="text-primary-400/70 text-xs mt-0.5">
-              Get alerted instantly when you receive a payment.
-            </p>
-          </div>
-          <button
-            onClick={pushSubscribe}
-            disabled={pushLoading}
-            className="text-xs bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold px-3 py-1.5 rounded-lg transition-colors shrink-0"
-          >
-            {pushLoading ? 'Enabling…' : 'Enable'}
-          </button>
-          <button
-            onClick={dismissPushBanner}
-            className="text-gray-500 hover:text-white shrink-0"
-            aria-label="Dismiss notification prompt"
-          >
-            <X size={16} />
-          </button>
-        </div>
-      )}
+      <ActionButtons navigate={navigate} t={t} activeWalletId={activeWalletId} />
 
-      {/* Offline Queue Indicator */}
-      {!isOnline && queueCount > 0 && (
-        <div className="flex items-center justify-between bg-primary-500/10 border border-primary-500/30 rounded-xl px-4 py-3">
-          <div className="flex items-center gap-3 text-primary-400 text-sm">
-            <Clock size={16} />
-            <span>
-              {queueCount} payment{queueCount !== 1 ? 's' : ''} queued offline
-            </span>
-          </div>
-          <p className="text-[10px] text-primary-500/70 font-medium uppercase tracking-wider">
-            Pending Sync
-          </p>
-        </div>
-      )}
+      <FiatRamp t={t} anchorLoading={anchorLoading} anchorAction={anchorAction} handleAnchorAction={handleAnchorAction} />
 
-      {/* Greeting */}
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-gray-600 dark:text-gray-400 text-sm">{t('dashboard.greeting')}</p>
-          <h2 className="text-xl font-bold text-gray-900 dark:text-white">
-            {user?.full_name?.split(' ')[0]} 👋
-          </h2>
-        </div>
-        <div className="flex items-center gap-3">
-          {/* Stream connection status indicator */}
-          <span
-            aria-label={
-              isReconnecting
-                ? 'Live updates: reconnecting'
-                : isConnected
-                  ? 'Live updates: connected'
-                  : 'Live updates: disconnected'
-            }
-            title={
-              isReconnecting
-                ? 'Reconnecting to live updates…'
-                : isConnected
-                  ? 'Live updates active'
-                  : 'Live updates paused'
-            }
-            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-              isReconnecting
-                ? 'bg-orange-400 animate-pulse'
-                : isConnected
-                  ? 'bg-green-400'
-                  : 'bg-red-400'
-            }`}
-          />
-          <button
-            onClick={() => loadDashboard()}
-            className="text-gray-400 hover:text-white"
-            aria-label="Refresh dashboard"
-          >
-            <RefreshCw size={18} />
-          </button>
-        </div>
-      </div>
+      <AdminContractViewer />
 
-      {walletUnavailable && (
-        <div
-          role="alert"
-          className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-4 text-red-300"
-        >
-          <p className="text-sm font-medium">
-            Could not load wallet data. Check your connection and try again.
-          </p>
-          <button
-            type="button"
-            onClick={() => loadDashboard(true)}
-            disabled={refreshing}
-            className="mt-3 inline-flex items-center gap-2 rounded-lg bg-red-500/20 px-3 py-2 text-sm font-semibold text-red-100 hover:bg-red-500/30 disabled:opacity-50"
-          >
-            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
-            Retry
-          </button>
-        </div>
-      )}
-
-      {/* Wallet Selector */}
-      {!walletUnavailable && (
-      <div className="relative">
-        <button
-          onClick={() => setShowWalletDropdown((v) => !v)}
-          className="w-full flex items-center justify-between bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white hover:border-primary-500 transition-colors"
-          aria-haspopup="listbox"
-          aria-expanded={showWalletDropdown}
-        >
-          <div className="flex items-center gap-2">
-            <Wallet size={16} className="text-primary-400" />
-            <span className="font-medium">{wallet?.label || 'Select wallet'}</span>
-            {wallet?.is_default && (
-              <span className="text-xs bg-primary-500/20 text-primary-400 px-2 py-0.5 rounded-full">
-                Default
-              </span>
-            )}
-          </div>
-          <ChevronDown
-            size={16}
-            className={`text-gray-400 transition-transform ${showWalletDropdown ? 'rotate-180' : ''}`}
-          />
-        </button>
-
-        {showWalletDropdown && (
-          <div
-            className="absolute z-20 mt-1 w-full bg-gray-800 border border-gray-700 rounded-xl shadow-xl overflow-hidden"
-            role="listbox"
-          >
-            {wallets.map((w) => {
-              const xlm = w.balances?.find((b) => b.asset === 'XLM')?.balance || '0';
-              return (
-                <button
-                  key={w.id}
-                  role="option"
-                  aria-selected={w.id === activeWalletId}
-                  onClick={() => {
-                    setActiveWalletId(w.id);
-                    setShowWalletDropdown(false);
-                  }}
-                  className={`w-full flex items-center justify-between px-4 py-3 text-left transition-colors ${
-                    w.id === activeWalletId
-                      ? 'bg-primary-500/20 text-primary-400'
-                      : 'hover:bg-gray-700 text-white'
-                  }`}
-                >
-                  <div>
-                    <p className="font-medium text-sm">{w.label}</p>
-                    <p className="text-xs text-gray-500 font-mono">
-                      {truncateAddress(w.public_key, 8)}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm font-semibold">{parseFloat(xlm).toLocaleString()} XLM</p>
-                    {w.is_default && <p className="text-xs text-primary-400">Default</p>}
-                  </div>
-                </button>
-              );
-            })}
-
-            {/* Create new wallet */}
-            {wallets.length < MAX_WALLETS && (
-              <div className="border-t border-gray-700">
-                {showCreateForm ? (
-                  <form onSubmit={handleCreateWallet} className="p-3 flex gap-2">
-                    <input
-                      type="text"
-                      placeholder="Wallet name"
-                      value={newWalletLabel}
-                      onChange={(e) => setNewWalletLabel(e.target.value)}
-                      maxLength={100}
-                      className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-400 focus:outline-none focus:border-primary-500"
-                      autoFocus
-                    />
-                    <button
-                      type="submit"
-                      disabled={creatingWallet}
-                      className="bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white text-sm font-semibold px-3 py-2 rounded-lg transition-colors"
-                    >
-                      {creatingWallet ? '…' : 'Create'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowCreateForm(false);
-                        setNewWalletLabel('');
-                      }}
-                      className="text-gray-400 hover:text-white text-sm px-2 py-2 rounded-lg transition-colors"
-                    >
-                      ✕
-                    </button>
-                  </form>
-                ) : (
-                  <button
-                    onClick={() => setShowCreateForm(true)}
-                    className="w-full flex items-center gap-2 px-4 py-3 text-primary-400 hover:bg-gray-700 transition-colors text-sm"
-                  >
-                    <Plus size={14} /> Add wallet ({wallets.length}/{MAX_WALLETS})
-                  </button>
-                )}
-              </div>
-            )}
-
+      <ScheduledPayments navigate={navigate} scheduledPayments={scheduledPayments} scheduledLoading={scheduledLoading} />
             {wallets.length >= MAX_WALLETS && (
               <div className="border-t border-gray-700 px-4 py-3 text-xs text-gray-500 text-center">
                 Maximum {MAX_WALLETS} wallets reached
@@ -967,127 +524,7 @@ export default function Dashboard() {
         onSuccess={() => updateUser({ pin_setup_completed: true })}
       />
 
-      {/* Recent transactions */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-gray-900 dark:text-white">
-            {t('dashboard.recent_activity')}
-          </h3>
-          <button
-            onClick={() => navigate('/history')}
-            className="text-primary-500 text-sm hover:underline"
-          >
-            {t('common.see_all')}
-          </button>
-        </div>
-
-        {loading && transactions.length === 0 ? (
-          <div className="space-y-2" data-testid="transactions-skeleton" aria-hidden="true">
-            {[0, 1, 2].map((i) => (
-              <TransactionRowSkeleton key={i} />
-            ))}
-          </div>
-        ) : (txError || transactionsError) && transactions.length === 0 ? (
-          <div
-            role="alert"
-            className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-4 text-red-300 shadow-sm"
-          >
-            <p className="text-sm font-medium">Could not load recent activity.</p>
-            <button
-              type="button"
-              onClick={() => loadDashboard(true)}
-              disabled={refreshing}
-              className="mt-3 inline-flex items-center gap-2 rounded-lg bg-red-500/20 px-3 py-2 text-sm font-semibold text-red-100 hover:bg-red-500/30 disabled:opacity-50"
-            >
-              <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
-              Retry
-            </button>
-          </div>
-        ) : transactions.length === 0 ? (
-          <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-8 text-center shadow-sm">
-            <div className="w-16 h-16 bg-primary-500/10 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Send size={28} className="text-primary-500" />
-            </div>
-            <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">
-              No transactions yet
-            </h3>
-            <p className="text-gray-500 text-sm mb-6 max-w-xs mx-auto">
-              Send your first payment or add funds to get started with AfriPay.
-            </p>
-            <div className="flex gap-3 justify-center">
-              <button
-                onClick={() => navigate(`/send${activeWalletId ? `?wallet_id=${activeWalletId}` : ''}`)}
-                className="bg-primary-500 hover:bg-primary-600 text-white font-semibold py-2.5 px-5 rounded-xl text-sm transition-colors flex items-center gap-2"
-              >
-                <Send size={16} />
-                Send Money
-              </button>
-              <button
-                onClick={() => handleAnchorAction('deposit')}
-                disabled={anchorLoading}
-                className="bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-900 dark:text-white font-semibold py-2.5 px-5 rounded-xl text-sm transition-colors flex items-center gap-2 border border-gray-200 dark:border-gray-700"
-              >
-                <Plus size={16} />
-                Add Funds
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {transactions.map((tx) => (
-              <div
-                key={tx.id}
-                className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-3 flex items-center gap-3 shadow-sm"
-              >
-                <div
-                  className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
-                    tx.direction === 'sent'
-                      ? 'bg-red-500/10 text-red-400'
-                      : 'bg-primary-500/10 text-primary-400'
-                  }`}
-                >
-                  {tx.direction === 'sent' ? <Send size={16} /> : <Download size={16} />}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-gray-900 dark:text-white font-medium truncate">
-                    {tx.direction === 'sent'
-                      ? `${t('dashboard.to')} ${truncateAddress(tx.recipient_wallet)}`
-                      : `${t('dashboard.from')} ${truncateAddress(tx.sender_wallet)}`}
-                  </p>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <p className="text-xs text-gray-500">
-                      {new Date(tx.created_at).toLocaleDateString()}
-                    </p>
-                    {tx.status && tx.status !== 'completed' && (
-                      <span
-                        className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${
-                          tx.status === 'pending'
-                            ? 'bg-yellow-500/10 text-yellow-400'
-                            : tx.status === 'failed'
-                              ? 'bg-red-500/10 text-red-400'
-                              : tx.status === 'cancelled'
-                                ? 'bg-gray-500/10 text-gray-400'
-                                : 'bg-blue-500/10 text-blue-400'
-                        }`}
-                      >
-                        {tx.status}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <span
-                  className={`text-sm font-semibold shrink-0 ${
-                    tx.direction === 'sent' ? 'text-red-400' : 'text-primary-400'
-                  }`}
-                >
-                  {tx.direction === 'sent' ? '-' : '+'}
-                  {tx.amount} {tx.asset}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      <RecentTransactions navigate={navigate} t={t} activeWalletId={activeWalletId} transactions={transactions} txError={txError} loading={loading} refreshing={refreshing} anchorLoading={anchorLoading} transactionsError={transactionsError} loadDashboard={loadDashboard} handleAnchorAction={handleAnchorAction} />
     </div>
   );
 }

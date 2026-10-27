@@ -150,6 +150,12 @@ export default function TransactionHistory() {
   const [selectedTx, setSelectedTx] = useState(null); // tx detail modal
   const [copiedHash, setCopiedHash] = useState(false);
   const sentinelRef = useRef(null);
+  const txParam = searchParams.get('tx');
+  useEffect(() => {
+    if (!txParam) return;
+    const match = transactions.find((t) => t.tx_hash === txParam);
+    if (match) setSelectedTx(match);
+  }, [txParam, transactions]);
   const SCROLL_KEY = 'txhistory_scroll';
 
   const fetchInitial = useCallback(async () => {
