@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
 import { createIdempotencyKey, postWithIdempotency } from '../utils/idempotency';
 import useStepUp from '../hooks/useStepUp';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
 import toast from 'react-hot-toast';
 
 const REFRESH_INTERVAL = 15; // seconds
@@ -103,10 +104,10 @@ export default function Swap() {
 
   // Auto-refresh countdown (counts down from REFRESH_INTERVAL to 0)
   const [refreshCountdown, setRefreshCountdown] = useState(REFRESH_INTERVAL);
+  // Bumped to restart the refresh cycle (inputs changed, modal closed, manual refresh).
+  const [refreshCycle, setRefreshCycle] = useState(0);
   const idemRef = useRef(createIdempotencyKey());
   const prevMidPriceRef = useRef(null);
-  const countdownRef = useRef(null);
-  const refreshIntervalRef = useRef(null);
 
   const flipPair = () => {
     setSellAsset(buyAsset);
@@ -160,46 +161,36 @@ export default function Swap() {
     return () => clearTimeout(t);
   }, [fetchQuote]);
 
-  // Start/stop the 15s auto-refresh cycle; pause when confirm modal is open
+  // Restart the refresh cycle when the quote inputs change (a new fetchQuote) or the
+  // confirm modal closes, so the next auto-refresh is a full interval away.
   useEffect(() => {
-    if (confirmOpen) {
-      clearInterval(refreshIntervalRef.current);
-      clearInterval(countdownRef.current);
-      return;
-    }
-
+    if (confirmOpen) return;
     setRefreshCountdown(REFRESH_INTERVAL);
+    setRefreshCycle((cycle) => cycle + 1);
+  }, [confirmOpen, fetchQuote]);
 
-    // Countdown ticker (1s)
-    countdownRef.current = setInterval(() => {
-      setRefreshCountdown(prev => (prev <= 1 ? REFRESH_INTERVAL : prev - 1));
-    }, 1000);
-
-    // Auto-refresh trigger
-    refreshIntervalRef.current = setInterval(() => {
+  // The 1s countdown and the 15s auto-refresh. Both pause while the confirm modal is open
+  // or the tab is hidden (no quote requests in the background); coming back to the tab
+  // refreshes the quote immediately and resets the countdown.
+  useVisibleInterval(
+    () => setRefreshCountdown((prev) => (prev <= 1 ? REFRESH_INTERVAL : prev - 1)),
+    1000,
+    { enabled: !confirmOpen, runOnVisible: false, resetKey: refreshCycle },
+  );
+  useVisibleInterval(
+    () => {
       fetchQuote(true);
       setRefreshCountdown(REFRESH_INTERVAL);
-    }, REFRESH_INTERVAL * 1000);
-
-    return () => {
-      clearInterval(refreshIntervalRef.current);
-      clearInterval(countdownRef.current);
-    };
-  }, [confirmOpen, fetchQuote]);
+    },
+    REFRESH_INTERVAL * 1000,
+    { enabled: !confirmOpen, resetKey: refreshCycle },
+  );
 
   const handleManualRefresh = () => {
     fetchQuote(false);
     setRefreshCountdown(REFRESH_INTERVAL);
-    // Reset the auto-refresh interval so it restarts from now
-    clearInterval(refreshIntervalRef.current);
-    clearInterval(countdownRef.current);
-    countdownRef.current = setInterval(() => {
-      setRefreshCountdown(prev => (prev <= 1 ? REFRESH_INTERVAL : prev - 1));
-    }, 1000);
-    refreshIntervalRef.current = setInterval(() => {
-      fetchQuote(true);
-      setRefreshCountdown(REFRESH_INTERVAL);
-    }, REFRESH_INTERVAL * 1000);
+    // Restart the auto-refresh cycle so it counts from now
+    setRefreshCycle((cycle) => cycle + 1);
   };
 
   const handleSwap = async (e) => {

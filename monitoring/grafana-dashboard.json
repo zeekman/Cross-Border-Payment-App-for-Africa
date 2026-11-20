@@ -192,6 +192,54 @@
           "legendFormat": "{{status}}"
         }
       ]
+    },
+    {
+      "title": "Ledger Listener Lag (ledgers behind Horizon)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 46, "w": 12, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "ledger_listener_lag_ledgers",
+          "legendFormat": "lag"
+        }
+      ]
+    },
+    {
+      "title": "Ledger Listener Seconds Since Last Proof of Life",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 46, "w": 12, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "time() - ledger_listener_last_event_timestamp_seconds",
+          "legendFormat": "seconds"
+        }
+      ]
+    },
+    {
+      "title": "Webhook Queue Depth (by state)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 52, "w": 12, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "afripay_webhook_queue_depth",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "title": "Webhook Delivery Attempts (by result)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 52, "w": 12, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(afripay_webhook_deliveries_total[5m]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
     }
   ]
 }

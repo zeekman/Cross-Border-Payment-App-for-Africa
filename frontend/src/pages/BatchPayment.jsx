@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, AlertCircle, CheckCircle, CheckCircle2, Download, FileUp, Loader2, Plus, RotateCcw, Send, Trash2, Upload, XCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -9,6 +9,7 @@ import { createIdempotencyKey, postWithIdempotency } from '../utils/idempotency'
 import { CURRENCIES, truncateAddress } from '../utils/currency';
 import { validateStellarAddress } from '../utils/validation';
 import useStepUp from '../hooks/useStepUp';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
 
 const SINGLE_TRANSFER_LIMIT = 10000;
 // Matches the Soroban batch_create_escrow contract hard-cap and BE-010 server-side cap
@@ -175,45 +176,48 @@ export default function BatchPayment() {
   const [results, setResults] = useState(null);
   const [rowStatuses, setRowStatuses] = useState({}); // { [index]: { status, error, txHash } }
   const [polling, setPolling] = useState(false);
+  // Id returned by the batch submission, used to poll row statuses. The API currently
+  // settles rows synchronously and returns no batch_id, so polling stays off until it does.
+  const batchId = results?.batch_id ?? null;
   const stoppedRef = useRef(false);
   const idemRef = useRef(createIdempotencyKey());
 
   // Poll for per-row statuses after batch submission
-  useEffect(() => {
-    if (!polling || !batchId) return;
-    stoppedRef.current = false;
-
-    const pollOnce = async () => {
-      if (stoppedRef.current) return;
-      try {
-        const res = await api.get(`/payments/batch/${batchId}/status`);
-        const statuses = res.data.statuses || [];
-        setRowStatuses((prev) => {
-          const next = { ...prev };
-          statuses.forEach((s) => {
-            next[s.index] = { status: s.status, error: s.error, txHash: s.tx_hash };
-          });
-          return next;
+  const pollOnce = useCallback(async () => {
+    if (stoppedRef.current || !batchId) return;
+    try {
+      const res = await api.get(`/payments/batch/${batchId}/status`);
+      const statuses = res.data.statuses || [];
+      setRowStatuses((prev) => {
+        const next = { ...prev };
+        statuses.forEach((s) => {
+          next[s.index] = { status: s.status, error: s.error, txHash: s.tx_hash };
         });
-        const allTerminal =
-          statuses.length > 0 &&
-          statuses.every((s) => s.status === 'confirmed' || s.status === 'failed');
-        if (allTerminal) {
-          stoppedRef.current = true;
-          setPolling(false);
-        }
-      } catch {
-        // ignore polling errors
+        return next;
+      });
+      const allTerminal =
+        statuses.length > 0 &&
+        statuses.every((s) => s.status === 'confirmed' || s.status === 'failed');
+      if (allTerminal) {
+        stoppedRef.current = true;
+        setPolling(false);
       }
-    };
+    } catch {
+      // ignore polling errors
+    }
+  }, [batchId]);
 
+  useEffect(() => {
+    if (!polling || !batchId) return undefined;
+    stoppedRef.current = false;
     pollOnce();
-    const interval = setInterval(pollOnce, 3000);
     return () => {
       stoppedRef.current = true;
-      clearInterval(interval);
     };
-  }, [polling, batchId]);
+  }, [polling, batchId, pollOnce]);
+
+  // Re-check every 3s, but not while the tab is hidden; returning to it checks immediately.
+  useVisibleInterval(pollOnce, 3000, { enabled: polling && Boolean(batchId) });
 
   const batchSummary = useMemo(() => {
     const values = Object.values(rowStatuses);
@@ -399,6 +403,9 @@ export default function BatchPayment() {
         initial[r.index] = { status: r.status, error: r.error, txHash: r.tx_hash };
       });
       setRowStatuses(initial);
+      // Start polling only if the API handed back a batch id and some rows are still in flight.
+      const inFlight = (data.results || []).some((r) => r.status !== 'confirmed' && r.status !== 'failed' && r.status !== 'success');
+      setPolling(Boolean(data.batch_id) && inFlight);
     } catch (error) {
       idemRef.current.resetUnlessLost(error);
       const responseData = error.response?.data;
