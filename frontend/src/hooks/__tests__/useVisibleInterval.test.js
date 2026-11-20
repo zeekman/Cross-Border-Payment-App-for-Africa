@@ -129,6 +129,33 @@ describe('useVisibleInterval', () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
+  test('restarts the timer from now when resetKey changes', () => {
+    const callback = jest.fn();
+    const { rerender } = renderHook(({ key }) => useVisibleInterval(callback, 1000, { resetKey: key }), {
+      initialProps: { key: 'a' },
+    });
+
+    jest.advanceTimersByTime(800);
+    rerender({ key: 'b' }); // e.g. a manual refresh: the next tick is a full interval away
+    jest.advanceTimersByTime(800);
+    expect(callback).not.toHaveBeenCalled();
+
+    jest.advanceTimersByTime(200);
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps the same timer when the resetKey is unchanged', () => {
+    const callback = jest.fn();
+    const { rerender } = renderHook(({ key }) => useVisibleInterval(callback, 1000, { resetKey: key }), {
+      initialProps: { key: 'a' },
+    });
+
+    jest.advanceTimersByTime(800);
+    rerender({ key: 'a' });
+    jest.advanceTimersByTime(200);
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
   test('cleans up the timer and listener on unmount', () => {
     const callback = jest.fn();
     const { unmount } = renderHook(() => useVisibleInterval(callback, 1000));

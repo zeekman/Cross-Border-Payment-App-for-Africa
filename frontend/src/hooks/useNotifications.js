@@ -19,6 +19,7 @@ export function useNotifications() {
   const [nextCursor, setNextCursor] = useState(null);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [socketConnected, setSocketConnected] = useState(false);
 
   const refreshUnread = useCallback(async () => {
     try {
@@ -62,14 +63,16 @@ export function useNotifications() {
     setUnreadCount(0);
   }, []);
 
-  // Polling fallback — also covers the gap while the socket is disconnected.
+  // Refresh on mount and whenever the socket connects or drops, so nothing is missed
+  // in the gap between the initial fetch and the live connection (or after it falls over).
   useEffect(() => {
     if (!user) return;
     refreshUnread();
-  }, [user, refreshUnread]);
+  }, [user, socketConnected, refreshUnread]);
 
-  // Poll only while the tab is visible; returning to it refreshes immediately.
-  useVisibleInterval(refreshUnread, POLL_INTERVAL_MS, { enabled: Boolean(user) });
+  // Polling is only a fallback for when the socket is down: skip it while the socket is
+  // connected, and never poll in a hidden tab (returning to the tab refreshes immediately).
+  useVisibleInterval(refreshUnread, POLL_INTERVAL_MS, { enabled: Boolean(user) && !socketConnected });
 
   // Real-time updates; reconnect with a fresh token, disconnect on logout.
   useEffect(() => {
@@ -78,8 +81,12 @@ export function useNotifications() {
     const connect = (token) => {
       if (socket) socket.disconnect();
       socket = null;
+      setSocketConnected(false);
       if (!token) return;
       socket = io(socketURL, { auth: { token }, withCredentials: true });
+      socket.on('connect', () => setSocketConnected(true));
+      socket.on('disconnect', () => setSocketConnected(false));
+      socket.on('connect_error', () => setSocketConnected(false));
       socket.on('notification:new', (notification) => {
         let isNew = false;
         setItems((prev) => {

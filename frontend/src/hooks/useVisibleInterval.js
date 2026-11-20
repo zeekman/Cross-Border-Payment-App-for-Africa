@@ -14,6 +14,9 @@
  *                   again after being hidden (default true). Never fires while
  *                   the page is hidden or when the page was already visible.
  *  - enabled      : set false to pause polling entirely (default true).
+ *  - resetKey     : any value; when it changes the timer restarts from now, so
+ *                   the next tick is a full interval away (e.g. after a manual
+ *                   refresh). The callback itself never needs to be a dependency.
  *
  * `callback` is read through a ref, so passing a fresh closure each render does
  * not restart the timer. Passing `ms` of null/undefined also disables polling.
@@ -27,12 +30,12 @@ const isHidden = () =>
 /**
  * @param {() => void} callback
  * @param {number | null | undefined} ms
- * @param {{ runOnVisible?: boolean, enabled?: boolean }} [options]
+ * @param {{ runOnVisible?: boolean, enabled?: boolean, resetKey?: unknown }} [options]
  */
 export function useVisibleInterval(
   callback,
   ms,
-  { runOnVisible = true, enabled = true } = {}
+  { runOnVisible = true, enabled = true, resetKey } = {}
 ) {
   const savedCallback = useRef(callback);
 
@@ -46,6 +49,7 @@ export function useVisibleInterval(
     let timerId = null;
     const tick = () => savedCallback.current();
     const start = () => {
+      // eslint-disable-next-line no-restricted-globals -- the one place a raw interval is allowed
       if (timerId === null) timerId = setInterval(tick, ms);
     };
     const stop = () => {
@@ -72,7 +76,7 @@ export function useVisibleInterval(
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       stop();
     };
-  }, [ms, runOnVisible, enabled]);
+  }, [ms, runOnVisible, enabled, resetKey]);
 }
 
 export default useVisibleInterval;
