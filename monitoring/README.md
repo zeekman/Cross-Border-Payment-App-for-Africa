@@ -65,3 +65,17 @@ status `degraded` (HTTP 200); it does not take the API out of rotation.
 
 The dashboard has two matching panels: *Ledger Listener Lag* and *Ledger Listener
 Seconds Since Last Proof of Life*.
+
+## Webhook delivery queue (BE-217)
+
+Deliveries run as durable BullMQ jobs (see `docs/webhook-delivery.md`).
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `afripay_webhook_queue_depth{state}` | gauge | Jobs by state: `waiting`, `active`, `delayed` (waiting for a retry), `failed`. Sampled every 15 s. |
+| `afripay_webhook_deliveries_total{result}` | counter | Attempts by result: `delivered`, `retry` (failed, another attempt scheduled), `failed` (event out of attempts or not retryable), `skipped` (endpoint deleted or disabled since it was queued). |
+| `afripay_webhook_endpoints_disabled_total` | counter | Endpoints disabled automatically after repeated failed events. |
+
+Alerts (`alerts.yml`): `WebhookQueueBacklog` (more than 1000 jobs waiting for 10 minutes) and
+`WebhookEndpointsAutoDisabled` (any endpoint disabled in the last hour). The dashboard has *Webhook
+Queue Depth* and *Webhook Delivery Attempts* panels.
