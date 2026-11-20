@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import api from '../utils/api';
 import { tokenStore, useAuth } from '../context/AuthContext';
+import { useVisibleInterval } from './useVisibleInterval';
 
 const POLL_INTERVAL_MS = 60000;
 const socketURL = (process.env.REACT_APP_API_URL || 'http://localhost:5000/api').replace(/\/api\/?$/, '');
@@ -63,11 +64,12 @@ export function useNotifications() {
 
   // Polling fallback — also covers the gap while the socket is disconnected.
   useEffect(() => {
-    if (!user) return undefined;
+    if (!user) return;
     refreshUnread();
-    const timer = setInterval(refreshUnread, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
   }, [user, refreshUnread]);
+
+  // Poll only while the tab is visible; returning to it refreshes immediately.
+  useVisibleInterval(refreshUnread, POLL_INTERVAL_MS, { enabled: Boolean(user) });
 
   // Real-time updates; reconnect with a fresh token, disconnect on logout.
   useEffect(() => {
