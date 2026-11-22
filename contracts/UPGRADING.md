@@ -16,10 +16,37 @@ emergency pause (SC-174).
 | `propose_upgrade(admin, new_wasm_hash) -> u64` | admin | Stores `(hash, eta)` with `eta = now + 48h`; emits `UpgradeProposed(hash, eta)`. Returns `eta`. A new proposal replaces the previous one. |
 | `upgrade(admin, new_wasm_hash) -> u64` | admin | Alias of `propose_upgrade`. Upgrades are **never** applied instantly. |
 | `cancel_upgrade(admin)` | admin | Removes the pending upgrade; emits `UpgradeCancelled(hash)`. |
-| `execute_upgrade(admin)` | admin | Panics with `Upgrade timelock has not expired` before `eta`; afterwards swaps the WASM and emits `Upgraded(hash, CONTRACT_VERSION)`. |
+| `execute_upgrade(admin)` | admin | Panics with `Upgrade timelock has not expired` before `eta`; afterwards swaps the WASM and emits `Upgraded(hash)` — the event carries **only the new WASM hash**, never a version (the running code is still the old binary, so any version it reported would be wrong). |
 | `get_pending_upgrade() -> Option<PendingUpgrade>` | — | The pending `{ new_wasm_hash, eta }`, if any. |
-| `migrate(admin)` | admin | Idempotent; bumps the stored version to the new WASM's `CONTRACT_VERSION`; emits `Migrated(version)`. |
+| `migrate(admin)` | admin | Idempotent; runs every intermediate migration step exactly once and bumps the stored version to the new WASM's `CONTRACT_VERSION`; emits `Migrated { from_version, to_version }`. |
 | `get_contract_version() -> u32` | — | Stored contract version (`0` before the first `migrate`). |
+
+### `execute_upgrade` must be followed by `migrate`
+
+`execute_upgrade` only schedules the WASM swap: `update_current_contract_wasm`
+takes effect **after** the invocation ends, so the call runs in the *old*
+binary. The new code's `migrate` is what actually brings storage up to date.
+**Always call `migrate` immediately after `execute_upgrade`, in the same
+deployment run** — an upgraded contract that has not been migrated is running
+new code against old storage. `scripts/upgrade.sh execute <contract>` performs
+both calls for you.
+
+`migrate` is structured as a loop over versions:
+
+```rust
+while current < CONTRACT_VERSION {
+    match current {
+        1 => migrate_v1_to_v2(&env),
+        // ... one arm per version bump
+        _ => {}
+    }
+    current += 1;
+}
+```
+
+so a v1 → v3 jump runs the v2 step and then the v3 step, each exactly once,
+and re-running `migrate` is a no-op. The emitted `Migrated { from_version,
+to_version }` event records which migrations ran on-chain.
 
 The timelock (`UPGRADE_TIMELOCK_SECS = 48h`) is enforced by the contract
 itself, so a compromised admin key cannot replace contract code without giving
@@ -41,15 +68,17 @@ name. It needs `SOROBAN_ADMIN_KEYPAIR`, `ADMIN_ADDRESS` and the contract ID in
 ```
 
 1. **Build & test** the new version on testnet; bump `CONTRACT_VERSION` in
-   `src/governance.rs` and add any migration logic to `migrate`.
+   `src/governance.rs` and add a `migrate_vN_to_vN+1` step (plus its arm in
+   `migrate`) for every version you skip over.
 2. **Propose**: `upgrade.sh propose <contract>`. Announce the hash and `eta`
    publicly (indexed `UpgradeProposed` event).
 3. **Wait 48 hours** for community review. Cancel with `upgrade.sh cancel` if a
    problem is found.
 4. **Execute**: `upgrade.sh execute <contract>` (calls `execute_upgrade`, then
-   `migrate`).
+   `migrate` in the same run — never run one without the other).
 5. **Verify**: `upgrade.sh status <contract>` shows no pending upgrade and the
-   new version.
+   new version, and the `Migrated { from_version, to_version }` event shows the
+   expected version jump.
 
 ## Emergency Pause (SC-174)
 

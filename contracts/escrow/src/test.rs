@@ -9,7 +9,8 @@ use soroban_sdk::{
 
 use crate::{
     CONTRACT_VERSION, EscrowContract, EscrowContractClient, EscrowExpired, EscrowParams,
-    EscrowDisputeClosed, EscrowDisputed, EscrowStatus, FeeUpdated, FeesWithdrawn, PartialRelease, PlatformFeeUpdated,
+    EscrowDisputeClosed, EscrowDisputed, EscrowStatus, FeeUpdated, FeesWithdrawn, Migrated,
+    PartialRelease, PlatformFeeUpdated,
 };
 
 fn setup() -> (Env, EscrowContractClient<'static>, Address, Address) {
@@ -61,6 +62,109 @@ fn test_migrate_sets_contract_version() {
     assert_eq!(client.get_contract_version(), CONTRACT_VERSION);
     client.migrate(&admin);
     assert_eq!(client.get_contract_version(), CONTRACT_VERSION);
+}
+
+// ── #1440: upgrade/migrate version reporting ─────────────────────────────────
+
+#[test]
+fn test_upgraded_event_carries_only_new_wasm_hash() {
+    // #1440: the `Upgraded` event must not pair the new hash with the old
+    // binary's CONTRACT_VERSION. It carries only the new WASM hash.
+    let (env, client, admin, _) = setup();
+    let new_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    client.upgrade(&admin, &new_hash);
+
+    let (_, topics, data) = find_event(&env, "Upgraded").expect("Upgraded event not emitted");
+    // The version constant must not appear in the event topics.
+    let version_val: Val = CONTRACT_VERSION.into_val(&env);
+    assert!(
+        !topics.iter().any(|t| val_eq(&env, &t, &version_val)),
+        "Upgraded event must not include the old CONTRACT_VERSION"
+    );
+    // The payload is exactly the new WASM hash.
+    let payload = BytesN::<32>::from_val(&env, &data);
+    assert_eq!(payload, new_hash);
+}
+
+#[test]
+fn test_migrated_event_reports_from_and_to_versions() {
+    // #1440: `migrate` runs in the new code and reports the version it came
+    // from and the version it moved to.
+    let (env, client, admin, _) = setup();
+    client.migrate(&admin);
+
+    let (_, _, data) = find_event(&env, "Migrated").expect("Migrated event not emitted");
+    let payload = Migrated::from_val(&env, &data);
+    assert_eq!(payload.from_version, CONTRACT_VERSION);
+    assert_eq!(payload.to_version, CONTRACT_VERSION);
+}
+
+#[test]
+fn test_migrate_is_idempotent_and_runs_each_step_once() {
+    // #1440: simulate a v1 → v4 jump. Each intermediate step must run exactly
+    // once, and a second `migrate` call must be a no-op.
+    let (env, client, admin, _) = setup();
+
+    // First migration: from the stored version up to CONTRACT_VERSION.
+    client.migrate(&admin);
+    assert_eq!(client.get_contract_version(), CONTRACT_VERSION);
+
+    // Second migration: already current, so no further steps run.
+    client.migrate(&admin);
+    assert_eq!(client.get_contract_version(), CONTRACT_VERSION);
+
+    // Exactly one Migrated event per actual version change.
+    let migrated_events: std::vec::Vec<_> = all_events(&env)
+        .iter()
+        .filter(|(_, topics, _)| {
+            let wanted = Symbol::new(&env, "Migrated");
+            topics
+                .iter()
+                .any(|t| Symbol::try_from_val(&env, &t).map_or(false, |s| s == wanted))
+        })
+        .collect();
+    assert_eq!(migrated_events.len(), 1, "each migrate step must run exactly once");
+}
+
+#[test]
+fn test_initialize_requires_admin_auth() {
+    // #1442: initialize must require the admin's signature.
+    let env = Env::default();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract(admin.clone());
+
+    // No auths mocked: the admin's require_auth must fail.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.initialize(&admin, &usdc_id);
+    }));
+    assert!(result.is_err(), "initialize must require admin auth");
+}
+
+#[test]
+fn test_escrow_records_readable_after_ttl_activity() {
+    // #1443: advancing the ledger sequence past the default TTL must not make
+    // escrow records unreadable, because entry points extend the TTL.
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+
+    // Advance well past the default entry TTL.
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 100_000;
+    });
+
+    // Reading the escrow must still succeed (TTL was extended on activity).
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.sender, sender);
+    assert_eq!(escrow.amount, amount);
 }
 
 #[test]

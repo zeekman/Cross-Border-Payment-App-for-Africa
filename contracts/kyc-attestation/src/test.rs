@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Bytes, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
+    Address, Bytes, Env, IntoVal,
+};
 
 use crate::{KycAttestationContract, KycAttestationContractClient, KycTier};
 
@@ -31,6 +34,45 @@ fn hash(env: &Env) -> Bytes {
 fn test_double_initialize_panics() {
     let (_, client, admin) = setup();
     client.initialize(&admin);
+}
+
+#[test]
+fn test_initialize_requires_admin_auth() {
+    let env = Env::default();
+    env.ledger().with_mut(|li| li.timestamp = 1_700_000_000);
+    let id = env.register(KycAttestationContract, ());
+    let client = KycAttestationContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+
+    // Only the admin's signature is mocked; a different caller must fail.
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &id,
+            fn_name: "initialize",
+            args: (admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let impostor = Address::generate(&env);
+    let result = client.try_initialize(&impostor);
+    assert!(result.is_err(), "initialize must require the admin's auth");
+}
+
+#[test]
+fn test_initialize_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_700_000_000);
+    let id = env.register(KycAttestationContract, ());
+    let client = KycAttestationContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let events = env.events().all();
+    assert!(!events.is_empty(), "initialize must emit an Initialized event");
 }
 
 // ── attest ────────────────────────────────────────────────────────────────────
@@ -462,6 +504,29 @@ fn test_concurrent_tier_verification_in_batch() {
     assert!(!client.is_verified(&user1, &KycTier::Enhanced));
     assert!(!client.is_verified(&user2, &KycTier::Basic));
     assert!(!client.is_verified(&user3, &KycTier::Enhanced));
+}
+
+#[test]
+fn test_attestation_survives_ttl_advance() {
+    // SC-189: persistent entries must have their TTL extended on access so
+    // that attestations stay readable after the ledger advances well past
+    // the default TTL.
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+    client.attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+
+    // Advance far beyond the default TTL (a few thousand ledgers).
+    env.ledger().set_sequence_number(env.ledger().sequence() + 1_000_000);
+
+    // Activity on the contract should bump TTLs and keep the record readable.
+    assert!(client.is_verified(&user, &KycTier::Basic));
+    let record = client.get_attestation(&user, &KycTier::Basic);
+    assert_eq!(record.revoked_at, 0);
+    assert!(record.attested_at > 0);
+
+    // Advance again and confirm the record is still readable after activity.
+    env.ledger().set_sequence_number(env.ledger().sequence() + 1_000_000);
+    assert!(client.is_verified(&user, &KycTier::Basic));
 }
 
 #[test]

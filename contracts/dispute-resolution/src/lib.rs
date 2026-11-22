@@ -60,6 +60,22 @@ const MAX_ARBITRATORS: u32 = 7;
 /// Default quorum threshold in basis points (6001 = strictly more than 60 %).
 const DEFAULT_QUORUM_BPS: u32 = 6_001;
 
+// ── TTL policy ────────────────────────────────────────────────────────────────
+//
+// Instance storage (global config) is bumped to ~30 days on every call and is
+// re-extended once it drops below ~7 days. Persistent records (disputes,
+// votes, per-user indexes) are bumped to ~30 days whenever they are read or
+// written, with the same ~7-day threshold.
+
+/// Target TTL for instance storage (~30 days at 5s ledgers).
+const INSTANCE_BUMP_AMOUNT: u32 = 30 * 24 * 60 * 12;
+/// Re-extend instance storage once its TTL falls below ~7 days.
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 7 * 24 * 60 * 12;
+/// Target TTL for persistent records (~30 days at 5s ledgers).
+const PERSISTENT_BUMP_AMOUNT: u32 = 30 * 24 * 60 * 12;
+/// Re-extend persistent records once their TTL falls below ~7 days.
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 7 * 24 * 60 * 12;
+
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -253,6 +269,16 @@ pub struct EvtQuorumReached {
     pub amount: i128,
 }
 
+/// Emitted once by [`DisputeResolutionContract::initialize`].
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtInitialized {
+    pub admin: Address,
+    pub arbitrator: Address,
+    pub usdc_address: Address,
+    pub super_arbitrator: Address,
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Who a ruling awards the disputed funds to.
@@ -263,15 +289,61 @@ enum Ruling {
     Agent,
 }
 
+/// Extend the instance (global config) TTL. Called from every entry point.
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+/// Extend the TTL of a persistent record that was just read or written.
+fn bump_persistent<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    env.storage().persistent().extend_ttl(
+        key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
+/// Read a dispute record and bump its TTL.
+fn load_dispute(env: &Env, dispute_id: u64) -> Dispute {
+    let dispute: Dispute = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Dispute(dispute_id))
+        .expect("dispute not found");
+    bump_persistent(env, &DataKey::Dispute(dispute_id));
+    dispute
+}
+
+/// Write a dispute record and bump its TTL.
+fn store_dispute(env: &Env, dispute: &Dispute) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Dispute(dispute.id), dispute);
+    bump_persistent(env, &DataKey::Dispute(dispute.id));
+}
+
 fn dispute_agent(env: &Env, dispute_id: u64) -> Option<Address> {
-    env.storage().persistent().get(&DataKey::DisputeAgent(dispute_id))
+    let agent: Option<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::DisputeAgent(dispute_id));
+    if agent.is_some() {
+        bump_persistent(env, &DataKey::DisputeAgent(dispute_id));
+    }
+    agent
 }
 
 fn payout_confirmed(env: &Env, dispute_id: u64) -> bool {
-    env.storage()
+    let confirmed: Option<bool> = env
+        .storage()
         .persistent()
-        .get(&DataKey::PayoutConfirmed(dispute_id))
-        .unwrap_or(false)
+        .get(&DataKey::PayoutConfirmed(dispute_id));
+    if confirmed.is_some() {
+        bump_persistent(env, &DataKey::PayoutConfirmed(dispute_id));
+    }
+    confirmed.unwrap_or(false)
 }
 
 /// Tell the escrow contract backing `dispute_id` (if any) who won, so the
@@ -279,6 +351,9 @@ fn payout_confirmed(env: &Env, dispute_id: u64) -> bool {
 fn notify_escrow(env: &Env, dispute_id: u64, winner: &Address) {
     let escrow_ref: Option<(Address, u64)> =
         env.storage().persistent().get(&DataKey::EscrowRef(dispute_id));
+    if escrow_ref.is_some() {
+        bump_persistent(env, &DataKey::EscrowRef(dispute_id));
+    }
     if let Some((escrow_contract, escrow_id)) = escrow_ref {
         env.invoke_contract::<()>(
             &escrow_contract,
@@ -291,6 +366,7 @@ fn notify_escrow(env: &Env, dispute_id: u64, winner: &Address) {
 /// The ruling currently recorded on a dispute in `Appealing` status.
 fn pending_ruling(env: &Env, dispute: &Dispute) -> Ruling {
     if env.storage().persistent().has(&DataKey::RulingForAgent(dispute.id)) {
+        bump_persistent(env, &DataKey::RulingForAgent(dispute.id));
         Ruling::Agent
     } else if dispute.resolved_for_recipient {
         Ruling::Recipient
@@ -308,6 +384,7 @@ fn record_ruling(env: &Env, dispute: &mut Dispute, ruling: Ruling) {
         env.storage()
             .persistent()
             .set(&DataKey::RulingForAgent(dispute.id), &true);
+        bump_persistent(env, &DataKey::RulingForAgent(dispute.id));
     } else {
         env.storage()
             .persistent()
@@ -339,22 +416,36 @@ impl DisputeResolutionContract {
         max_evidence_bytes: u32,
         super_arbitrator: Address,
     ) {
-        if env.storage().persistent().has(&DataKey::Admin) {
+        bump_instance(&env);
+        // The admin must co-sign so a watcher cannot front-run the deploy
+        // script and install their own admin (#1442).
+        admin.require_auth();
+        if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
-        env.storage().persistent().set(&DataKey::Admin, &admin);
-        env.storage().persistent().set(&DataKey::Arbitrator, &arbitrator);
-        env.storage().persistent().set(&DataKey::UsdcAddress, &usdc_address);
-        env.storage().persistent().set(&DataKey::MaxEvidenceBytes, &max_evidence_bytes);
-        env.storage().persistent().set(&DataKey::Counter, &0u64);
-        env.storage().persistent().set(&DataKey::SuperArbitrator, &super_arbitrator);
-        env.storage().persistent().set(&DataKey::FilingFee, &50_000000i128);
-        env.storage().persistent().set(&DataKey::FeeDistributorAddress, &admin);
-        env.storage().persistent().set(&DataKey::TotalDisputes, &0u64);
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Arbitrator, &arbitrator);
+        env.storage().instance().set(&DataKey::UsdcAddress, &usdc_address);
+        env.storage().instance().set(&DataKey::MaxEvidenceBytes, &max_evidence_bytes);
+        env.storage().instance().set(&DataKey::Counter, &0u64);
+        env.storage().instance().set(&DataKey::SuperArbitrator, &super_arbitrator);
+        env.storage().instance().set(&DataKey::FilingFee, &50_000000i128);
+        env.storage().instance().set(&DataKey::FeeDistributorAddress, &admin);
+        env.storage().instance().set(&DataKey::TotalDisputes, &0u64);
         // Initialise the arbitrator panel with an empty list and the default quorum.
         let empty: Vec<Address> = Vec::new(&env);
-        env.storage().persistent().set(&DataKey::Arbitrators, &empty);
-        env.storage().persistent().set(&DataKey::QuorumBps, &DEFAULT_QUORUM_BPS);
+        env.storage().instance().set(&DataKey::Arbitrators, &empty);
+        env.storage().instance().set(&DataKey::QuorumBps, &DEFAULT_QUORUM_BPS);
+
+        env.events().publish(
+            (Symbol::new(&env, "Initialized"),),
+            EvtInitialized {
+                admin,
+                arbitrator,
+                usdc_address,
+                super_arbitrator,
+            },
+        );
     }
 
     /// Open a dispute, locking `amount` USDC in the contract.
@@ -374,6 +465,7 @@ impl DisputeResolutionContract {
         recipient: Address,
         amount: i128,
     ) -> u64 {
+        bump_instance(&env);
         governance::require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive");
@@ -386,13 +478,13 @@ impl DisputeResolutionContract {
 
         let usdc: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::UsdcAddress)
             .expect("not initialized");
 
         let filing_fee: i128 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::FilingFee)
             .unwrap_or(50_000000);
         let token_client = token::Client::new(&env, &usdc);
@@ -411,11 +503,11 @@ impl DisputeResolutionContract {
 
         let id: u64 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Counter)
             .unwrap_or(0)
             + 1;
-        env.storage().persistent().set(&DataKey::Counter, &id);
+        env.storage().instance().set(&DataKey::Counter, &id);
 
         let now = env.ledger().timestamp();
         let deadline = now + RESOLUTION_DEADLINE_SECS;
@@ -433,12 +525,12 @@ impl DisputeResolutionContract {
             appeal_deadline: 0,
             resolved_for_recipient: false,
         };
-        env.storage().persistent().set(&DataKey::Dispute(id), &dispute);
+        store_dispute(&env, &dispute);
         Self::record_filing_fee(&env, id, &opener, filing_fee);
 
         // Update TotalDisputes counter
-        let total_disputes: u64 = env.storage().persistent().get(&DataKey::TotalDisputes).unwrap_or(0);
-        env.storage().persistent().set(&DataKey::TotalDisputes, &(total_disputes + 1));
+        let total_disputes: u64 = env.storage().instance().get(&DataKey::TotalDisputes).unwrap_or(0);
+        env.storage().instance().set(&DataKey::TotalDisputes, &(total_disputes + 1));
 
         // Add dispute ID to UserDisputes for both sender and recipient (circular buffer, max 1000)
         for user in [sender.clone(), recipient.clone()] {
@@ -449,7 +541,8 @@ impl DisputeResolutionContract {
                 user_disputes.remove(0);
             }
             user_disputes.push_back(id);
-            env.storage().persistent().set(&DataKey::UserDisputes(user), &user_disputes);
+            env.storage().persistent().set(&DataKey::UserDisputes(user.clone()), &user_disputes);
+            bump_persistent(&env, &DataKey::UserDisputes(user));
         }
 
         env.events().publish(
@@ -509,6 +602,7 @@ impl DisputeResolutionContract {
         amount: i128,
         payout_confirmed: bool,
     ) -> u64 {
+        bump_instance(&env);
         governance::require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive");
@@ -521,7 +615,7 @@ impl DisputeResolutionContract {
         escrow_contract.require_auth();
         let trusted_escrow: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::EscrowContract)
             .expect("escrow contract not set");
         if escrow_contract != trusted_escrow {
@@ -535,12 +629,12 @@ impl DisputeResolutionContract {
 
         let usdc: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::UsdcAddress)
             .expect("not initialized");
         let filing_fee: i128 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::FilingFee)
             .unwrap_or(50_000000);
         if filing_fee > 0 {
@@ -559,11 +653,11 @@ impl DisputeResolutionContract {
 
         let id: u64 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Counter)
             .unwrap_or(0)
             + 1;
-        env.storage().persistent().set(&DataKey::Counter, &id);
+        env.storage().instance().set(&DataKey::Counter, &id);
 
         let now = env.ledger().timestamp();
         let deadline = now + RESOLUTION_DEADLINE_SECS;
@@ -581,23 +675,26 @@ impl DisputeResolutionContract {
             appeal_deadline: 0,
             resolved_for_recipient: false,
         };
-        env.storage().persistent().set(&DataKey::Dispute(id), &dispute);
+        store_dispute(&env, &dispute);
         Self::record_filing_fee(&env, id, &opener, filing_fee);
         env.storage().persistent().set(&DataKey::DisputeAgent(id), &agent);
+        bump_persistent(&env, &DataKey::DisputeAgent(id));
         env.storage()
             .persistent()
             .set(&DataKey::PayoutConfirmed(id), &payout_confirmed);
+        bump_persistent(&env, &DataKey::PayoutConfirmed(id));
         env.storage()
             .persistent()
             .set(&DataKey::EscrowRef(id), &(escrow_contract, escrow_id));
+        bump_persistent(&env, &DataKey::EscrowRef(id));
 
         let total_disputes: u64 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TotalDisputes)
             .unwrap_or(0);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::TotalDisputes, &(total_disputes + 1));
 
         // Index the dispute under all three parties for pagination.
@@ -613,7 +710,8 @@ impl DisputeResolutionContract {
             user_disputes.push_back(id);
             env.storage()
                 .persistent()
-                .set(&DataKey::UserDisputes(user), &user_disputes);
+                .set(&DataKey::UserDisputes(user.clone()), &user_disputes);
+            bump_persistent(&env, &DataKey::UserDisputes(user));
         }
 
         env.events().publish(
@@ -650,9 +748,10 @@ impl DisputeResolutionContract {
     /// * `dispute_id` — ID returned by `open_dispute`.
     /// * `evidence`   — IPFS CID or content hash (max 256 bytes).
     pub fn submit_evidence(env: Env, submitter: Address, dispute_id: u64, evidence: Bytes) {
+        bump_instance(&env);
         let max_evidence_bytes: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::MaxEvidenceBytes)
             .expect("not initialized");
         if evidence.len() > max_evidence_bytes {
@@ -661,11 +760,7 @@ impl DisputeResolutionContract {
 
         submitter.require_auth();
 
-        let mut dispute: Dispute = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Dispute(dispute_id))
-            .expect("dispute not found");
+        let mut dispute: Dispute = load_dispute(&env, dispute_id);
 
         if dispute.status != DisputeStatus::Open {
             panic!("dispute is not open");
@@ -682,11 +777,12 @@ impl DisputeResolutionContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::AgentEvidence(dispute_id), &evidence);
+            bump_persistent(&env, &DataKey::AgentEvidence(dispute_id));
         } else {
             panic!("submitter is not a party to this dispute");
         }
 
-        env.storage().persistent().set(&DataKey::Dispute(dispute_id), &dispute);
+        store_dispute(&env, &dispute);
 
         env.events().publish(
             (Symbol::new(&env, "EvidenceSubmitted"),),
@@ -733,11 +829,12 @@ impl DisputeResolutionContract {
     }
 
     fn resolve_with(env: &Env, arbitrator: Address, dispute_id: u64, ruling: Ruling) {
+        bump_instance(env);
         arbitrator.require_auth();
 
         let stored_arbitrator: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Arbitrator)
             .expect("not initialized");
 
@@ -745,11 +842,7 @@ impl DisputeResolutionContract {
             panic!("unauthorized: caller is not the arbitrator");
         }
 
-        let mut dispute: Dispute = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Dispute(dispute_id))
-            .expect("dispute not found");
+        let mut dispute: Dispute = load_dispute(env, dispute_id);
 
         if dispute.status != DisputeStatus::Open {
             panic!("dispute is not open");
@@ -760,7 +853,7 @@ impl DisputeResolutionContract {
         record_ruling(env, &mut dispute, ruling);
         dispute.appeal_deadline = now + APPEAL_WINDOW_SECS;
 
-        env.storage().persistent().set(&DataKey::Dispute(dispute_id), &dispute);
+        store_dispute(env, &dispute);
     }
 
     /// File an appeal within the 24-hour window after the arbitrator's decision.
@@ -775,13 +868,10 @@ impl DisputeResolutionContract {
     /// * `caller`     — Must be the dispute's sender or recipient.
     /// * `dispute_id` — ID returned by `open_dispute`.
     pub fn appeal(env: Env, caller: Address, dispute_id: u64) {
+        bump_instance(&env);
         caller.require_auth();
 
-        let mut dispute: Dispute = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Dispute(dispute_id))
-            .expect("dispute not found");
+        let mut dispute: Dispute = load_dispute(&env, dispute_id);
 
         if dispute.status == DisputeStatus::UnderAppeal {
             panic!("appeal already filed");
@@ -800,7 +890,7 @@ impl DisputeResolutionContract {
         }
 
         dispute.status = DisputeStatus::UnderAppeal;
-        env.storage().persistent().set(&DataKey::Dispute(dispute_id), &dispute);
+        store_dispute(&env, &dispute);
 
         env.events().publish(
             (Symbol::new(&env, "AppealFiled"),),
@@ -820,11 +910,8 @@ impl DisputeResolutionContract {
     /// # Arguments
     /// * `dispute_id` — ID returned by `open_dispute`.
     pub fn finalize_resolution(env: Env, dispute_id: u64) {
-        let mut dispute: Dispute = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Dispute(dispute_id))
-            .expect("dispute not found");
+        bump_instance(&env);
+        let dispute: Dispute = load_dispute(&env, dispute_id);
 
         if dispute.status != DisputeStatus::Appealing {
             panic!("dispute is not awaiting finalization");
@@ -843,7 +930,7 @@ impl DisputeResolutionContract {
         let dispute_id = dispute.id;
         let usdc: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::UsdcAddress)
             .unwrap();
 
@@ -862,7 +949,7 @@ impl DisputeResolutionContract {
             }
         };
 
-        env.storage().persistent().set(&DataKey::Dispute(dispute_id), &dispute);
+        store_dispute(env, &dispute);
 
         Self::settle_filing_fee(env, dispute_id, &winner, &usdc);
         token::Client::new(env, &usdc).transfer(
@@ -912,11 +999,12 @@ impl DisputeResolutionContract {
     }
 
     fn resolve_appeal_with(env: &Env, super_arbitrator: Address, dispute_id: u64, ruling: Ruling) {
+        bump_instance(env);
         super_arbitrator.require_auth();
 
         let stored_super: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::SuperArbitrator)
             .expect("super arbitrator not set");
 
@@ -924,11 +1012,7 @@ impl DisputeResolutionContract {
             panic!("unauthorized: caller is not the super arbitrator");
         }
 
-        let mut dispute: Dispute = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Dispute(dispute_id))
-            .expect("dispute not found");
+        let mut dispute: Dispute = load_dispute(env, dispute_id);
 
         if dispute.status != DisputeStatus::UnderAppeal {
             panic!("dispute is not under appeal");
@@ -950,13 +1034,10 @@ impl DisputeResolutionContract {
     /// * `claimant`   — The sender, or the agent for payout-confirmed escrow disputes.
     /// * `dispute_id` — ID returned by `open_dispute`.
     pub fn claim_expired(env: Env, claimant: Address, dispute_id: u64) {
+        bump_instance(&env);
         claimant.require_auth();
 
-        let mut dispute: Dispute = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Dispute(dispute_id))
-            .expect("dispute not found");
+        let mut dispute: Dispute = load_dispute(&env, dispute_id);
 
         let agent = dispute_agent(&env, dispute_id);
         let pays_agent = payout_confirmed(&env, dispute_id) && agent.is_some();
@@ -976,12 +1057,12 @@ impl DisputeResolutionContract {
 
         let usdc: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::UsdcAddress)
             .unwrap();
 
         dispute.status = DisputeStatus::Expired;
-        env.storage().persistent().set(&DataKey::Dispute(dispute_id), &dispute);
+        store_dispute(&env, &dispute);
 
         token::Client::new(&env, &usdc).transfer(
             &env.current_contract_address(),
@@ -996,12 +1077,15 @@ impl DisputeResolutionContract {
             .storage()
             .persistent()
             .get(&DataKey::FilingFeeHolder(dispute_id));
+        if fee_holder.is_some() {
+            bump_persistent(&env, &DataKey::FilingFeeHolder(dispute_id));
+        }
         if let Some(holder) = fee_holder {
             Self::settle_filing_fee(&env, dispute_id, &holder, &usdc);
         }
 
         dispute.status = DisputeStatus::Expired;
-        env.storage().persistent().set(&DataKey::Dispute(dispute_id), &dispute);
+        store_dispute(&env, &dispute);
 
         env.events().publish(
             (Symbol::new(&env, "DisputeExpired"),),

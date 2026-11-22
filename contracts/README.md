@@ -20,6 +20,94 @@ Each contract is an independent crate — see its `Cargo.toml` and `src/lib.rs` 
 
 **Deployment:** [deploy.sh](./deploy.sh)
 
+## Storage TTL policy
+
+Soroban storage entries expire: once an entry's TTL runs out it is **archived**, and any
+transaction that reads it fails until the entry is restored with a `RestoreFootprint`
+operation. Every contract therefore manages TTLs explicitly.
+
+### Constants
+
+Each contract defines four constants in `src/lib.rs` (values in ledgers; ~5s per ledger):
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `INSTANCE_LIFETIME_THRESHOLD` | `17_280` (~1 day) | Bump instance TTL only when it falls below this |
+| `INSTANCE_BUMP_AMOUNT` | `518_400` (~30 days) | Extend instance TTL to this many ledgers from now |
+| `PERSISTENT_LIFETIME_THRESHOLD` | `120_960` (~7 days) | Bump a persistent entry only when below this |
+| `PERSISTENT_BUMP_AMOUNT` | `518_400` (~30 days) | Extend a persistent entry to this many ledgers from now |
+
+```rust
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;   // ~1 day
+const INSTANCE_BUMP_AMOUNT: u32 = 518_400;         // ~30 days
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960; // ~7 days
+const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;       // ~30 days
+```
+
+### What lives where
+
+- **`instance()`** — small global config and counters, bumped on *every* public entry point:
+  `Admin`, `Paused`, `PendingUpgrade`, token/USDC address, fee bps, and counters.
+  An archived `Admin` key would break `pause`, `execute_upgrade`, and every admin function,
+  so instance TTL is extended unconditionally at the top of each entry point:
+  ```rust
+  env.storage()
+      .instance()
+      .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+  ```
+- **`persistent()`** — per-record data: escrows, vaults, schedules, KYC attestations,
+  loyalty balances, disputes, multisig proposals. The TTL is extended whenever the record is
+  read or written:
+  ```rust
+  env.storage().persistent().extend_ttl(
+      &key,
+      PERSISTENT_LIFETIME_THRESHOLD,
+      PERSISTENT_BUMP_AMOUNT,
+  );
+  ```
+
+**Rule:** every public entry point extends the instance TTL, and every persistent record that
+is touched (read *or* written) has its TTL extended. Do not add a new storage key without
+adding the corresponding `extend_ttl` call.
+
+### Keeper job
+
+Long-lived records that are not touched by user activity (e.g. active vaults with distant
+unlock times) are bumped by a backend keeper job in `backend/src/jobs/`, which periodically
+submits transactions that extend the TTL of records nearing expiry.
+
+### Restoring archived entries
+
+If an entry has already been archived (e.g. a contract was idle for more than ~30 days):
+
+1. Find the archived keys — the Stellar RPC `getLedgerEntries` response reports entries with
+   `liveUntilLedgerSeq` in the past, and `simulateTransaction` returns the
+   `restorePreamble` (the ledger footprint to restore) for any call that touches them.
+2. Submit a `RestoreFootprint` operation with that footprint, signed by any funded account:
+   ```bash
+   stellar contract restore \
+     --id <CONTRACT_ID> \
+     --source <identity> \
+     --network testnet
+   ```
+   (or build the `RestoreFootprint` op manually from the `restorePreamble` returned by
+   `simulateTransaction`).
+3. Re-run the original call. The entry's TTL is extended again by the contract's
+   `extend_ttl` logic, so no further action is needed.
+
+### Testing TTL behaviour
+
+Tests advance the ledger sequence past the default TTL and assert records remain readable
+after activity:
+
+```rust
+env.ledger().set_sequence_number(1_000_000);
+// ... call an entry point that touches the record ...
+env.ledger().set_sequence_number(1_000_000 + INSTANCE_BUMP_AMOUNT + 1);
+// record is still readable because the entry point extended its TTL
+```
+=======
+
 ## Building
 
 ```bash

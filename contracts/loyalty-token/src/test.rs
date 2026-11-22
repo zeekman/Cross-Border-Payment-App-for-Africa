@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
+    Address, Env, IntoVal,
+};
 
 use crate::{LoyaltyTokenContract, LoyaltyTokenContractClient};
 
@@ -55,6 +58,60 @@ fn test_initialize_zero_max_supply_panics() {
 fn test_initialize_stores_max_supply() {
     let (_, client, _) = setup();
     assert_eq!(client.max_supply(), DEFAULT_MAX_SUPPLY);
+}
+
+#[test]
+fn test_initialize_requires_admin_auth() {
+    let env = Env::default();
+    env.ledger().with_mut(|l| {
+        l.timestamp = BASE_TIMESTAMP;
+        l.sequence_number = BASE_LEDGER;
+    });
+    let contract_id = env.register(LoyaltyTokenContract, ());
+    let client = LoyaltyTokenContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    // Only the attacker authorizes; the admin never signs.
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (admin.clone(), DEFAULT_MAX_SUPPLY).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(client.try_initialize(&admin, &DEFAULT_MAX_SUPPLY).is_err());
+    // Contract must remain uninitialized.
+    assert!(client.try_max_supply().is_err());
+}
+
+#[test]
+fn test_initialize_emits_initialized_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| {
+        l.timestamp = BASE_TIMESTAMP;
+        l.sequence_number = BASE_LEDGER;
+    });
+    let contract_id = env.register(LoyaltyTokenContract, ());
+    let client = LoyaltyTokenContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &DEFAULT_MAX_SUPPLY);
+
+    let events = env.events().all();
+    let found = events.iter().any(|(emitter, topics, _data)| {
+        emitter == contract_id
+            && topics
+                .get(0)
+                .map(|t| {
+                    t == soroban_sdk::Symbol::new(&env, "initialized").into_val(&env)
+                })
+                .unwrap_or(false)
+    });
+    assert!(found, "Initialized event was not emitted");
 }
 
 // ── metadata ──────────────────────────────────────────────────────────────────
@@ -449,6 +506,24 @@ fn test_redeem_can_be_called_multiple_times() {
     client.redeem(&user, &1u32); // 100 → 0
     assert!(client.try_redeem(&user, &1u32).is_err()); // 0 → false
     assert_eq!(client.balance(&user), 0);
+}
+
+// ── TTL / archival resilience ─────────────────────────────────────────────────
+
+#[test]
+fn test_balances_remain_readable_after_ttl_advance() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+    client.mint(&admin, &user, &100);
+
+    // Advance well past the default entry TTL.
+    env.ledger().with_mut(|l| l.sequence_number = BASE_LEDGER + 10_000_000);
+
+    // Activity on the contract must keep state readable.
+    client.mint(&admin, &user, &10);
+    assert_eq!(client.balance(&user), 110);
+    assert_eq!(client.total_supply(), 110);
+    assert_eq!(client.max_supply(), DEFAULT_MAX_SUPPLY);
 }
 
 // ── balance of unknown account ────────────────────────────────────────────────

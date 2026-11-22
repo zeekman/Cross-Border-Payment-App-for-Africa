@@ -52,6 +52,76 @@ fn test_initialize() {
 }
 
 #[test]
+fn test_initialize_emits_initialized_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+    let contract_id = env.register(SavingsVaultContract, ());
+    let client = SavingsVaultContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    client.initialize(&admin, &usdc_id, &1000u32);
+
+    let events = env.events().all();
+    assert!(
+        events.iter().any(|(_, topics, _)| topic_is(&env, &topics, "Initialized")),
+        "Initialized event not emitted"
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_initialize_requires_admin_auth() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_700_000_000);
+    let contract_id = env.register(SavingsVaultContract, ());
+    let client = SavingsVaultContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+    // Only the attacker authorises; the admin key never co-signs, so the
+    // contract must reject the call instead of letting it be front-run.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (&admin, &usdc_id, 1000u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.initialize(&admin, &usdc_id, &1000u32);
+}
+
+#[test]
+fn test_vault_records_survive_ttl_expiry_after_activity() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86_400;
+
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    let id = client.deposit(&user, &amount, &unlock_time);
+
+    // Advance well past the default entry TTL, then touch the contract so it
+    // extends the TTL of the instance and the vault record.
+    env.ledger().set_sequence_number(env.ledger().sequence() + 100_000);
+    assert_eq!(client.get_balance(&user), amount);
+
+    // Records must still be readable and usable after the bump.
+    env.ledger().set_sequence_number(env.ledger().sequence() + 100_000);
+    let vault = client.get_vault(&user, &id);
+    assert_eq!(vault.balance, amount);
+    assert_eq!(client.get_unlock_time(&user, &id), unlock_time);
+
+    env.ledger().set_timestamp(unlock_time + 1);
+    client.withdraw(&user, &id, &amount);
+    assert_eq!(client.get_balance(&user), 0);
+}
+
+#[test]
 #[should_panic(expected = "Contract already initialized")]
 fn test_double_initialize() {
     let (_, client, admin, usdc_id) = setup();

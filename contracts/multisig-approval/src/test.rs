@@ -2,7 +2,7 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events as _, Ledger},
     Address, Env,
 };
 
@@ -37,6 +37,22 @@ fn test_initialize_ok() {
     // propose succeeds — contract is initialized
     let id = propose(&env, &contract_id, &approvers.get(0).unwrap());
     assert_eq!(id, 0);
+}
+
+#[test]
+fn test_initialize_emits_initialized_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let mut approvers = soroban_sdk::Vec::new(&env);
+    for _ in 0..3 {
+        approvers.push_back(Address::generate(&env));
+    }
+    let contract_id = env.register(MultisigContract, ());
+    MultisigContractClient::new(&env, &contract_id).initialize(&admin, &approvers, &2);
+
+    let events = env.events().all();
+    assert!(!events.is_empty(), "initialize must emit an event");
 }
 
 #[test]
@@ -1054,6 +1070,24 @@ fn test_propose_signer_change_is_callable_as_impl_method() {
     // Verify the new signer is now in the approvers list by having them vote.
     let tx_id = propose(&env, &contract_id, &new_signer);
     assert_eq!(client.get_proposal(&tx_id).approvals, 0); // they proposed, not voted yet
+}
+
+// ── TTL: records stay readable after the default TTL elapses ─────────────────
+
+#[test]
+fn test_proposal_readable_after_ttl_advance() {
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let tx_id = propose(&env, &contract_id, &approvers.get(0).unwrap());
+
+    // Advance the ledger sequence well past the default entry TTL.
+    env.ledger().set_sequence_number(1_000_000);
+
+    // Activity on the contract must keep the proposal record readable.
+    client.approve(&approvers.get(0).unwrap(), &tx_id);
+    let p = client.get_proposal(&tx_id);
+    assert_eq!(p.status, TxStatus::Pending);
+    assert_eq!(p.approvals, 1);
 }
 
 #[test]

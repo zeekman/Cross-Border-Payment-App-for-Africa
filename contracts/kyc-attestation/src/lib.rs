@@ -33,6 +33,21 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Sym
 #[cfg(test)]
 mod test;
 
+// ── TTL policy ────────────────────────────────────────────────────────────────
+//
+// Instance storage (Admin) is bumped on every entry point. Persistent
+// attestation records are bumped whenever they are read or written. Amounts are
+// expressed in ledgers (~5s each): ~30 days for the bump, ~7 days threshold.
+
+/// Ledgers to extend instance storage by when it falls below the threshold.
+pub const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
+/// Bump instance storage once its remaining TTL drops below this (~7 days).
+pub const INSTANCE_LIFETIME_THRESHOLD: u32 = 120_960;
+/// Ledgers to extend persistent attestation records by.
+pub const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
+/// Bump persistent records once their remaining TTL drops below this (~7 days).
+pub const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
+
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +108,13 @@ pub struct BatchRevocationCompleted {
     pub timestamp: u64,
 }
 
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct Initialized {
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
 #[contract]
 pub struct KycAttestationContract;
 
@@ -100,13 +122,26 @@ pub struct KycAttestationContract;
 impl KycAttestationContract {
     /// Initialise the contract. Must be called once.
     ///
+    /// Requires the `admin` address to authorise the call so the contract
+    /// cannot be front-run between deploy and initialisation.
+    ///
     /// # Arguments
     /// * `admin` — The AfriPay admin address authorised to attest and revoke.
     pub fn initialize(env: Env, admin: Address) {
-        if env.storage().persistent().has(&DataKey::Admin) {
+        Self::bump_instance(&env);
+        if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
-        env.storage().persistent().set(&DataKey::Admin, &admin);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+
+        env.events().publish(
+            (Symbol::new(&env, "Initialized"),),
+            Initialized {
+                admin,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
     }
 
     /// Record a KYC attestation for `user`.
@@ -131,6 +166,7 @@ impl KycAttestationContract {
         kyc_hash: Bytes,
         expires_at: u64,
     ) {
+        Self::bump_instance(&env);
         admin.require_auth();
         Self::assert_admin(&env, &admin);
 
@@ -149,6 +185,7 @@ impl KycAttestationContract {
         // explicitly revoked first.
         let (revocation_count, last_revoked_at, is_renewal) =
             if let Some(existing) = env.storage().persistent().get::<_, Attestation>(&key) {
+                Self::bump_persistent(&env, &key);
                 let expired = existing.expires_at != 0 && now > existing.expires_at;
                 if existing.revoked_at == 0 && !expired {
                     panic!("user already has an active attestation");
@@ -171,16 +208,16 @@ impl KycAttestationContract {
             last_revoked_at,
         };
         env.storage().persistent().set(&key, &record);
+        Self::bump_persistent(&env, &key);
         // Legacy tier-agnostic mirror: reflects the last written tier only.
         // MUST NOT be used for decisions — see module docs.
-        env.storage()
-            .persistent()
-            .set(&DataKey::Attestation(user.clone()), &record);
+        let legacy_key = DataKey::Attestation(user.clone());
+        env.storage().persistent().set(&legacy_key, &record);
+        Self::bump_persistent(&env, &legacy_key);
         // Mirror under the exact tier being attested so other tiers are untouched.
-        env.storage().persistent().set(
-            &DataKey::AttestationByTier(user.clone(), tier.clone()),
-            &record,
-        );
+        let by_tier_key = DataKey::AttestationByTier(user.clone(), tier.clone());
+        env.storage().persistent().set(&by_tier_key, &record);
+        Self::bump_persistent(&env, &by_tier_key);
 
         if is_renewal {
             env.events()
@@ -200,6 +237,7 @@ impl KycAttestationContract {
     /// * `user`  — Stellar address whose attestation should be revoked.
     /// * `tier`  — KYC tier to revoke.
     pub fn revoke(env: Env, admin: Address, user: Address, tier: KycTier) {
+        Self::bump_instance(&env);
         admin.require_auth();
         Self::assert_admin(&env, &admin);
 
@@ -209,6 +247,7 @@ impl KycAttestationContract {
             .persistent()
             .get(&key)
             .expect("no attestation found for user and tier");
+        Self::bump_persistent(&env, &key);
 
         if record.revoked_at != 0 {
             panic!("attestation already revoked");
@@ -219,16 +258,16 @@ impl KycAttestationContract {
         record.last_revoked_at = now;
         record.revocation_count = record.revocation_count.saturating_add(1);
         env.storage().persistent().set(&key, &record);
+        Self::bump_persistent(&env, &key);
         // Legacy tier-agnostic mirror: reflects the last written tier only.
         // MUST NOT be used for decisions — see module docs.
-        env.storage()
-            .persistent()
-            .set(&DataKey::Attestation(user.clone()), &record);
+        let legacy_key = DataKey::Attestation(user.clone());
+        env.storage().persistent().set(&legacy_key, &record);
+        Self::bump_persistent(&env, &legacy_key);
         // Mirror under the exact tier being revoked so other tiers are untouched.
-        env.storage().persistent().set(
-            &DataKey::AttestationByTier(user.clone(), tier.clone()),
-            &record,
-        );
+        let by_tier_key = DataKey::AttestationByTier(user.clone(), tier.clone());
+        env.storage().persistent().set(&by_tier_key, &record);
+        Self::bump_persistent(&env, &by_tier_key);
 
         env.events().publish((Symbol::new(&env, "KycRevoked"),), (user, tier));
     }
@@ -246,12 +285,11 @@ impl KycAttestationContract {
     /// * `user` — Stellar address to check.
     /// * `tier` — KYC tier to verify.
     pub fn is_valid_and_unexpired(env: Env, user: Address, tier: KycTier) -> bool {
-        match env
-            .storage()
-            .persistent()
-            .get::<_, Attestation>(&DataKey::TieredAttestation(user, tier))
-        {
+        Self::bump_instance(&env);
+        let key = DataKey::TieredAttestation(user, tier);
+        match env.storage().persistent().get::<_, Attestation>(&key) {
             Some(record) => {
+                Self::bump_persistent(&env, &key);
                 if record.revoked_at != 0 {
                     return false;
                 }
@@ -277,12 +315,13 @@ impl KycAttestationContract {
     /// * `user` — Stellar address to check.
     /// * `tier` — KYC tier to check.
     pub fn has_ever_attested(env: Env, user: Address, tier: KycTier) -> bool {
-        match env
-            .storage()
-            .persistent()
-            .get::<_, Attestation>(&DataKey::TieredAttestation(user, tier))
-        {
-            Some(record) => record.revoked_at == 0,
+        Self::bump_instance(&env);
+        let key = DataKey::TieredAttestation(user, tier);
+        match env.storage().persistent().get::<_, Attestation>(&key) {
+            Some(record) => {
+                Self::bump_persistent(&env, &key);
+                record.revoked_at == 0
+            }
             None => false,
         }
     }
@@ -314,6 +353,7 @@ impl KycAttestationContract {
     /// * `admin` — Must match the admin set during `initialize`.
     /// * `users` — List of Stellar addresses to revoke.
     pub fn revoke_batch(env: Env, admin: Address, users: soroban_sdk::Vec<Address>) {
+        Self::bump_instance(&env);
         admin.require_auth();
         Self::assert_admin(&env, &admin);
 
@@ -337,6 +377,7 @@ impl KycAttestationContract {
         admin: Address,
         revocations: soroban_sdk::Vec<(Address, KycTier)>,
     ) {
+        Self::bump_instance(&env);
         admin.require_auth();
         Self::assert_admin(&env, &admin);
 
@@ -380,10 +421,15 @@ impl KycAttestationContract {
     /// * `user` — Stellar address to look up.
     /// * `tier` — KYC tier to look up.
     pub fn get_attestation(env: Env, user: Address, tier: KycTier) -> Attestation {
-        env.storage()
+        Self::bump_instance(&env);
+        let key = DataKey::TieredAttestation(user, tier);
+        let record = env
+            .storage()
             .persistent()
-            .get(&DataKey::TieredAttestation(user, tier))
-            .expect("no attestation found for user and tier")
+            .get(&key)
+            .expect("no attestation found for user and tier");
+        Self::bump_persistent(&env, &key);
+        record
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -395,12 +441,28 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
     fn assert_admin(env: &Env, caller: &Address) {
         let stored: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         if caller != &stored {
             panic!("unauthorized: caller is not admin");
         }
+    }
+
+    /// Extend the instance storage TTL (Admin) on every entry point.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Extend the TTL of a persistent attestation record.
+    fn bump_persistent(env: &Env, key: &DataKey) {
+        env.storage().persistent().extend_ttl(
+            key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
     }
 
     /// Mark the `(user, tier)` attestation revoked, keeping the revocation
@@ -412,6 +474,7 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
             Some(record) => record,
             None => return false,
         };
+        Self::bump_persistent(env, &key);
         if record.revoked_at != 0 {
             return false;
         }
@@ -420,12 +483,13 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
         record.last_revoked_at = now;
         record.revocation_count = record.revocation_count.saturating_add(1);
         env.storage().persistent().set(&key, &record);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Attestation(user.clone()), &record);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AttestationByTier(user.clone(), tier), &record);
+        Self::bump_persistent(env, &key);
+        let legacy_key = DataKey::Attestation(user.clone());
+        env.storage().persistent().set(&legacy_key, &record);
+        Self::bump_persistent(env, &legacy_key);
+        let by_tier_key = DataKey::AttestationByTier(user.clone(), tier);
+        env.storage().persistent().set(&by_tier_key, &record);
+        Self::bump_persistent(env, &by_tier_key);
         true
     }
 }

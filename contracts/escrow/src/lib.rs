@@ -1,5 +1,4 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, IntoVal, Symbol};
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, String, Symbol};
 
 #[cfg(test)]
@@ -106,6 +105,14 @@ pub struct Upgraded {
 #[contracttype]
 pub struct Migrated {
     pub contract_version: u32,
+}
+
+/// Emitted once when the contract is initialized.
+#[derive(Clone)]
+#[contracttype]
+pub struct Initialized {
+    pub admin: Address,
+    pub usdc_address: Address,
 }
 
 #[derive(Clone, Debug)]
@@ -236,6 +243,30 @@ pub enum DataKey {
 const DEFAULT_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
 const DEFAULT_RETENTION_SECS: u64 = 90 * 24 * 60 * 60;
 
+/// TTL policy (SC-189): instance storage is bumped to ~30 days whenever it
+/// drops below ~7 days; persistent records are bumped to ~30 days whenever
+/// they drop below ~7 days. Ledgers are ~5 seconds, so 30 days ≈ 518_400
+/// ledgers and 7 days ≈ 120_960 ledgers.
+const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 120_960;
+const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
+
+/// Extend the instance storage TTL. Called at the top of every entry point so
+/// global config (`Admin`, `UsdcAddress`, counters, fee bps) is never archived.
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+/// Extend the TTL of a persistent record that was just read or written.
+fn bump_persistent(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+}
+
 /// Default minimum hold period before a sender may cancel (24 hours).
 ///
 /// Gives the agent a guaranteed window to pay out fiat off-chain and land
@@ -267,10 +298,11 @@ const MAX_ESCROW_AMOUNT: i128 = 10_000_000_000_000;
 const ZERO_CONTRACT_ADDRESS: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 
 fn require_admin(env: &Env, admin: &Address) {
+    bump_instance(env);
     admin.require_auth();
     let stored_admin: Address = env
         .storage()
-        .persistent()
+        .instance()
         .get(&DataKey::Admin)
         .expect("Contract not initialized");
     if admin != &stored_admin {
@@ -280,7 +312,7 @@ fn require_admin(env: &Env, admin: &Address) {
 
 fn platform_fee_bps(env: &Env) -> u32 {
     env.storage()
-        .persistent()
+        .instance()
         .get(&DataKey::PlatformFeeBps)
         .unwrap_or(DEFAULT_PLATFORM_FEE_BPS)
 }
@@ -295,14 +327,14 @@ fn fee_for_new_escrow(env: &Env, max_fee_bps: u32) -> u32 {
     fee_bps
 fn cancel_hold_period(env: &Env) -> u64 {
     env.storage()
-        .persistent()
+        .instance()
         .get(&DataKey::CancelHoldSecs)
         .unwrap_or(DEFAULT_CANCEL_HOLD_SECS)
 }
 
 fn retention_period(env: &Env) -> u64 {
     env.storage()
-        .persistent()
+        .instance()
         .get(&DataKey::RetentionPeriodSecs)
         .unwrap_or(DEFAULT_RETENTION_SECS)
 }
@@ -313,7 +345,7 @@ fn retention_period(env: &Env) -> u64 {
 fn is_kyc_verified(env: &Env, wallet: &Address) -> bool {
     let kyc_contract: Option<Address> = env
         .storage()
-        .persistent()
+        .instance()
         .get(&DataKey::KycContractAddress);
 
     match kyc_contract {
@@ -357,19 +389,32 @@ impl EscrowContract {
     ///
     /// Re-initialization is permanently blocked by the `has(Admin)` guard.
     /// There is no mechanism to change the admin after initialization.
+    ///
+    /// SC-188: `admin.require_auth()` makes the admin co-sign, so a watcher
+    /// cannot front-run the deploy script's `initialize` call with their own
+    /// admin address.
     pub fn initialize(env: Env, admin: Address, usdc_address: Address) {
-        if env.storage().persistent().has(&DataKey::Admin) {
+        bump_instance(&env);
+        if env.storage().instance().has(&DataKey::Admin) {
             panic!("Contract already initialized");
         }
-        env.storage().persistent().set(&DataKey::Admin, &admin);
-        env.storage().persistent().set(&DataKey::UsdcAddress, &usdc_address);
-        env.storage().persistent().set(&DataKey::EscrowCounter, &0u64);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::UsdcAddress, &usdc_address);
+        env.storage().instance().set(&DataKey::EscrowCounter, &0u64);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::PlatformFeeBps, &DEFAULT_PLATFORM_FEE_BPS);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::ContractVersion, &CONTRACT_VERSION);
+        env.events().publish(
+            (Symbol::new(&env, "Initialized"),),
+            Initialized {
+                admin: admin.clone(),
+                usdc_address: usdc_address.clone(),
+            },
+        );
         env.events().publish(
             (Symbol::new(&env, "EscrowInitialized"),),
             (env.current_contract_address(), admin, usdc_address),
@@ -383,11 +428,12 @@ impl EscrowContract {
     /// applied, the previous bytecode cannot be restored. Always test on testnet
     /// before upgrading mainnet deployments.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        bump_instance(&env);
         admin.require_auth();
 
         let stored_admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("Contract not initialized");
 
@@ -411,7 +457,7 @@ impl EscrowContract {
 
         let current_version: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::ContractVersion)
             .unwrap_or(0);
 
@@ -420,7 +466,7 @@ impl EscrowContract {
         }
 
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::ContractVersion, &CONTRACT_VERSION);
 
         env.events().publish(
@@ -444,6 +490,7 @@ impl EscrowContract {
         amount: i128,
         max_fee_bps: u32,
     ) -> u64 {
+        bump_instance(&env);
         governance::require_not_paused(&env);
         if amount < MIN_ESCROW_AMOUNT {
             panic!("Amount below minimum (100 stroops)");
@@ -468,20 +515,20 @@ impl EscrowContract {
 
         let usdc_address: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
         let current_id: u64 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::EscrowCounter)
             .unwrap_or(0);
         // u64::MAX is 18,446,744,073,709,551,615. At one escrow per second,
         // exhausting the counter would take ~584 billion years.
         let next_id = current_id.checked_add(1).expect("Escrow counter overflow");
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::EscrowCounter, &next_id);
 
         let now = env.ledger().timestamp();
@@ -506,6 +553,7 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(next_id), &escrow);
+        bump_persistent(&env, &DataKey::Escrow(next_id));
 
         token::Client::new(&env, &usdc_address).transfer(
             &sender,
@@ -529,6 +577,7 @@ impl EscrowContract {
     }
 
     pub fn deposit(env: Env, sender: Address, escrow_id: u64, amount: i128) {
+        bump_instance(&env);
         governance::require_not_paused(&env);
         if amount <= 0 {
             panic!("Amount must be positive");
@@ -541,6 +590,7 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         if escrow.status != EscrowStatus::Pending {
             panic!("Escrow is not in pending state");
@@ -552,7 +602,7 @@ impl EscrowContract {
 
         let usdc_address: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
@@ -566,6 +616,7 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         env.events().publish(
             (Symbol::new(&env, "EscrowDeposited"),),
@@ -579,6 +630,7 @@ impl EscrowContract {
     }
 
     pub fn release_escrow(env: Env, agent: Address, escrow_id: u64) {
+        bump_instance(&env);
         agent.require_auth();
 
         let mut escrow: Escrow = env
@@ -586,6 +638,7 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         if agent != escrow.agent {
             panic!("Only the agent can release escrow");
@@ -615,7 +668,7 @@ impl EscrowContract {
 
         let usdc_address: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
@@ -630,12 +683,14 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::AccumulatedFees, &(current_fees + fee_amount));
+        bump_persistent(&env, &DataKey::AccumulatedFees);
 
         escrow.status = EscrowStatus::Released;
         escrow.updated_at = env.ledger().timestamp();
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         // External calls after state is committed (Interactions step).
         token::Client::new(&env, &usdc_address).transfer(
@@ -655,6 +710,7 @@ impl EscrowContract {
     }
 
     pub fn confirm_delivery(env: Env, agent: Address, escrow_id: u64) {
+        bump_instance(&env);
         agent.require_auth();
 
         let mut escrow: Escrow = env
@@ -662,6 +718,7 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         if agent != escrow.agent {
             panic!("Only the agent can confirm delivery");
@@ -678,6 +735,7 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         env.events().publish(
             (Symbol::new(&env, "DeliveryConfirmed"),),
@@ -714,11 +772,12 @@ impl EscrowContract {
     /// # Returns
     /// The dispute ID assigned by the dispute-resolution contract.
     pub fn dispute_escrow(env: Env, caller: Address, escrow_id: u64) -> u64 {
+        bump_instance(&env);
         caller.require_auth();
 
         let dispute_contract: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::DisputeContractAddress)
             .expect("Dispute resolution contract not configured");
 
@@ -727,6 +786,7 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         if caller != escrow.sender && caller != escrow.recipient {
             panic!("Only the sender or recipient can dispute escrow");
@@ -740,7 +800,7 @@ impl EscrowContract {
 
         let usdc_address: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
@@ -750,6 +810,7 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         // Hand the full remaining balance over to the dispute-resolution contract,
         // which holds it in its own custody until the conflict is adjudicated.
@@ -783,6 +844,7 @@ impl EscrowContract {
                 dispute_id,
             },
         );
+        bump_persistent(&env, &DataKey::EscrowDispute(escrow_id));
 
         env.events().publish(
             (Symbol::new(&env, "EscrowDisputed"),),
@@ -806,11 +868,13 @@ impl EscrowContract {
     /// (refund) or `Released` otherwise, so it can later be archived with
     /// `cleanup_escrow` (#1367). Emits `EscrowDisputeClosed`.
     pub fn close_disputed_escrow(env: Env, escrow_id: u64, winner: Address) {
+        bump_instance(&env);
         let record: EscrowDispute = env
             .storage()
             .persistent()
             .get(&DataKey::EscrowDispute(escrow_id))
             .expect("Escrow has no dispute");
+        bump_persistent(&env, &DataKey::EscrowDispute(escrow_id));
         // Only the dispute contract that took custody of the funds may report
         // the outcome; it is authorised as the direct invoker.
         record.dispute_contract.require_auth();
@@ -820,6 +884,7 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
         if escrow.status != EscrowStatus::UnderDispute {
             panic!("Escrow is not under dispute");
         }
@@ -833,10 +898,12 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         env.storage()
             .persistent()
             .set(&DataKey::EscrowDisputeWinner(escrow_id), &winner);
+        bump_persistent(&env, &DataKey::EscrowDisputeWinner(escrow_id));
 
         env.events().publish(
             (Symbol::new(&env, "EscrowDisputeClosed"),),
@@ -851,19 +918,32 @@ impl EscrowContract {
 
     /// Dispute record for an escrow sent to dispute, or `None` if never disputed.
     pub fn get_escrow_dispute(env: Env, escrow_id: u64) -> Option<EscrowDispute> {
-        env.storage()
+        bump_instance(&env);
+        let result = env
+            .storage()
             .persistent()
-            .get(&DataKey::EscrowDispute(escrow_id))
+            .get(&DataKey::EscrowDispute(escrow_id));
+        if result.is_some() {
+            bump_persistent(&env, &DataKey::EscrowDispute(escrow_id));
+        }
+        result
     }
 
     /// Party a disputed escrow's dispute paid, or `None` if not yet settled.
     pub fn get_escrow_dispute_winner(env: Env, escrow_id: u64) -> Option<Address> {
-        env.storage()
+        bump_instance(&env);
+        let result = env
+            .storage()
             .persistent()
-            .get(&DataKey::EscrowDisputeWinner(escrow_id))
+            .get(&DataKey::EscrowDisputeWinner(escrow_id));
+        if result.is_some() {
+            bump_persistent(&env, &DataKey::EscrowDisputeWinner(escrow_id));
+        }
+        result
     }
 
     pub fn partial_release(env: Env, agent: Address, escrow_id: u64, amount: i128) {
+        bump_instance(&env);
         agent.require_auth();
 
         if amount <= 0 {
@@ -875,6 +955,7 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         if agent != escrow.agent {
             panic!("Only the agent can release escrow");
@@ -906,7 +987,7 @@ impl EscrowContract {
 
         let usdc_address: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
@@ -921,6 +1002,7 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::AccumulatedFees, &(current_fees + fee_amount));
+        bump_persistent(&env, &DataKey::AccumulatedFees);
 
         escrow.amount -= amount;
         if escrow.amount == 0 {
@@ -930,6 +1012,7 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         // External calls after state is committed (Interactions step).
         token::Client::new(&env, &usdc_address).transfer(
@@ -955,7 +1038,7 @@ impl EscrowContract {
             panic!("Retention period must be positive");
         }
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::RetentionPeriodSecs, &retention_secs);
     }
 
@@ -969,7 +1052,7 @@ impl EscrowContract {
         }
         let old_hold_secs = cancel_hold_period(&env);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::CancelHoldSecs, &hold_secs);
         env.events().publish(
             (Symbol::new(&env, "CancelHoldPeriodUpdated"),),
@@ -982,17 +1065,20 @@ impl EscrowContract {
 
     /// Returns the current cancel hold period in seconds.
     pub fn get_cancel_hold_period(env: Env) -> u64 {
+        bump_instance(&env);
         cancel_hold_period(&env)
     }
 
     /// Returns the earliest ledger timestamp at which the sender may cancel
     /// `escrow_id`.
     pub fn get_cancellable_at(env: Env, escrow_id: u64) -> u64 {
+        bump_instance(&env);
         let escrow: Escrow = env
             .storage()
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
         escrow.created_at.saturating_add(cancel_hold_period(&env))
     }
 
@@ -1001,11 +1087,13 @@ impl EscrowContract {
     /// permissionless `expire_escrow` pattern to avoid adding a snooping burden
     /// on the admin as escrow volume grows.
     pub fn cleanup_escrow(env: Env, escrow_id: u64) {
+        bump_instance(&env);
         let escrow: Escrow = env
             .storage()
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         if escrow.status != EscrowStatus::Released && escrow.status != EscrowStatus::Cancelled {
             panic!("Only released or cancelled escrows can be cleaned up");
@@ -1038,6 +1126,7 @@ impl EscrowContract {
     /// while the agent has not yet confirmed delivery. The hold period stops a
     /// sender from front-running an agent who is paying out fiat off-chain.
     pub fn cancel_escrow(env: Env, sender: Address, escrow_id: u64) {
+        bump_instance(&env);
         sender.require_auth();
 
         let mut escrow: Escrow = env
@@ -1045,6 +1134,7 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .unwrap_or_else(|| panic!("Escrow {} not found", escrow_id));
+        bump_persistent(&env, &DataKey::Escrow(escrow_id));
 
         if sender != escrow.sender {
             panic!("Only the sender can cancel escrow");

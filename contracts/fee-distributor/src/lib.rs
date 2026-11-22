@@ -51,6 +51,35 @@ mod test;
 // decimal-precision mismatch depositing an amount 10,000× too large).
 const MAX_DEPOSIT_AMOUNT: i128 = 10_000_000_000_000;
 
+// ── TTL policy (SC-189) ───────────────────────────────────────────────────────
+//
+// Instance storage holds small global config (Admin, Paused, SplitBps,
+// TokenList).  Persistent storage holds per-token accumulators and the
+// per-token allow-list flags.  Both are bumped on every entry point so that
+// active contracts never have their state archived.  Values are in ledgers
+// (~5 s each): 30 days ≈ 518_400 ledgers, 7 days ≈ 120_960 ledgers.
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 120_960; // ~7 days
+const INSTANCE_BUMP_AMOUNT: u32 = 518_400; // ~30 days
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960; // ~7 days
+const PERSISTENT_BUMP_AMOUNT: u32 = 518_400; // ~30 days
+
+/// Extend the TTL of the contract's instance storage.  Called at the top of
+/// every public entry point.
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+/// Extend the TTL of a persistent entry that was just read or written.
+fn bump_persistent(env: &Env, key: &DataKey) {
+    env.storage().persistent().extend_ttl(
+        key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
 // SC-014: Removed the duplicate, single-fee-rate design's dead storage keys
@@ -161,27 +190,40 @@ pub struct EvtFeeTokenRemoved {
 fn register_token(env: &Env, token: &Address) {
     let key = DataKey::TokenRegistered(token.clone());
     if env.storage().persistent().has(&key) {
+        bump_persistent(env, &key);
         return;
     }
     env.storage().persistent().set(&key, &true);
+    bump_persistent(env, &key);
 
     // Maintain the enumeration list for `get_all_accumulated_fees`.  This is
     // only touched when a genuinely new token is registered (admin-gated), so
     // it cannot be grown by an unprivileged depositor.
     let mut list: Vec<Address> = env
         .storage()
-        .persistent()
+        .instance()
         .get(&DataKey::TokenList)
         .unwrap_or_else(|| vec![env]);
     list.push_back(token.clone());
-    env.storage().persistent().set(&DataKey::TokenList, &list);
+    env.storage().instance().set(&DataKey::TokenList, &list);
 }
 
 /// SC-132: Returns true when `token` is on the admin-managed allow-list.
 fn is_registered(env: &Env, token: &Address) -> bool {
-    env.storage()
-        .persistent()
-        .has(&DataKey::TokenRegistered(token.clone()))
+    let key = DataKey::TokenRegistered(token.clone());
+    let registered = env.storage().persistent().has(&key);
+    if registered {
+        bump_persistent(env, &key);
+    }
+    registered
+}
+
+/// Emitted once when the contract is initialised.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtInitialized {
+    pub admin: Address,
+    pub split_bps: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -219,17 +261,25 @@ impl FeeDistributorContract {
     /// * `split_bps` — Basis points (0–5000) of each deposit routed to the
     ///                 agent reward pool. E.g. 2000 = 20 %. Must not exceed 5000.
     pub fn initialize(env: Env, admin: Address, split_bps: u32) {
-        if env.storage().persistent().has(&DataKey::Admin) {
+        bump_instance(&env);
+        if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
         if split_bps > 5000 {
             panic!("split_bps exceeds maximum of 5000");
         }
-        env.storage().persistent().set(&DataKey::Admin, &admin);
-        env.storage().persistent().set(&DataKey::SplitBps, &split_bps);
+        // SC-188: the admin must co-sign so the deploy cannot be front-run.
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::SplitBps, &split_bps);
         // Initialise an empty token list.
         let empty: Vec<Address> = vec![&env];
-        env.storage().persistent().set(&DataKey::TokenList, &empty);
+        env.storage().instance().set(&DataKey::TokenList, &empty);
+
+        env.events().publish(
+            (Symbol::new(&env, "Initialized"), admin.clone()),
+            EvtInitialized { admin, split_bps },
+        );
     }
 
     /// SC-132: Add `token` to the admin-managed fee-token allow-list.
@@ -238,9 +288,10 @@ impl FeeDistributorContract {
     /// O(1) in storage reads/writes regardless of how many tokens are already
     /// registered.  Idempotent: re-adding an existing token is a no-op.
     pub fn add_fee_token(env: Env, token: Address) {
+        bump_instance(&env);
         let admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         admin.require_auth();
@@ -260,9 +311,10 @@ impl FeeDistributorContract {
     /// After removal, `deposit_fee` rejects the token.  Existing accumulated
     /// balances remain withdrawable by the admin.  O(1) in storage reads/writes.
     pub fn remove_fee_token(env: Env, token: Address) {
+        bump_instance(&env);
         let admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         admin.require_auth();
@@ -278,6 +330,7 @@ impl FeeDistributorContract {
 
     /// SC-132: Returns true when `token` is on the fee-token allow-list.
     pub fn is_fee_token(env: Env, token: Address) -> bool {
+        bump_instance(&env);
         is_registered(&env, &token)
     }
 
@@ -305,6 +358,7 @@ impl FeeDistributorContract {
         amount: i128,
         source: Option<Address>,
     ) {
+        bump_instance(&env);
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -317,7 +371,7 @@ impl FeeDistributorContract {
             panic!("token not on fee allow-list");
         }
 
-        if env.storage().persistent().get(&DataKey::Paused).unwrap_or(false) {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
             panic!("Contract is paused");
         }
 
@@ -333,7 +387,7 @@ impl FeeDistributorContract {
         // Compute the agent-pool portion and the platform portion.
         let split_bps: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::SplitBps)
             .unwrap_or(0);
 
@@ -350,6 +404,7 @@ impl FeeDistributorContract {
         env.storage()
             .persistent()
             .set(&DataKey::AccumulatedFees(token.clone()), &total);
+        bump_persistent(&env, &DataKey::AccumulatedFees(token.clone()));
 
         // Update per-token agent reward pool.
         let pool: i128 = env
@@ -361,6 +416,7 @@ impl FeeDistributorContract {
         env.storage()
             .persistent()
             .set(&DataKey::AgentPoolFees(token.clone()), &pool);
+        bump_persistent(&env, &DataKey::AgentPoolFees(token.clone()));
 
         env.events().publish(
             (Symbol::new(&env, "FeeDeposited"), depositor.clone()),
@@ -378,13 +434,14 @@ impl FeeDistributorContract {
     ///
     /// Panics while the contract is paused.
     pub fn withdraw_fees(env: Env, admin: Address, token: Address, amount: i128) {
-        if env.storage().persistent().get(&DataKey::Paused).unwrap_or(false) {
+        bump_instance(&env);
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
             panic!("Contract is paused");
         }
 
         let stored_admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
@@ -409,6 +466,7 @@ impl FeeDistributorContract {
         env.storage()
             .persistent()
             .set(&DataKey::AccumulatedFees(token.clone()), &remaining);
+        bump_persistent(&env, &DataKey::AccumulatedFees(token.clone()));
 
         token::Client::new(&env, &token).transfer(
             &env.current_contract_address(),
@@ -448,13 +506,14 @@ impl FeeDistributorContract {
         token: Address,
         recipients: Vec<(Address, i128)>,
     ) {
-        if env.storage().persistent().get(&DataKey::Paused).unwrap_or(false) {
+        bump_instance(&env);
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
             panic!("Contract is paused");
         }
 
         let stored_admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
@@ -503,14 +562,18 @@ impl FeeDistributorContract {
         env.storage()
             .persistent()
             .set(&DataKey::AgentPoolFees(token.clone()), &pool);
+        bump_persistent(&env, &DataKey::AgentPoolFees(token.clone()));
     }
 
     /// Read the accumulated platform fees for a token.
     pub fn get_accumulated_fees(env: Env, token: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::AccumulatedFees(token))
-            .unwrap_or(0)
+        bump_instance(&env);
+        let key = DataKey::AccumulatedFees(token);
+        let amount: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if amount != 0 {
+            bump_persistent(&env, &key);
+        }
+        amount
     }
 
 
@@ -529,10 +592,11 @@ impl FeeDistributorContract {
     /// * `start` — 0-based index into the raw `TokenList`.
     /// * `limit` — Maximum tokens to examine in this call (capped at 100).
     pub fn get_all_accumulated_fees(env: Env, start: u32, limit: u32) -> Vec<(Address, i128)> {
+        bump_instance(&env);
         let cap: u32 = if limit > 100 { 100 } else { limit };
         let list: Vec<Address> = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TokenList)
             .unwrap_or_else(|| vec![&env]);
 
@@ -541,12 +605,10 @@ impl FeeDistributorContract {
         let mut i = start;
         while i < len && (i - start) < cap {
             let token = list.get(i).unwrap();
-            let bal: i128 = env
-                .storage()
-                .persistent()
-                .get(&DataKey::AccumulatedFees(token.clone()))
-                .unwrap_or(0);
+            let key = DataKey::AccumulatedFees(token.clone());
+            let bal: i128 = env.storage().persistent().get(&key).unwrap_or(0);
             if bal > 0 {
+                bump_persistent(&env, &key);
                 result.push_back((token, bal));
             }
             i += 1;
@@ -559,9 +621,10 @@ impl FeeDistributorContract {
     /// complete: keep calling with increasing `start` until
     /// `start >= get_token_list_len()`.
     pub fn get_token_list_len(env: Env) -> u32 {
+        bump_instance(&env);
         let list: Vec<Address> = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TokenList)
             .unwrap_or_else(|| vec![&env]);
         list.len()
@@ -569,17 +632,21 @@ impl FeeDistributorContract {
 
     /// Read the accumulated agent-pool fees for a token.
     pub fn get_agent_pool_fees(env: Env, token: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::AgentPoolFees(token))
-            .unwrap_or(0)
+        bump_instance(&env);
+        let key = DataKey::AgentPoolFees(token);
+        let amount: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if amount != 0 {
+            bump_persistent(&env, &key);
+        }
+        amount
     }
 
     /// Update the agent-pool split ratio. Admin only.
     pub fn update_split(env: Env, admin: Address, new_split_bps: u32) {
+        bump_instance(&env);
         let stored_admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
@@ -597,11 +664,11 @@ mod governance;
 pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
         let old_split_bps: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::SplitBps)
             .unwrap_or(0);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::SplitBps, &new_split_bps);
 
         env.events().publish(
@@ -615,9 +682,10 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
 
     /// Pause the contract. Admin only.
     pub fn pause(env: Env, admin: Address) {
+        bump_instance(&env);
         let stored_admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
@@ -625,7 +693,7 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
         }
         admin.require_auth();
 
-        env.storage().persistent().set(&DataKey::Paused, &true);
+        env.storage().instance().set(&DataKey::Paused, &true);
 
         env.events().publish(
             (Symbol::new(&env, "ContractPaused"), admin.clone()),
@@ -638,9 +706,10 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
 
     /// Unpause the contract. Admin only.
     pub fn unpause(env: Env, admin: Address) {
+        bump_instance(&env);
         let stored_admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
@@ -648,7 +717,7 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
         }
         admin.require_auth();
 
-        env.storage().persistent().set(&DataKey::Paused, &false);
+        env.storage().instance().set(&DataKey::Paused, &false);
 
         env.events().publish(
             (Symbol::new(&env, "ContractUnpaused"), admin.clone()),
@@ -661,6 +730,7 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
 
     /// Whether the contract is currently paused.
     pub fn is_paused(env: Env) -> bool {
-        env.storage().persistent().get(&DataKey::Paused).unwrap_or(false)
+        bump_instance(&env);
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
     }
 }

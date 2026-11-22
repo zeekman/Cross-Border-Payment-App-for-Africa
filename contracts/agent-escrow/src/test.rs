@@ -85,6 +85,44 @@ fn test_double_initialize_panics() {
     client.initialize(&admin, &usdc_id, &(48 * 60 * 60));
 }
 
+#[test]
+fn test_initialize_requires_admin_auth() {
+    // SC-188: a caller that is not the admin must not be able to initialize.
+    let env = Env::default();
+    let contract_id = env.register(AgentEscrowContract, ());
+    let client = AgentEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract(admin.clone());
+
+    // Only the attacker authorises; the admin never signs.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (&admin, &usdc_id, &(48 * 60 * 60u64)).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert!(client.try_initialize(&admin, &usdc_id, &(48 * 60 * 60)).is_err());
+}
+
+#[test]
+fn test_initialize_emits_initialized_event() {
+    let (env, _, admin, usdc_id) = setup();
+    let all = all_events(&env);
+    let evt = all.iter().find(|(_, topics, _)| {
+        topics.iter().any(|t| topic_is(&env, &t, "Initialized"))
+    });
+    assert!(evt.is_some(), "Initialized event must be emitted");
+    let (_, _, data) = evt.unwrap();
+    let payload: crate::EvtInitialized = soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(payload.admin, admin);
+    assert_eq!(payload.usdc, usdc_id);
+}
+
 // ── agent whitelist (issue #762) ──────────────────────────────────────────────
 
 #[test]
@@ -1253,6 +1291,94 @@ fn all_events(
 fn val_eq(env: &soroban_sdk::Env, a: &soroban_sdk::Val, b: &soroban_sdk::Val) -> bool {
     use soroban_sdk::{xdr::ScVal, TryFromVal};
     ScVal::try_from_val(env, a).ok() == ScVal::try_from_val(env, b).ok()
+}
+
+// ── governance: Upgraded / Migrated events (SC-186) ──────────────────────────
+
+#[test]
+fn test_upgraded_event_carries_only_new_wasm_hash() {
+    let (env, client, admin, _) = setup();
+    let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+
+    client.propose_upgrade(&admin, &new_wasm_hash);
+    client.execute_upgrade(&admin);
+
+    let all = all_events(&env);
+    let evt = all.iter().find(|(_, topics, _)| {
+        topics.iter().any(|t| topic_is(&env, &t, "Upgraded"))
+    });
+    assert!(evt.is_some(), "Upgraded event must be emitted");
+    let (_, _, data) = evt.unwrap();
+
+    // The payload is exactly the new WASM hash — no version number is paired
+    // with it (the old binary's CONTRACT_VERSION would be wrong).
+    let payload: soroban_sdk::BytesN<32> = soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(payload, new_wasm_hash);
+}
+
+#[test]
+fn test_migrated_event_reports_from_and_to_version() {
+    let (env, client, admin, _) = setup();
+    let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[3u8; 32]);
+    client.propose_upgrade(&admin, &new_wasm_hash);
+    client.execute_upgrade(&admin);
+
+    client.migrate(&admin);
+
+    let all = all_events(&env);
+    let evt = all.iter().find(|(_, topics, _)| {
+        topics.iter().any(|t| topic_is(&env, &t, "Migrated"))
+    });
+    assert!(evt.is_some(), "Migrated event must be emitted");
+    let (_, _, data) = evt.unwrap();
+    let payload: crate::EvtMigrated = soroban_sdk::FromVal::from_val(&env, &data);
+    assert!(payload.from_version < payload.to_version);
+    assert_eq!(payload.to_version, crate::CONTRACT_VERSION);
+}
+
+#[test]
+fn test_migrate_v1_to_v3_runs_each_step_once_and_is_idempotent() {
+    let (env, client, admin, _) = setup();
+    let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[9u8; 32]);
+    client.propose_upgrade(&admin, &new_wasm_hash);
+    client.execute_upgrade(&admin);
+
+    // Simulate a contract still on v1 while the binary is v3.
+    client.set_contract_version_for_test(&1);
+
+    client.migrate(&admin);
+
+    // Each intermediate step ran exactly once: v1 -> v2 -> v3.
+    assert_eq!(client.get_contract_version(), crate::CONTRACT_VERSION);
+    assert_eq!(client.get_migration_step_count(&2), 1);
+    assert_eq!(client.get_migration_step_count(&3), 1);
+
+    // Running migrate again is a no-op and emits nothing new.
+    let before = env.events().all().len();
+    client.migrate(&admin);
+    assert_eq!(client.get_contract_version(), crate::CONTRACT_VERSION);
+    assert_eq!(client.get_migration_step_count(&2), 1);
+    assert_eq!(client.get_migration_step_count(&3), 1);
+    assert_eq!(env.events().all().len(), before);
+}
+
+// ── TTL / archival (SC-189) ──────────────────────────────────────────────────
+
+#[test]
+fn test_escrow_remains_readable_after_ttl_advance() {
+    let (env, client, admin, usdc_id) = setup();
+    let amount = 1_000_0000000i128;
+    let (_, _, agent, id) = make_escrow(&env, &client, &usdc_id, &admin, amount, 250);
+
+    // Advance well past the default entry TTL.
+    env.ledger().set_sequence_number(env.ledger().sequence() + 100_000);
+
+    // Activity bumps the TTLs; the record must still be readable.
+    assert_eq!(client.get_escrow(&id).amount, amount);
+    client.confirm_payout(&id);
+    assert_eq!(client.get_escrow(&id).status, EscrowStatus::Completed);
+    let _ = agent;
+}
 // ── Removed agents cannot claim; admin reassignment ──────────────────────────
 
 #[test]
