@@ -146,6 +146,8 @@ pub enum DataKey {
     EmergencyActivatedAt,
     MinLockSecs,
     MaxLockSecs,
+    /// Pending admin rotation: (new_admin, eta)
+    PendingAdmin,
 }
 
 const SECONDS_PER_YEAR: u64 = 31_536_000;
@@ -170,6 +172,26 @@ impl SavingsVaultContract {
         env.storage().persistent().set(&DataKey::InterestRateBps, &0u32);
         env.storage().persistent().set(&DataKey::MinLockSecs, &86400u64);
         env.storage().persistent().set(&DataKey::MaxLockSecs, &31536000u64);
+    }
+
+    /// Propose a new admin. The current admin must authorise this; the
+    /// rotation only completes once the new admin accepts after the
+    /// governance timelock (see `governance::ADMIN_ROTATION_DELAY_SECS`).
+    /// The admin should be a multisig account or the `multisig-approval`
+    /// contract so a single lost key cannot lock the vault forever.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        governance::propose_admin(&env, &DataKey::Admin, &DataKey::PendingAdmin, admin, new_admin);
+    }
+
+    /// Accept a pending admin rotation. Requires the new admin's signature
+    /// and that the governance timelock has elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        governance::accept_admin(&env, &DataKey::Admin, &DataKey::PendingAdmin, new_admin);
+    }
+
+    /// Cancel a pending admin rotation. Only the current admin may call this.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        governance::cancel_admin_proposal(&env, &DataKey::Admin, &DataKey::PendingAdmin, admin);
     }
 
     /// Set the annual interest rate. Only admin may call this.
@@ -782,10 +804,6 @@ impl SavingsVaultContract {
             .unwrap_or(0u32)
     }
 
-    /// Deposit tokens into the vault. Accumulates on top of any existing balance.
-    /// Extends the unlock time only if the new unlock_time is later than the current one.
-    pub fn deposit(env: Env, user: Address, amount: i128, unlock_time: u64) {
-        governance::require_not_paused(&env);
     /// Open a new, independent savings vault for `user` holding `amount` until
     /// `unlock_time`. Returns the new vault's id.
     ///
@@ -793,6 +811,7 @@ impl SavingsVaultContract {
     /// penalty exposure) of funds the user already has in other vaults.
     pub fn deposit(env: Env, user: Address, amount: i128, unlock_time: u64) -> u32 {
         user.require_auth();
+        governance::require_not_paused(&env);
         Self::assert_accepting_deposits(&env);
         if amount <= 0 {
             panic!("Amount must be positive");
@@ -879,6 +898,7 @@ impl SavingsVaultContract {
     /// penalty applies only if *this* vault is still locked.
     pub fn withdraw(env: Env, user: Address, vault_id: u32, amount: i128) {
         user.require_auth();
+        governance::require_not_paused(&env);
         if amount <= 0 {
             panic!("Amount must be positive");
         }

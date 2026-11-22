@@ -582,6 +582,110 @@ fn test_update_admin_same_address_panics() {
     client.update_admin(&admin);
 }
 
+// ── two-step admin rotation (SC-190) ──────────────────────────────────────────
+
+/// Delay between `propose_admin` and `accept_admin` (24 h).
+const ADMIN_ROTATION_DELAY: u64 = 24 * 60 * 60;
+
+#[test]
+fn test_propose_admin_stores_pending_and_emits_event() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+
+    let pending = client.get_pending_admin().expect("pending admin must be stored");
+    assert_eq!(pending.new_admin, new_admin);
+    assert_eq!(pending.eta, env.ledger().timestamp() + ADMIN_ROTATION_DELAY);
+
+    let all = all_events(&env);
+    let event = find_event(&env, &all, "AdminProposed");
+    assert!(event.is_some(), "AdminProposed event not emitted");
+    let (_, _, data) = event.unwrap();
+    let payload = crate::EvtAdminProposed::from_val(&env, &data);
+    assert_eq!(payload.admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+    assert_eq!(payload.eta, pending.eta);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation delay has not elapsed")]
+fn test_accept_admin_before_eta_panics() {
+    let (env, client, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY - 1);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_accept_admin_without_new_admin_auth_panics() {
+    let (env, client, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY);
+    // Without the new admin's signature the rotation must be rejected.
+    env.set_auths(&[]);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+fn test_accept_admin_after_eta_succeeds_and_emits_event() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY);
+    client.accept_admin(&new_admin);
+
+    assert!(client.get_pending_admin().is_none(), "pending admin must be cleared");
+
+    let all = all_events(&env);
+    let event = find_event(&env, &all, "AdminChanged");
+    assert!(event.is_some(), "AdminChanged event not emitted");
+    let (_, _, data) = event.unwrap();
+    let payload = crate::EvtAdminChanged::from_val(&env, &data);
+    assert_eq!(payload.old_admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_old_admin_loses_pause_privileges_after_rotation() {
+    let (env, client, _, _) = setup();
+    let old_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.update_admin(&new_admin);
+    // The old admin must no longer be able to pause the contract.
+    client.pause(&old_admin);
+}
+
+#[test]
+fn test_new_admin_can_pause_after_rotation() {
+    let (env, client, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.update_admin(&new_admin);
+    client.pause(&new_admin);
+    assert!(client.is_paused());
+}
+
+#[test]
+fn test_cancel_admin_proposal_clears_pending_and_emits_event() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    client.cancel_admin_proposal();
+
+    assert!(client.get_pending_admin().is_none(), "pending admin must be cleared");
+
+    let all = all_events(&env);
+    let event = find_event(&env, &all, "AdminCancelled");
+    assert!(event.is_some(), "AdminCancelled event not emitted");
+    let (_, _, data) = event.unwrap();
+    let payload = crate::EvtAdminCancelled::from_val(&env, &data);
+    assert_eq!(payload.admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+}
+
 // ── admin_release ──────────────────────────────────────────────────────────────
 
 #[test]

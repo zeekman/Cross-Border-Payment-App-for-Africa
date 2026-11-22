@@ -486,3 +486,163 @@ fn test_expired_attestation_in_batch_context() {
     // Attestation should now be considered expired
     assert!(!client.is_verified(&user, &KycTier::Basic));
 }
+
+// ── admin rotation (SC-120 / SC-184) ──────────────────────────────────────────
+
+/// The rotation delay used by the contract (24 h).
+const ADMIN_ROTATION_DELAY: u64 = 24 * 60 * 60;
+
+fn advance(env: &Env, seconds: u64) {
+    env.ledger().with_mut(|li| li.timestamp += seconds);
+}
+
+#[test]
+fn test_propose_admin_stores_pending_admin() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    let pending = client.get_pending_admin().expect("pending admin should be set");
+    assert_eq!(pending.new_admin, new_admin);
+    assert_eq!(pending.eta, env.ledger().timestamp() + ADMIN_ROTATION_DELAY);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_propose_admin_non_admin_panics() {
+    let (env, client, _) = setup();
+    let impostor = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&impostor, &new_admin);
+}
+
+#[test]
+#[should_panic(expected = "new admin must differ from current admin")]
+fn test_propose_admin_same_address_panics() {
+    let (_, client, admin) = setup();
+    client.propose_admin(&admin, &admin);
+}
+
+#[test]
+fn test_accept_admin_before_eta_panics() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+
+    // One second before the ETA.
+    advance(&env, ADMIN_ROTATION_DELAY - 1);
+    let result = client.try_accept_admin(&new_admin);
+    assert!(result.is_err(), "rotation must not complete before the delay");
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_accept_admin_after_eta_succeeds() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+
+    advance(&env, ADMIN_ROTATION_DELAY);
+    client.accept_admin(&new_admin);
+
+    assert_eq!(client.get_admin(), new_admin);
+    assert!(client.get_pending_admin().is_none());
+}
+
+#[test]
+fn test_accept_admin_requires_new_admin_auth() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    advance(&env, ADMIN_ROTATION_DELAY);
+
+    // Only the new admin's auth is mocked; a third party must not be able to
+    // complete the rotation.
+    let impostor = Address::generate(&env);
+    let result = client.try_accept_admin(&impostor);
+    assert!(result.is_err(), "accept must require the new admin's signature");
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_accept_admin_without_proposal_panics() {
+    let (env, client, _) = setup();
+    let new_admin = Address::generate(&env);
+    let result = client.try_accept_admin(&new_admin);
+    assert!(result.is_err(), "accept without a proposal must fail");
+}
+
+#[test]
+fn test_cancel_admin_proposal_clears_pending() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+
+    client.cancel_admin_proposal(&admin);
+    assert!(client.get_pending_admin().is_none());
+
+    // After cancellation the new admin can no longer accept.
+    advance(&env, ADMIN_ROTATION_DELAY);
+    let result = client.try_accept_admin(&new_admin);
+    assert!(result.is_err());
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_cancel_admin_proposal_non_admin_panics() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&impostor);
+}
+
+#[test]
+fn test_old_admin_loses_attest_and_revoke_privileges() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    advance(&env, ADMIN_ROTATION_DELAY);
+    client.accept_admin(&new_admin);
+
+    // Old admin can no longer attest.
+    let attest_result = client.try_attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+    assert!(attest_result.is_err(), "old admin must lose attest privileges");
+
+    // New admin can attest.
+    client.attest(&new_admin, &user, &KycTier::Basic, &hash(&env), &0);
+    assert!(client.is_verified(&user, &KycTier::Basic));
+
+    // Old admin can no longer revoke.
+    let revoke_result = client.try_revoke(&admin, &user, &KycTier::Basic);
+    assert!(revoke_result.is_err(), "old admin must lose revoke privileges");
+
+    // New admin can revoke.
+    client.revoke(&new_admin, &user, &KycTier::Basic);
+    assert!(!client.is_verified(&user, &KycTier::Basic));
+}
+
+#[test]
+fn test_new_admin_can_propose_next_rotation() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    let next_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    advance(&env, ADMIN_ROTATION_DELAY);
+    client.accept_admin(&new_admin);
+
+    // The old admin cannot start another rotation.
+    let old_result = client.try_propose_admin(&admin, &next_admin);
+    assert!(old_result.is_err());
+
+    // The new admin can.
+    client.propose_admin(&new_admin, &next_admin);
+    advance(&env, ADMIN_ROTATION_DELAY);
+    client.accept_admin(&next_admin);
+    assert_eq!(client.get_admin(), next_admin);
+}

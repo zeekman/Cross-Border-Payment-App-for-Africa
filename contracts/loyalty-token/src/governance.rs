@@ -13,6 +13,9 @@ pub const CONTRACT_VERSION: u32 = 1;
 /// Minimum delay between proposing and executing an upgrade (48 hours).
 pub const UPGRADE_TIMELOCK_SECS: u64 = 48 * 60 * 60;
 
+/// Minimum delay between proposing a new admin and accepting it (24 hours).
+pub const ADMIN_ROTATION_DELAY_SECS: u64 = 24 * 60 * 60;
+
 /// Encodes identically to a `DataKey` variant of the same name, so existing
 /// `ContractVersion` entries remain readable.
 #[contracttype]
@@ -20,12 +23,21 @@ pub enum GovKey {
     ContractVersion,
     PendingUpgrade,
     Paused,
+    PendingAdmin,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub struct PendingUpgrade {
     pub new_wasm_hash: BytesN<32>,
+    pub eta: u64,
+}
+
+/// A proposed admin rotation, executable once `eta` has passed.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct PendingAdmin {
+    pub new_admin: Address,
     pub eta: u64,
 }
 
@@ -149,5 +161,66 @@ impl LoyaltyTokenContract {
 
     pub fn is_paused(env: Env) -> bool {
         paused(&env)
+    }
+
+    /// Start a two-step admin rotation. The new admin must call
+    /// `accept_admin` after `ADMIN_ROTATION_DELAY_SECS` has elapsed.
+    ///
+    /// Recommended: the admin should be a multisig account (or the
+    /// `multisig-approval` contract) so a single lost or compromised key
+    /// cannot take over governance.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> u64 {
+        require_gov_admin(&env, &admin, "Only admin can perform this action");
+        let eta = env.ledger().timestamp() + ADMIN_ROTATION_DELAY_SECS;
+        let pending = PendingAdmin { new_admin: new_admin.clone(), eta };
+        env.storage().persistent().set(&GovKey::PendingAdmin, &pending);
+        env.events()
+            .publish((Symbol::new(&env, "AdminProposed"),), (new_admin, eta));
+        eta
+    }
+
+    /// Complete a pending admin rotation. Requires the new admin's signature
+    /// and that the delay has elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        let pending: PendingAdmin = env
+            .storage()
+            .persistent()
+            .get(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        if pending.new_admin != new_admin {
+            panic!("Only the proposed admin can accept");
+        }
+        if env.ledger().timestamp() < pending.eta {
+            panic!("Admin rotation delay has not expired");
+        }
+        let old_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminChanged"),),
+            (old_admin, new_admin),
+        );
+    }
+
+    /// Cancel a pending admin rotation. Only the current admin may cancel.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        require_gov_admin(&env, &admin, "Only admin can perform this action");
+        let pending: PendingAdmin = env
+            .storage()
+            .persistent()
+            .get(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.events()
+            .publish((Symbol::new(&env, "AdminProposalCancelled"),), pending.new_admin);
+    }
+
+    pub fn get_pending_admin(env: Env) -> Option<PendingAdmin> {
+        env.storage().persistent().get(&GovKey::PendingAdmin)
     }
 }

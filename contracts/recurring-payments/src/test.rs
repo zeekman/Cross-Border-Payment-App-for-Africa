@@ -1067,6 +1067,190 @@ fn all_events(
         out.push_back((contract, topics, Val::try_from_val(env, &body.data).unwrap()));
     }
     out
+}
+
+// ── Admin rotation (SC-190) ──────────────────────────────────────────────────
+
+#[test]
+fn test_propose_admin_stores_pending_admin() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    let pending = client.get_pending_admin().expect("pending admin must be stored");
+    assert_eq!(pending.new_admin, new_admin);
+    assert_eq!(pending.proposed_at, env.ledger().timestamp());
+    assert_eq!(pending.eta, env.ledger().timestamp() + ADMIN_ROTATION_DELAY);
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_propose_admin_emits_event() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    assert_eq!(count_events(&env, &contract_id, "AdminProposed"), 1);
+}
+
+#[test]
+#[should_panic(expected = "only the admin can propose a new admin")]
+fn test_propose_admin_by_non_admin_panics() {
+    let (env, contract_id, _, _, _, executor, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&executor, &new_admin);
+}
+
+#[test]
+#[should_panic(expected = "new admin must differ from current admin")]
+fn test_propose_admin_same_as_current_panics() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    client.propose_admin(&admin, &admin);
+}
+
+#[test]
+fn test_accept_admin_after_delay_rotates_admin() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    advance_time(&env, ADMIN_ROTATION_DELAY);
+    client.accept_admin(&new_admin);
+
+    assert_eq!(client.get_admin(), new_admin);
+    assert!(client.get_pending_admin().is_none());
+    assert_eq!(count_events(&env, &contract_id, "AdminChanged"), 1);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation delay has not elapsed")]
+fn test_accept_admin_before_delay_panics() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    advance_time(&env, ADMIN_ROTATION_DELAY - 1);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "no pending admin proposal")]
+fn test_accept_admin_without_proposal_panics() {
+    let (env, contract_id, _, _, _, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "only the proposed admin can accept")]
+fn test_accept_admin_by_wrong_address_panics() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    advance_time(&env, ADMIN_ROTATION_DELAY);
+    client.accept_admin(&impostor);
+}
+
+#[test]
+fn test_accept_admin_requires_new_admin_auth() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    advance_time(&env, ADMIN_ROTATION_DELAY);
+
+    // Only the new admin's signature is mocked; the old admin must not be
+    // able to complete the rotation on their own.
+    env.mock_auths(&[]);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.accept_admin(&new_admin);
+    }));
+    assert!(result.is_err(), "accept_admin must require the new admin's auth");
+}
+
+#[test]
+fn test_cancel_admin_proposal_clears_pending() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+
+    assert!(client.get_pending_admin().is_none());
+    assert_eq!(client.get_admin(), admin);
+    assert_eq!(count_events(&env, &contract_id, "AdminProposalCancelled"), 1);
+}
+
+#[test]
+#[should_panic(expected = "no pending admin proposal")]
+fn test_cancel_admin_proposal_without_proposal_panics() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    client.cancel_admin_proposal(&admin);
+}
+
+#[test]
+#[should_panic(expected = "only the admin can cancel")]
+fn test_cancel_admin_proposal_by_non_admin_panics() {
+    let (env, contract_id, _, _, _, executor, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&executor);
+}
+
+#[test]
+fn test_old_admin_loses_privileges_after_rotation() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    advance_time(&env, ADMIN_ROTATION_DELAY);
+    client.accept_admin(&new_admin);
+    assert_eq!(client.get_admin(), new_admin);
+
+    // The old admin can no longer pause the contract.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.pause(&admin);
+    }));
+    assert!(result.is_err(), "old admin must not be able to pause");
+
+    // The new admin can.
+    client.pause(&new_admin);
+    assert!(client.is_paused());
+}
+
+#[test]
+fn test_new_admin_can_propose_next_rotation() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    let third_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    advance_time(&env, ADMIN_ROTATION_DELAY);
+    client.accept_admin(&new_admin);
+
+    client.propose_admin(&new_admin, &third_admin);
+    advance_time(&env, ADMIN_ROTATION_DELAY);
+    client.accept_admin(&third_admin);
+    assert_eq!(client.get_admin(), third_admin);
+}
+
 // ── Due-date anchoring: late executions must not drift the schedule ──────────
 
 #[test]

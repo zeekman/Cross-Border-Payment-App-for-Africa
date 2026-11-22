@@ -1,9 +1,17 @@
-//! Upgrade governance (SC-172 / SC-173 / SC-174).
+//! Upgrade governance (SC-172 / SC-173 / SC-174 / SC-190).
 //!
 //! WASM upgrades are timelocked on-chain: the admin proposes a new WASM hash,
 //! which can only be executed after `UPGRADE_TIMELOCK_SECS`, giving users an
 //! exit window. Proposals can be cancelled. `migrate` bumps the stored
 //! contract version after an upgrade.
+//!
+//! Admin rotation is two-step and timelocked: the current admin proposes a new
+//! admin, and the new admin must accept after `ADMIN_ROTATION_DELAY`. This
+//! prevents a lost or compromised admin key from being permanent.
+//!
+//! **Recommendation:** the admin should be a multisig account or the
+//! `multisig-approval` contract, so no single key can rotate or use admin
+//! privileges unilaterally.
 use crate::{DataKey, AgentEscrowContract};
 use soroban_sdk::{contractimpl, contracttype, Address, BytesN, Env, Symbol};
 
@@ -13,6 +21,9 @@ pub const CONTRACT_VERSION: u32 = 1;
 /// Minimum delay between proposing and executing an upgrade (48 hours).
 pub const UPGRADE_TIMELOCK_SECS: u64 = 48 * 60 * 60;
 
+/// Minimum delay between proposing and accepting an admin rotation (24 hours).
+pub const ADMIN_ROTATION_DELAY: u64 = 24 * 60 * 60;
+
 /// Encodes identically to a `DataKey` variant of the same name, so existing
 /// `ContractVersion` entries remain readable.
 #[contracttype]
@@ -20,6 +31,7 @@ pub enum GovKey {
     ContractVersion,
     PendingUpgrade,
     Paused,
+    PendingAdmin,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +39,35 @@ pub enum GovKey {
 pub struct PendingUpgrade {
     pub new_wasm_hash: BytesN<32>,
     pub eta: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct PendingAdmin {
+    pub new_admin: Address,
+    pub eta: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct AdminProposed {
+    pub admin: Address,
+    pub new_admin: Address,
+    pub eta: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct AdminChanged {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct AdminCancelled {
+    pub admin: Address,
+    pub new_admin: Address,
 }
 
 pub(crate) fn require_gov_admin(env: &Env, admin: &Address, msg: &str) {
@@ -149,5 +190,67 @@ impl AgentEscrowContract {
 
     pub fn is_paused(env: Env) -> bool {
         paused(&env)
+    }
+
+    /// Propose a new admin. The rotation only completes once the new admin
+    /// accepts after `ADMIN_ROTATION_DELAY`. Returns the earliest acceptance
+    /// timestamp (eta).
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> u64 {
+        require_gov_admin(&env, &admin, "Only admin can perform this action");
+        let eta = env.ledger().timestamp() + ADMIN_ROTATION_DELAY;
+        let pending = PendingAdmin { new_admin: new_admin.clone(), eta };
+        env.storage().persistent().set(&GovKey::PendingAdmin, &pending);
+        env.events().publish(
+            (Symbol::new(&env, "AdminProposed"),),
+            AdminProposed { admin, new_admin, eta },
+        );
+        eta
+    }
+
+    /// Accept a pending admin rotation. Requires the new admin's signature and
+    /// that the rotation delay has elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        let pending: PendingAdmin = env
+            .storage()
+            .persistent()
+            .get(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        if pending.new_admin != new_admin {
+            panic!("Only the proposed admin can accept");
+        }
+        if env.ledger().timestamp() < pending.eta {
+            panic!("Admin rotation delay has not expired");
+        }
+        let old_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminChanged"),),
+            AdminChanged { old_admin, new_admin },
+        );
+    }
+
+    /// Cancel a pending admin rotation.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        require_gov_admin(&env, &admin, "Only admin can perform this action");
+        let pending: PendingAdmin = env
+            .storage()
+            .persistent()
+            .get(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminCancelled"),),
+            AdminCancelled { admin, new_admin: pending.new_admin },
+        );
+    }
+
+    pub fn get_pending_admin(env: Env) -> Option<PendingAdmin> {
+        env.storage().persistent().get(&GovKey::PendingAdmin)
     }
 }

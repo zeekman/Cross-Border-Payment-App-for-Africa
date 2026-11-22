@@ -48,6 +48,7 @@ pub enum KycTier {
 #[contracttype]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
     TieredAttestation(Address, KycTier),
     Attestation(Address),
     AttestationByTier(Address, KycTier),
@@ -107,6 +108,89 @@ impl KycAttestationContract {
             panic!("already initialized");
         }
         env.storage().persistent().set(&DataKey::Admin, &admin);
+    }
+
+    /// Propose a new admin. The first step of two-step admin rotation.
+    ///
+    /// The current admin must authorise this call. The proposal is stored with
+    /// an ETA (`now + ADMIN_ROTATION_DELAY_SECS`) and the new admin must wait
+    /// until the ETA before calling [`accept_admin`]. Emits `AdminProposed`.
+    ///
+    /// It is strongly recommended that the admin be a multisig account or the
+    /// `multisig-approval` contract so a single lost or compromised key cannot
+    /// take over governance.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        let eta = env
+            .ledger()
+            .timestamp()
+            .saturating_add(governance::ADMIN_ROTATION_DELAY_SECS);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &(new_admin.clone(), eta));
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminProposed"),),
+            (admin, new_admin, eta),
+        );
+    }
+
+    /// Accept a pending admin proposal. The second step of two-step rotation.
+    ///
+    /// Requires `new_admin.require_auth()` and that the rotation delay has
+    /// elapsed. Swaps `Admin` for `new_admin`, clears the pending proposal and
+    /// emits `AdminChanged { old, new }`. The previous admin immediately loses
+    /// all privileges.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+
+        let (pending, eta): (Address, u64) = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .expect("no pending admin proposal");
+        if pending != new_admin {
+            panic!("unauthorized: caller is not the pending admin");
+        }
+        if env.ledger().timestamp() < eta {
+            panic!("admin rotation delay has not elapsed");
+        }
+
+        let old: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+
+        env.events()
+            .publish((Symbol::new(&env, "AdminChanged"),), (old, new_admin));
+    }
+
+    /// Cancel a pending admin proposal. Only the current admin may call this.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((Symbol::new(&env, "AdminProposalCancelled"),), (admin,));
+    }
+
+    /// Return the current admin address.
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized")
+    }
+
+    /// Return the pending admin proposal as `(new_admin, eta)`, if any.
+    pub fn get_pending_admin(env: Env) -> Option<(Address, u64)> {
+        env.storage().persistent().get(&DataKey::PendingAdmin)
     }
 
     /// Record a KYC attestation for `user`.

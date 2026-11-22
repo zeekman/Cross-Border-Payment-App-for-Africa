@@ -20,6 +20,61 @@ Each contract is an independent crate — see its `Cargo.toml` and `src/lib.rs` 
 
 **Deployment:** [deploy.sh](./deploy.sh)
 
+## Admin rotation
+
+All nine contracts above support a **two-step admin rotation** (SC-120 / SC-190). The flow is:
+
+1. `propose_admin(admin, new_admin)` — the current admin authorizes the call. The proposed admin is
+   stored as `PendingAdmin` together with an ETA of **24 hours** from the current ledger timestamp.
+   Emits `AdminProposed { admin, new_admin, eta }`.
+2. `accept_admin(new_admin)` — the *new* admin must sign (`new_admin.require_auth()`) and the ledger
+   timestamp must be `>= eta`. On success `Admin` is swapped to `new_admin`, `PendingAdmin` is
+   cleared, and `AdminChanged { old, new }` is emitted.
+3. `cancel_admin_proposal(admin)` — the current admin can cancel a pending proposal at any time.
+   Emits `AdminCancelled { admin, new_admin }`.
+
+Notes:
+
+- Rotation cannot complete without the new admin's signature, and cannot complete before the 24 h
+  delay elapses. Both are enforced on-chain and covered by tests.
+- Once `accept_admin` succeeds, the old admin loses **all** privileges immediately (e.g. `pause`,
+  `unpause`, fee withdrawal, KYC revocation, upgrades). Calls made with the old key fail auth.
+- **Recommendation:** the admin should be a multisig account, or the `multisig-approval` contract
+  itself, so that a single lost or compromised key cannot take over or lock out governance.
+
+## Events
+
+All contracts publish events with stable topics so the backend indexer
+(`backend/src/jobs/contractEventIndexer.js`) can build history and trigger notifications.
+
+### Admin rotation events
+
+| Topic | Payload |
+|---|---|
+| `("admin_proposed",)` | `{ admin, new_admin, eta }` |
+| `("admin_changed",)` | `{ old, new }` |
+| `("admin_cancelled",)` | `{ admin, new_admin }` |
+
+### `multisig-approval` events
+
+Every state-changing function in `multisig-approval` emits exactly one event. Topics are
+`(symbol, id)` where `id` is the transaction/proposal id (or signer address for weight changes).
+
+| Topic | Payload |
+|---|---|
+| `("ms_proposed", tx_id)` | `{ proposer, amount, recipient, description, expires_at }` |
+| `("ms_approved", tx_id)` | `{ approver, weight, total_approvals, quorum }` |
+| `("ms_rejected", tx_id)` | `{ rejecter, weight, total_rejections, quorum }` |
+| `("ms_cancelled", tx_id)` | `{ canceller }` |
+| `("ms_expired", tx_id)` | `{ tx_id, expired_at }` |
+| `("ms_executed", tx_id)` | `{ executor, amount, recipient }` |
+| `("ms_quorum_proposed", id)` | `{ proposer, quorum, eta }` |
+| `("ms_quorum_changed", id)` | `{ old_quorum, new_quorum }` |
+| `("ms_weight_set", signer)` | `{ signer, old_weight, new_weight }` |
+
+Signer-rotation events (`EvtSignerChangeProposed`, `EvtSignerChanged`, `EvtSignerChangeCancelled`)
+are documented in `multisig-approval/src/lib.rs`.
+
 ## Building
 
 ```bash

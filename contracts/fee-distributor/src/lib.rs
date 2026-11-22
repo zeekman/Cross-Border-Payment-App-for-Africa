@@ -81,7 +81,16 @@ pub enum DataKey {
     /// the admin-managed fee-token allow-list.  Replaces the O(n) `TokenList`
     /// scan/rewrite that `deposit_fee` used to perform on every call.
     TokenRegistered(Address),
+    /// SC-190: The proposed next admin, awaiting `accept_admin` after the ETA.
+    PendingAdmin,
+    /// SC-190: Ledger timestamp at which the pending admin may be accepted.
+    PendingAdminEta,
 }
+
+/// SC-190: Delay (in seconds) between `propose_admin` and `accept_admin`.
+/// Gives the current admin (and any monitoring) time to notice and cancel a
+/// malicious or mistaken rotation before it takes effect.
+pub const ADMIN_ROTATION_DELAY_SECS: u64 = 24 * 60 * 60;
 
 // ── Event payloads ────────────────────────────────────────────────────────────
 
@@ -149,6 +158,30 @@ pub struct EvtFeeTokenAdded {
 pub struct EvtFeeTokenRemoved {
     pub admin: Address,
     pub token: Address,
+}
+
+/// SC-190: Emitted when the current admin proposes a new admin.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtAdminProposed {
+    pub admin: Address,
+    pub new_admin: Address,
+    pub eta: u64,
+}
+
+/// SC-190: Emitted when a pending admin accepts the rotation.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtAdminChanged {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
+/// SC-190: Emitted when the current admin cancels a pending rotation.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtAdminProposalCancelled {
+    pub admin: Address,
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -662,5 +695,139 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
     /// Whether the contract is currently paused.
     pub fn is_paused(env: Env) -> bool {
         env.storage().persistent().get(&DataKey::Paused).unwrap_or(false)
+    }
+
+    // ── Two-step admin rotation (SC-190) ──────────────────────────────────────
+    //
+    // The admin key controls fee withdrawal, agent-pool distribution, the split
+    // ratio, the fee-token allow-list and pause/unpause.  A lost or compromised
+    // key must therefore be recoverable.  Rotation is two-step and timelocked:
+    //
+    //   1. `propose_admin(admin, new_admin)` — current admin auth; stores the
+    //      pending admin with an ETA of `ADMIN_ROTATION_DELAY_SECS` in the
+    //      future and emits `AdminProposed`.
+    //   2. `accept_admin(new_admin)` — new admin auth, only after the ETA;
+    //      swaps `Admin` and emits `AdminChanged { old, new }`.
+    //
+    // `cancel_admin_proposal(admin)` lets the current admin abort a pending
+    // rotation (e.g. if the proposal was made with a mistyped address).
+    //
+    // RECOMMENDATION: the admin should be a multisig account (or the
+    // `multisig-approval` contract) so that no single key can rotate or use the
+    // admin privileges.
+
+    /// Propose `new_admin` as the next admin. Current admin only.
+    ///
+    /// Stores the pending admin with an ETA of `ADMIN_ROTATION_DELAY_SECS` from
+    /// now.  Re-proposing overwrites any existing pending proposal and resets
+    /// the ETA.  Emits `AdminProposed`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        admin.require_auth();
+
+        if new_admin == stored_admin {
+            panic!("new admin is current admin");
+        }
+
+        let eta: u64 = env
+            .ledger()
+            .timestamp()
+            .saturating_add(ADMIN_ROTATION_DELAY_SECS);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage().persistent().set(&DataKey::PendingAdminEta, &eta);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminProposed"), admin.clone()),
+            EvtAdminProposed {
+                admin,
+                new_admin,
+                eta,
+            },
+        );
+    }
+
+    /// Accept a pending admin rotation. New admin only, after the ETA.
+    ///
+    /// Requires `new_admin.require_auth()` and `now >= eta`.  Swaps `Admin` to
+    /// `new_admin`, clears the pending proposal and emits
+    /// `AdminChanged { old, new }`.  The old admin loses every privilege
+    /// immediately after this call.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .expect("no pending admin proposal");
+        if pending != new_admin {
+            panic!("unauthorized");
+        }
+        new_admin.require_auth();
+
+        let eta: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdminEta)
+            .expect("no pending admin proposal");
+        if env.ledger().timestamp() < eta {
+            panic!("admin rotation timelock not elapsed");
+        }
+
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        env.storage().persistent().remove(&DataKey::PendingAdminEta);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminChanged"), new_admin.clone()),
+            EvtAdminChanged {
+                old_admin: stored_admin,
+                new_admin,
+            },
+        );
+    }
+
+    /// Cancel a pending admin rotation. Current admin only.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        admin.require_auth();
+
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        env.storage().persistent().remove(&DataKey::PendingAdminEta);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminProposalCancelled"), admin.clone()),
+            EvtAdminProposalCancelled { admin },
+        );
+    }
+
+    /// Return the pending admin and its ETA, if a rotation is in flight.
+    pub fn get_pending_admin(env: Env) -> Option<(Address, u64)> {
+        let pending: Option<Address> = env.storage().persistent().get(&DataKey::PendingAdmin);
+        let eta: Option<u64> = env.storage().persistent().get(&DataKey::PendingAdminEta);
+        match (pending, eta) {
+            (Some(p), Some(e)) => Some((p, e)),
+            _ => None,
+        }
     }
 }

@@ -1,6 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, IntoVal, Symbol};
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, String, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Symbol};
 
 #[cfg(test)]
 mod test;
@@ -122,6 +121,29 @@ pub struct CancelHoldPeriodUpdated {
     pub new_hold_secs: u64,
 }
 
+/// Emitted when the admin turns KYC enforcement off (or on) for escrow
+/// creation. Turning KYC off is an explicit, auditable admin action.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct KycCheckDisabled {
+    pub admin: Address,
+}
+
+/// Emitted when the admin turns KYC enforcement back on.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct KycCheckEnabled {
+    pub admin: Address,
+}
+
+/// Emitted when the admin changes the KYC tier required for escrow creation.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct RequiredKycTierUpdated {
+    pub old_tier: u32,
+    pub new_tier: u32,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeUpdated {
@@ -231,6 +253,12 @@ pub enum DataKey {
     EscrowDisputeWinner(u64),
     /// Minimum seconds an escrow must be held before the sender may cancel it.
     CancelHoldSecs,
+    /// Whether KYC verification is enforced on escrow creation. Defaults to
+    /// `true`; turning it off requires an explicit admin call.
+    KycRequired,
+    /// KYC tier (as a `u32` matching `kyc_attestation::KycTier`) that senders
+    /// and agents must hold. Defaults to `Basic`.
+    RequiredKycTier,
 }
 
 const DEFAULT_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
@@ -262,9 +290,8 @@ const MIN_ESCROW_AMOUNT: i128 = 100;
 // Intermediate fee calc uses (amount / 10000).saturating_mul(bps) to prevent overflow.
 const MAX_ESCROW_AMOUNT: i128 = 10_000_000_000_000;
 
-/// Strkey of the contract address whose 32 id bytes are all zero. Setting the
-/// KYC contract to this address disables KYC checks.
-const ZERO_CONTRACT_ADDRESS: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+/// Default KYC tier required for escrow creation: `kyc_attestation::KycTier::Basic`.
+const DEFAULT_REQUIRED_KYC_TIER: u32 = 0;
 
 fn require_admin(env: &Env, admin: &Address) {
     admin.require_auth();
@@ -307,39 +334,45 @@ fn retention_period(env: &Env) -> u64 {
         .unwrap_or(DEFAULT_RETENTION_SECS)
 }
 
-/// Helper function to check KYC verification via cross-contract call.
-/// Returns true when no KYC contract is configured (KYC checking disabled);
-/// otherwise asks the configured kyc-attestation contract.
+/// Whether KYC enforcement is enabled. Defaults to `true` so a deployment
+/// that never calls `set_kyc_required` fails closed.
+fn kyc_required(env: &Env) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::KycRequired)
+        .unwrap_or(true)
+}
+
+/// KYC tier required for escrow creation, as a `u32` matching
+/// `kyc_attestation::KycTier`.
+fn required_kyc_tier(env: &Env) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::RequiredKycTier)
+        .unwrap_or(DEFAULT_REQUIRED_KYC_TIER)
+}
+
+/// Check KYC verification via the generated `kyc-attestation` client.
+///
+/// Fails closed: if KYC is required but no KYC contract is configured, the
+/// check returns `false` rather than silently allowing the escrow. When KYC is
+/// explicitly disabled by the admin, the check returns `true`.
 fn is_kyc_verified(env: &Env, wallet: &Address) -> bool {
+    if !kyc_required(env) {
+        return true;
+    }
+
     let kyc_contract: Option<Address> = env
         .storage()
         .persistent()
         .get(&DataKey::KycContractAddress);
 
     match kyc_contract {
-        None => true, // KYC checking disabled
+        None => false, // KYC required but not configured: fail closed
         Some(addr) => {
-            // Check if address is zero (all bytes are 0)
-            // Strkey of the all-zero contract id.
-            let zero_addr = Address::from_str(env, "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4");
-            // Check if address is the all-zero contract address
-            let zero_addr = Address::from_string(&String::from_str(env, ZERO_CONTRACT_ADDRESS));
-            if addr == zero_addr {
-                true // KYC checking disabled
-            } else {
-                // Cross-contract call to kyc-attestation contract
-                env.invoke_contract::<bool>(
-                    &addr,
-                    &Symbol::new(env, "is_verified"),
-                    soroban_sdk::vec![env, wallet.clone().into_val(env)],
-                )
-            }
+            let client = kyc_attestation::Client::new(env, &addr);
+            client.is_valid_and_unexpired(wallet, &required_kyc_tier(env))
         }
-        Some(addr) => env.invoke_contract::<bool>(
-            &addr,
-            &Symbol::new(env, "is_verified"),
-            soroban_sdk::vec![env, wallet.clone().into_val(env)],
-        ),
     }
 }
 
@@ -356,7 +389,8 @@ impl EscrowContract {
     /// script (`contracts/deploy.sh`) handles this automatically.
     ///
     /// Re-initialization is permanently blocked by the `has(Admin)` guard.
-    /// There is no mechanism to change the admin after initialization.
+    /// The admin can be rotated after initialization via the two-step
+    /// `propose_admin` / `accept_admin` flow (see [`Self::propose_admin`]).
     pub fn initialize(env: Env, admin: Address, usdc_address: Address) {
         if env.storage().persistent().has(&DataKey::Admin) {
             panic!("Contract already initialized");
@@ -367,6 +401,12 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::PlatformFeeBps, &DEFAULT_PLATFORM_FEE_BPS);
+        env.storage()
+            .persistent()
+            .set(&DataKey::KycRequired, &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::RequiredKycTier, &DEFAULT_REQUIRED_KYC_TIER);
         env.storage()
             .persistent()
             .set(&DataKey::ContractVersion, &CONTRACT_VERSION);
@@ -1432,7 +1472,8 @@ impl EscrowContract {
     }
 
     /// Set the KYC contract address, enabling KYC checks on escrow creation.
-    /// Only admin may call this. Use `clear_kyc_contract` to disable checks.
+    /// Only admin may call this. Use `set_kyc_required(false)` to disable
+    /// enforcement.
     pub fn set_kyc_contract(env: Env, admin: Address, kyc_contract: Address) {
         require_admin(&env, &admin);
         env.storage()
@@ -1440,13 +1481,66 @@ impl EscrowContract {
             .set(&DataKey::KycContractAddress, &kyc_contract);
     }
 
-    /// Remove the KYC contract address, disabling KYC checks.
-    /// Only admin may call this.
+    /// Remove the KYC contract address. Only admin may call this.
+    ///
+    /// If KYC is still required, escrow creation fails closed until a new KYC
+    /// contract is configured or KYC is explicitly disabled with
+    /// `set_kyc_required(false)`.
     pub fn clear_kyc_contract(env: Env, admin: Address) {
         require_admin(&env, &admin);
         env.storage()
             .persistent()
             .remove(&DataKey::KycContractAddress);
+    }
+
+    /// Enable or disable KYC enforcement on escrow creation. Admin only.
+    ///
+    /// Turning KYC off is an explicit, auditable action: it emits
+    /// `KycCheckDisabled`. Turning it back on emits `KycCheckEnabled`.
+    pub fn set_kyc_required(env: Env, admin: Address, required: bool) {
+        require_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::KycRequired, &required);
+        if required {
+            env.events().publish(
+                (Symbol::new(&env, "KycCheckEnabled"),),
+                KycCheckEnabled { admin },
+            );
+        } else {
+            env.events().publish(
+                (Symbol::new(&env, "KycCheckDisabled"),),
+                KycCheckDisabled { admin },
+            );
+        }
+    }
+
+    /// Whether KYC enforcement is currently enabled.
+    pub fn get_kyc_required(env: Env) -> bool {
+        kyc_required(&env)
+    }
+
+    /// Set the KYC tier required for escrow creation. Admin only.
+    ///
+    /// `tier` is the `u32` discriminant of `kyc_attestation::KycTier`.
+    pub fn set_required_kyc_tier(env: Env, admin: Address, tier: u32) {
+        require_admin(&env, &admin);
+        let old_tier = required_kyc_tier(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::RequiredKycTier, &tier);
+        env.events().publish(
+            (Symbol::new(&env, "RequiredKycTierUpdated"),),
+            RequiredKycTierUpdated {
+                old_tier,
+                new_tier: tier,
+            },
+        );
+    }
+
+    /// The KYC tier required for escrow creation, as a `u32`.
+    pub fn get_required_kyc_tier(env: Env) -> u32 {
+        required_kyc_tier(&env)
     }
 
     /// Set the dispute-resolution contract address. Only admin may call this.
@@ -1470,7 +1564,54 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::KycContractAddress)
     }
+
+    /// Propose a new admin. The current admin must authorise this call.
+    ///
+    /// The proposal only takes effect after `UPGRADE_TIMELOCK_SECS` and once
+    /// the proposed admin calls [`Self::accept_admin`]. Emits `AdminProposed`.
+    ///
+    /// It is strongly recommended that the admin be a multisig account or the
+    /// `multisig-approval` contract, so a single lost or compromised key cannot
+    /// take over governance.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        governance::propose_admin(&env, &admin, &new_admin);
+    }
+
+    /// Accept a pending admin proposal. The proposed admin must authorise this
+    /// call, and the timelock must have elapsed. Emits `AdminChanged`.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        governance::accept_admin(&env, &new_admin);
+    }
+
+    /// Cancel a pending admin proposal. Only the current admin may call this.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        governance::cancel_admin_proposal(&env, &admin);
+    }
+
+    /// The pending admin proposal, if any.
+    pub fn get_pending_admin(env: Env) -> Option<governance::PendingAdmin> {
+        governance::get_pending_admin(&env)
+    }
+
+    /// The current admin address.
+    pub fn get_admin(env: Env) -> Address {
+        governance::get_admin(&env)
+    }
 }
 
 mod governance;
 pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
+
+/// Generated client for the `kyc-attestation` contract. Using the generated
+/// client makes arity/type mismatches a compile-time error instead of a
+/// runtime host trap.
+mod kyc_attestation {
+    use soroban_sdk::{contractclient, Address, Env};
+
+    #[contractclient(name = "Client")]
+    pub trait KycAttestation {
+        /// Returns `true` if `user` holds an attestation of at least `tier`
+        /// that has not expired.
+        fn is_valid_and_unexpired(env: Env, user: Address, tier: u32) -> bool;
+    }
+}

@@ -7,8 +7,9 @@ use soroban_sdk::{
 };
 
 use crate::{
-    EvtContractPaused, EvtContractUnpaused, EvtFeeDeposited, EvtFeesWithdrawn, EvtSplitUpdated,
-    FeeDistributorContract, FeeDistributorContractClient, FeeRateUpdated,
+    EvtAdminChanged, EvtAdminProposed, EvtContractPaused, EvtContractUnpaused, EvtFeeDeposited,
+    EvtFeesWithdrawn, EvtSplitUpdated, FeeDistributorContract, FeeDistributorContractClient,
+    FeeRateUpdated,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1079,6 +1080,189 @@ fn test_distribute_agent_pool_blocked_by_pause() {
 
     client.pause(&admin);
     client.distribute_agent_pool(&admin, &usdc_id, &vec![&env, (agent, 200_0000000)]);
+}
+
+// ── SC-190: two-step admin rotation ──────────────────────────────────────────
+
+/// Advance the ledger timestamp by `secs` seconds.
+fn advance_time(env: &Env, secs: u64) {
+    let now = env.ledger().timestamp();
+    env.ledger().with_mut(|li| li.timestamp = now + secs);
+}
+
+#[test]
+fn test_propose_admin_emits_event_and_stores_pending() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+
+    let event_name: Val = Symbol::new(&env, "AdminProposed").into_val(&env);
+    let events = all_events(&env);
+    let proposed = events
+        .iter()
+        .find(|(_, topics, _)| topics.iter().any(|t| val_eq(&env, &t, &event_name)));
+    assert!(proposed.is_some(), "AdminProposed event not emitted");
+
+    let (_, _, data) = proposed.unwrap();
+    let payload: EvtAdminProposed = soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(payload.admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+
+    let pending = client.get_pending_admin().expect("pending admin must be set");
+    assert_eq!(pending.new_admin, new_admin);
+    assert_eq!(pending.eta, payload.eta);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_propose_admin_non_admin_panics() {
+    let (env, client, _, _) = setup();
+    let impostor = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&impostor, &new_admin);
+}
+
+#[test]
+#[should_panic(expected = "new admin must differ from current admin")]
+fn test_propose_admin_same_as_current_panics() {
+    let (_, client, admin, _) = setup();
+    client.propose_admin(&admin, &admin);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation delay has not elapsed")]
+fn test_accept_admin_before_eta_panics() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    // No time has passed: ETA not reached.
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+fn test_accept_admin_after_eta_succeeds_and_emits_event() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+
+    let pending = client.get_pending_admin().unwrap();
+    advance_time(&env, pending.eta.saturating_sub(env.ledger().timestamp()));
+
+    client.accept_admin(&new_admin);
+
+    assert_eq!(client.get_admin(), new_admin);
+    assert!(client.get_pending_admin().is_none());
+
+    let event_name: Val = Symbol::new(&env, "AdminChanged").into_val(&env);
+    let events = all_events(&env);
+    let changed = events
+        .iter()
+        .find(|(_, topics, _)| topics.iter().any(|t| val_eq(&env, &t, &event_name)));
+    assert!(changed.is_some(), "AdminChanged event not emitted");
+
+    let (_, _, data) = changed.unwrap();
+    let payload: EvtAdminChanged = soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(payload.old_admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+}
+
+#[test]
+#[should_panic(expected = "no pending admin proposal")]
+fn test_accept_admin_without_proposal_panics() {
+    let (env, client, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_accept_admin_wrong_signer_panics() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+
+    let pending = client.get_pending_admin().unwrap();
+    advance_time(&env, pending.eta.saturating_sub(env.ledger().timestamp()));
+
+    // Only the proposed new admin may accept.
+    client.accept_admin(&impostor);
+}
+
+#[test]
+fn test_cancel_admin_proposal_clears_pending() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    assert!(client.get_pending_admin().is_some());
+
+    client.cancel_admin_proposal(&admin);
+    assert!(client.get_pending_admin().is_none());
+
+    // After cancellation the proposal can no longer be accepted.
+    let pending_eta = env.ledger().timestamp() + 100_000;
+    advance_time(&env, pending_eta);
+    // Still no pending proposal, so accept must fail.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.accept_admin(&new_admin);
+    }));
+    assert!(result.is_err(), "accept after cancel must panic");
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_cancel_admin_proposal_non_admin_panics() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&impostor);
+}
+
+#[test]
+fn test_old_admin_loses_pause_privilege_after_rotation() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    let pending = client.get_pending_admin().unwrap();
+    advance_time(&env, pending.eta.saturating_sub(env.ledger().timestamp()));
+    client.accept_admin(&new_admin);
+
+    // New admin can pause.
+    client.pause(&new_admin);
+    assert!(client.is_paused());
+    client.unpause(&new_admin);
+
+    // Old admin must no longer be able to pause.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.pause(&admin);
+    }));
+    assert!(result.is_err(), "old admin must not be able to pause");
+}
+
+#[test]
+fn test_old_admin_loses_withdraw_privilege_after_rotation() {
+    let (env, client, admin, usdc_id) = setup();
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 500_0000000);
+    client.deposit_fee(&depositor, &usdc_id, &500_0000000, &None);
+
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    let pending = client.get_pending_admin().unwrap();
+    advance_time(&env, pending.eta.saturating_sub(env.ledger().timestamp()));
+    client.accept_admin(&new_admin);
+
+    // New admin can withdraw.
+    client.withdraw_fees(&new_admin, &usdc_id, &100_0000000);
+    assert_eq!(client.get_accumulated_fees(&usdc_id), 400_0000000);
+
+    // Old admin must no longer be able to withdraw.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.withdraw_fees(&admin, &usdc_id, &100_0000000);
+    }));
+    assert!(result.is_err(), "old admin must not be able to withdraw");
 }
 
 /// Events emitted so far, as `(contract, topics, data)` tuples.
