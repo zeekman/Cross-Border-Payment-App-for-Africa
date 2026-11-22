@@ -2,10 +2,24 @@
 
 ## Overview
 
-Every AfriPay Soroban contract (all 9) includes a `governance` module
-(`src/governance.rs`) that adds **on-chain timelocked** WASM upgrades and
-versioned migrations (SC-172 / SC-173). The fund-holding contracts also get an
-emergency pause (SC-174).
+Every AfriPay Soroban contract (all 9) uses the shared `afripay-governance`
+crate (`contracts/afripay-governance`), which adds **on-chain timelocked** WASM
+upgrades and versioned migrations (SC-172 / SC-173). The fund-holding contracts
+also get an emergency pause (SC-174).
+
+The crate exports `GovKey`, `PendingUpgrade`, `UPGRADE_TIMELOCK_SECS`, the free
+functions (`propose_upgrade`, `cancel_upgrade`, `execute_upgrade`, `migrate`,
+`pause`, `unpause`, `paused`, `require_not_paused`) generic over the
+`AdminStore` trait, and the `governance_impl!(ContractType, version)` macro.
+Each contract implements `AdminStore` for its own storage layout (instance or
+persistent) and expands the exported entry points with a single line:
+
+```rust
+afripay_governance::governance_impl!(Contract, CONTRACT_VERSION);
+```
+
+Fixes to governance (TTL bumps, admin rotation, event changes) are made once in
+the shared crate instead of in nine copies.
 
 ## Upgrade Mechanism
 
@@ -13,9 +27,9 @@ emergency pause (SC-174).
 
 | Function | Auth | Description |
 |---|---|---|
-| `propose_upgrade(admin, new_wasm_hash) -> u64` | admin | Stores `(hash, eta)` with `eta = now + 48h`; emits `UpgradeProposed(hash, eta)`. Returns `eta`. A new proposal replaces the previous one. |
+| `propose_upgrade(admin, new_wasm_hash) -> u64` | admin | Stores `(hash, eta)` with `eta = now + 48h`; emits `UpgradeProposed(hash, eta)`. Returns `eta`. Panics with `Upgrade already pending; cancel it first` if a proposal is already pending, and rejects a hash equal to the pending hash. |
 | `upgrade(admin, new_wasm_hash) -> u64` | admin | Alias of `propose_upgrade`. Upgrades are **never** applied instantly. |
-| `cancel_upgrade(admin)` | admin | Removes the pending upgrade; emits `UpgradeCancelled(hash)`. |
+| `cancel_upgrade(admin)` | admin | Removes the pending upgrade; emits `UpgradeCancelled(hash)`. Required before a new proposal can replace an existing one. |
 | `execute_upgrade(admin)` | admin | Panics with `Upgrade timelock has not expired` before `eta`; afterwards swaps the WASM and emits `Upgraded(hash, CONTRACT_VERSION)`. |
 | `get_pending_upgrade() -> Option<PendingUpgrade>` | — | The pending `{ new_wasm_hash, eta }`, if any. |
 | `migrate(admin)` | admin | Idempotent; bumps the stored version to the new WASM's `CONTRACT_VERSION`; emits `Migrated(version)`. |
@@ -25,6 +39,16 @@ The timelock (`UPGRADE_TIMELOCK_SECS = 48h`) is enforced by the contract
 itself, so a compromised admin key cannot replace contract code without giving
 users a 48-hour on-chain window to exit. For extra safety, set the admin to the
 `multisig-approval` contract.
+
+### Replacement rule (SC-185)
+
+A pending upgrade can only be replaced by an explicit `cancel_upgrade` followed
+by a fresh `propose_upgrade`. `propose_upgrade` panics with
+`Upgrade already pending; cancel it first` while a proposal is pending, so
+watchers never see a silently swapped hash: every withdrawal is announced by an
+`UpgradeCancelled` event before the new `UpgradeProposed`. A proposal whose hash
+equals the pending hash is rejected, so a no-op proposal cannot restart the
+48-hour clock.
 
 ## Upgrade Process
 
@@ -40,10 +64,13 @@ name. It needs `SOROBAN_ADMIN_KEYPAIR`, `ADMIN_ADDRESS` and the contract ID in
 ./scripts/upgrade.sh cancel   <contract>   # cancel_upgrade
 ```
 
-1. **Build & test** the new version on testnet; bump `CONTRACT_VERSION` in
-   `src/governance.rs` and add any migration logic to `migrate`.
+1. **Build & test** the new version on testnet; bump the version passed to
+   `governance_impl!` in the contract's `lib.rs` and add any migration logic to
+   `migrate`.
 2. **Propose**: `upgrade.sh propose <contract>`. Announce the hash and `eta`
-   publicly (indexed `UpgradeProposed` event).
+   publicly (indexed `UpgradeProposed` event). If a proposal is already
+   pending, run `upgrade.sh cancel <contract>` first — `propose_upgrade` will
+   panic otherwise.
 3. **Wait 48 hours** for community review. Cancel with `upgrade.sh cancel` if a
    problem is found.
 4. **Execute**: `upgrade.sh execute <contract>` (calls `execute_upgrade`, then
@@ -84,10 +111,12 @@ stay available so users can always recover funds:
 | recurring-payments | 1 | As above. Uses its existing `pause`. |
 | savings-vault | 1 | As above. |
 
-Governance storage keys (`ContractVersion`, `PendingUpgrade`, `Paused`) are a
-separate `GovKey` enum; they encode identically to same-named `DataKey`
-variants, so never add a `DataKey` variant with one of those names for a
-different purpose.
+Governance storage keys (`ContractVersion`, `PendingUpgrade`, `Paused`) are the
+shared `GovKey` enum from `afripay-governance`; they encode identically to
+same-named `DataKey` variants, so never add a `DataKey` variant with one of
+those names for a different purpose. The encoding is byte-identical to the
+pre-extraction copies, so already-deployed contracts keep reading their stored
+`ContractVersion`.
 
 ## Safety Considerations
 
