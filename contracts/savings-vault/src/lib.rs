@@ -782,16 +782,23 @@ impl SavingsVaultContract {
             .unwrap_or(0u32)
     }
 
-    /// Deposit tokens into the vault. Accumulates on top of any existing balance.
-    /// Extends the unlock time only if the new unlock_time is later than the current one.
-    pub fn deposit(env: Env, user: Address, amount: i128, unlock_time: u64) {
-        governance::require_not_paused(&env);
     /// Open a new, independent savings vault for `user` holding `amount` until
     /// `unlock_time`. Returns the new vault's id.
     ///
     /// Each deposit is its own vault: it never changes the unlock time (or
     /// penalty exposure) of funds the user already has in other vaults.
+    ///
+    /// Inflows are gated by two independent kill switches, both of which must
+    /// be clear for a deposit to succeed:
+    /// - the governance `pause` flag (checked first, panics with
+    ///   `Contract is paused`), and
+    /// - the emergency state machine (`announce_emergency` /
+    ///   `activate_emergency`, checked by `assert_accepting_deposits`).
+    ///
+    /// Exit paths (`withdraw`, `emergency_withdraw`) are never blocked by
+    /// either switch.
     pub fn deposit(env: Env, user: Address, amount: i128, unlock_time: u64) -> u32 {
+        governance::require_not_paused(&env);
         user.require_auth();
         Self::assert_accepting_deposits(&env);
         if amount <= 0 {

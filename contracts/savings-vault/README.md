@@ -61,6 +61,32 @@ The savings vault features an admin-controlled emergency mode surface governed b
   (`EmergencyActivated == true`), `deposit` panics with
   `"deposits disabled: emergency in progress"`. Cancelling / deactivating re-enables deposits.
   Normal `withdraw` is never blocked.
+
+### Kill Switches: Governance Pause vs. Emergency Mode
+
+The contract has **two independent kill switches**. Both stop money from flowing *in*,
+but neither ever blocks money from flowing *out*.
+
+| | Governance pause | Emergency mode |
+|---|---|---|
+| Trigger | `pause(admin)` / `unpause(admin)` | `announce_emergency(admin)` / `activate_emergency(admin)` |
+| Check | `governance::require_not_paused(&env)` | `assert_accepting_deposits(&env)` |
+| Blocks `deposit` | yes, panics with `Contract is paused` | yes, panics with `deposits disabled: emergency in progress` |
+| Blocks `withdraw` | no | no |
+| Blocks `emergency_withdraw` / `emergency_return_funds` | no | no (these are the emergency exit paths) |
+| Blocks `claim_yield` | no | no |
+| Cleared by | `unpause(admin)` | `cancel_emergency(admin)` / `deactivate_emergency(admin)` |
+
+- `deposit` runs **both** checks, governance pause first, then the emergency check, so a
+  paused contract rejects deposits even when no emergency is in progress, and vice versa.
+- Exit paths (`withdraw`, `emergency_withdraw`, `emergency_return_funds`, `claim_yield`)
+  deliberately ignore both switches: users must always be able to get their funds out,
+  including while the admin is trying to freeze the contract.
+- `is_paused()` reports the governance pause flag only. It does **not** reflect the
+  emergency flags; use the emergency state getters (e.g. `EmergencyWithdrawalAnnounced`,
+  `EmergencyActivated`) to observe those. `assert_accepting_deposits` is the single
+  predicate that combines both: it panics if the contract is paused *or* an emergency is
+  announced/active, so the two switches always agree on whether deposits are accepted.
 - `emergency_withdraw` and `emergency_return_funds` first accrue interest up to the current
   time, then pay the user, for all of their vaults: principal + accrued interest (taken from
   `InterestReserve`, capped at what the reserve holds, with an `InsufficientReserve` event for
