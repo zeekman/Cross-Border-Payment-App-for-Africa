@@ -75,6 +75,86 @@ fn test_quorum_exceeds_approvers_panics() {
     MultisigContractClient::new(&env, &contract_id).initialize(&admin, &v, &2);
 }
 
+// ── SC-192: duplicate approvers ──────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "duplicate approver")]
+fn test_initialize_duplicate_approvers_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let mut v = soroban_sdk::Vec::new(&env);
+    v.push_back(a.clone());
+    v.push_back(a);
+    v.push_back(b);
+    let contract_id = env.register(MultisigContract, ());
+    MultisigContractClient::new(&env, &contract_id).initialize(&admin, &v, &2);
+}
+
+#[test]
+#[should_panic(expected = "duplicate approver")]
+fn test_initialize_empty_approvers_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let v: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+    let contract_id = env.register(MultisigContract, ());
+    MultisigContractClient::new(&env, &contract_id).initialize(&admin, &v, &1);
+}
+
+#[test]
+fn test_get_approvers_returns_initial_set() {
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let stored = client.get_approvers();
+    assert_eq!(stored.len(), approvers.len());
+    for i in 0..approvers.len() {
+        assert_eq!(stored.get(i).unwrap(), approvers.get(i).unwrap());
+    }
+}
+
+#[test]
+#[should_panic(expected = "signer already present")]
+fn test_execute_add_existing_signer_panics() {
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let existing = approvers.get(0).unwrap();
+
+    client.propose_signer_change(&RotationAction::Add, &existing);
+    env.ledger().with_mut(|l| l.timestamp += ROTATION_DELAY + 1);
+    client.execute_signer_change();
+}
+
+#[test]
+fn test_property_accepted_approver_set_can_reach_quorum() {
+    // For every approver set accepted by `initialize`, the distinct approvers
+    // must be able to reach quorum by voting once each.
+    let env = Env::default();
+    env.mock_all_auths();
+    for n in 1usize..=5 {
+        for quorum in 1..=n as u32 {
+            let admin = Address::generate(&env);
+            let mut approvers = soroban_sdk::Vec::new(&env);
+            for _ in 0..n {
+                approvers.push_back(Address::generate(&env));
+            }
+            let contract_id = env.register(MultisigContract, ());
+            let client = MultisigContractClient::new(&env, &contract_id);
+            client.initialize(&admin, &approvers, &quorum);
+
+            let recipient = Address::generate(&env);
+            let desc = soroban_sdk::String::from_str(&env, "prop");
+            let tx_id = client.propose_transaction(&approvers.get(0).unwrap(), &desc, &1, &recipient);
+            for i in 0..quorum {
+                client.approve(&approvers.get(i).unwrap(), &tx_id);
+            }
+            assert_eq!(client.get_proposal(&tx_id).status, TxStatus::Executed);
+        }
+    }
+}
+
 // ── propose_transaction ───────────────────────────────────────────────────────
 
 #[test]
@@ -1093,6 +1173,233 @@ fn test_execute_with_signatures_rejects_expired_proposal() {
 
     let sigs: soroban_sdk::Vec<(Address, soroban_sdk::BytesN<64>)> = soroban_sdk::Vec::new(&env);
     client.execute_with_signatures(&id, &sigs);
+}
+
+// ── SC-193: events for the treasury approval workflow ────────────────────────
+
+fn last_event(env: &Env) -> (soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) {
+    let all = env.events().all();
+    let (topics, _contract, data) = all.last().unwrap();
+    (topics, data)
+}
+
+#[test]
+fn test_propose_transaction_emits_event() {
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let proposer = approvers.get(0).unwrap();
+    let recipient = Address::generate(&env);
+    let desc = soroban_sdk::String::from_str(&env, "pay");
+    let tx_id = client.propose_transaction(&proposer, &desc, &1_000, &recipient);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_proposed"));
+    let payload: MsProposedEvent = data.into_val(&env);
+    assert_eq!(payload.tx_id, tx_id);
+    assert_eq!(payload.proposer, proposer);
+    assert_eq!(payload.amount, 1_000);
+    assert_eq!(payload.recipient, recipient);
+}
+
+#[test]
+fn test_approve_emits_event() {
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let tx_id = propose(&env, &contract_id, &approvers.get(0).unwrap());
+    client.approve(&approvers.get(0).unwrap(), &tx_id);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_approved"));
+    let payload: MsApprovedEvent = data.into_val(&env);
+    assert_eq!(payload.tx_id, tx_id);
+    assert_eq!(payload.approver, approvers.get(0).unwrap());
+    assert_eq!(payload.total_approvals, 1);
+    assert_eq!(payload.quorum, 2);
+}
+
+#[test]
+fn test_reject_emits_event() {
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let tx_id = propose(&env, &contract_id, &approvers.get(0).unwrap());
+    client.reject(&approvers.get(0).unwrap(), &tx_id);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_rejected"));
+    let payload: MsRejectedEvent = data.into_val(&env);
+    assert_eq!(payload.tx_id, tx_id);
+    assert_eq!(payload.approver, approvers.get(0).unwrap());
+}
+
+#[test]
+fn test_cancel_emits_event() {
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let proposer = approvers.get(0).unwrap();
+    let tx_id = propose(&env, &contract_id, &proposer);
+    client.cancel_proposal(&proposer, &tx_id);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_cancelled"));
+    let payload: MsCancelledEvent = data.into_val(&env);
+    assert_eq!(payload.tx_id, tx_id);
+    assert_eq!(payload.proposer, proposer);
+}
+
+#[test]
+fn test_expire_emits_event() {
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let tx_id = propose(&env, &contract_id, &approvers.get(0).unwrap());
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.execute(&tx_id);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_expired"));
+    let payload: MsExpiredEvent = data.into_val(&env);
+    assert_eq!(payload.tx_id, tx_id);
+}
+
+#[test]
+fn test_execute_emits_event() {
+    let (env, contract_id, approvers, _) = setup(1, 2);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let tx_id = propose(&env, &contract_id, &approvers.get(0).unwrap());
+    client.approve(&approvers.get(0).unwrap(), &tx_id);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_executed"));
+    let payload: MsExecutedEvent = data.into_val(&env);
+    assert_eq!(payload.tx_id, tx_id);
+}
+
+#[test]
+fn test_quorum_change_emits_events() {
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let id = client.propose_quorum_change(&approvers.get(0).unwrap(), &3);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_quorum_proposed"));
+    let payload: MsQuorumProposedEvent = data.into_val(&env);
+    assert_eq!(payload.id, id);
+    assert_eq!(payload.new_quorum, 3);
+
+    client.approve_quorum_change(&approvers.get(0).unwrap(), &id);
+    client.approve_quorum_change(&approvers.get(1).unwrap(), &id);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_quorum_changed"));
+    let payload: MsQuorumChangedEvent = data.into_val(&env);
+    assert_eq!(payload.id, id);
+    assert_eq!(payload.new_quorum, 3);
+}
+
+#[test]
+fn test_update_proposal_ttl_emits_event() {
+    let (env, contract_id, _, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    client.update_proposal_ttl(&admin, &1_000);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_ttl_updated"));
+    let payload: MsTtlUpdatedEvent = data.into_val(&env);
+    assert_eq!(payload.ttl, 1_000);
+}
+
+#[test]
+fn test_set_signer_weight_emits_event() {
+    let (env, contract_id, approvers, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let signer = approvers.get(0).unwrap();
+    client.set_signer_weight(&admin, &signer, &5);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_weight_set"));
+    let payload: MsWeightSetEvent = data.into_val(&env);
+    assert_eq!(payload.signer, signer);
+    assert_eq!(payload.weight, 5);
+}
+
+// ── SC-190: two-step admin rotation ─────────────────────────────────────────
+
+#[test]
+fn test_propose_admin_emits_event() {
+    let (env, contract_id, _, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_admin_proposed"));
+    let payload: AdminProposedEvent = data.into_val(&env);
+    assert_eq!(payload.old_admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation not ready")]
+fn test_accept_admin_before_delay_panics() {
+    let (env, contract_id, _, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+fn test_accept_admin_after_delay_rotates() {
+    let (env, contract_id, _, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|l| l.timestamp += ADMIN_ROTATION_DELAY + 1);
+    client.accept_admin(&new_admin);
+
+    let (topics, data) = last_event(&env);
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "ms_admin_changed"));
+    let payload: AdminChangedEvent = data.into_val(&env);
+    assert_eq!(payload.old_admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Only admin can set signer weight")]
+fn test_old_admin_loses_privileges_after_rotation() {
+    let (env, contract_id, approvers, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|l| l.timestamp += ADMIN_ROTATION_DELAY + 1);
+    client.accept_admin(&new_admin);
+
+    // Old admin can no longer perform admin-only actions.
+    client.set_signer_weight(&admin, &approvers.get(0).unwrap(), &2);
+}
+
+#[test]
+fn test_cancel_admin_proposal_blocks_accept() {
+    let (env, contract_id, _, admin) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+    env.ledger().with_mut(|l| l.timestamp += ADMIN_ROTATION_DELAY + 1);
+    // No pending proposal remains; accept must fail.
+    let res = client.try_accept_admin(&new_admin);
+    assert!(res.is_err());
 }
 
 // ── SC-020: propose_signer_change is reachable as a proper impl method ────────

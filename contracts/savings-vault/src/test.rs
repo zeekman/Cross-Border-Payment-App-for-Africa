@@ -1170,6 +1170,108 @@ fn test_emergency_withdraw_caps_interest_at_reserve() {
     assert_eq!(token.balance(&client.address), 0);
 }
 
+// ── #1444: two-step admin rotation ───────────────────────────────────────────
+
+#[test]
+fn test_propose_and_accept_admin_after_delay() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    let events = env.events().all();
+    assert!(events
+        .iter()
+        .any(|(_, topics, _)| topic_is(&env, &topics, "AdminProposed")));
+
+    // Not yet: the ETA has not elapsed.
+    env.ledger().with_mut(|li| li.timestamp += 86_400);
+    client.accept_admin(&new_admin);
+
+    let events = env.events().all();
+    assert!(events
+        .iter()
+        .any(|(_, topics, _)| topic_is(&env, &topics, "AdminChanged")));
+
+    // New admin can act; old admin cannot.
+    client.set_interest_rate(&new_admin, &500u32);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation delay not elapsed")]
+fn test_accept_admin_before_delay_panics() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += 86_400 - 1);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "no admin proposal pending")]
+fn test_accept_admin_without_proposal_panics() {
+    let (env, client, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_accept_admin_requires_new_admin_auth() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += 86_400);
+    env.set_auths(&[]);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_propose_admin_non_admin_panics() {
+    let (env, client, _, _) = setup();
+    let impostor = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&impostor, &new_admin);
+}
+
+#[test]
+fn test_cancel_admin_proposal() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+
+    let events = env.events().all();
+    assert!(events
+        .iter()
+        .any(|(_, topics, _)| topic_is(&env, &topics, "AdminProposalCancelled")));
+
+    // The cancelled proposal can no longer be accepted.
+    env.ledger().with_mut(|li| li.timestamp += 86_400);
+    let result = client.try_accept_admin(&new_admin);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic(expected = "no admin proposal pending")]
+fn test_cancel_admin_proposal_without_proposal_panics() {
+    let (_, client, admin, _) = setup();
+    client.cancel_admin_proposal(&admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_old_admin_loses_privileges_after_rotation() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += 86_400);
+    client.accept_admin(&new_admin);
+
+    // The old admin can no longer pause (activate emergency) or set config.
+    client.activate_emergency(&admin);
+}
+
 #[test]
 fn test_emergency_return_funds_pays_accrued_interest() {
     let (env, client, admin, usdc_id) = setup();

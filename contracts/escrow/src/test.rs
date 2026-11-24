@@ -1572,6 +1572,277 @@ fn panic_msg(err: std::boxed::Box<dyn core::any::Any + Send>) -> std::string::St
     } else {
         String::new()
     }
+}
+
+// ── #1445: KYC gate via the real kyc-attestation contract ────────────────────
+
+/// Default admin rotation delay (24 h) — mirrors the governance module.
+const ADMIN_ROTATION_DELAY_SECS: u64 = 24 * 60 * 60;
+
+/// Register the real `kyc-attestation` contract alongside escrow and wire it up.
+fn setup_with_kyc() -> (
+    Env,
+    EscrowContractClient<'static>,
+    kyc_attestation::KycAttestationContractClient<'static>,
+    Address, // admin
+    Address, // usdc_id
+    Address, // kyc contract id
+) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let kyc_id = env.register(kyc_attestation::KycAttestationContract, ());
+    let kyc = kyc_attestation::KycAttestationContractClient::new(&env, &kyc_id);
+
+    let admin = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract(admin.clone());
+
+    client.initialize(&admin, &usdc_id);
+    kyc.initialize(&admin);
+    client.set_kyc_contract(&admin, &kyc_id);
+
+    (env, client, kyc, admin, usdc_id, kyc_id)
+}
+
+#[test]
+fn test_create_escrow_succeeds_for_attested_users() {
+    let (env, client, kyc, admin, usdc_id, _) = setup_with_kyc();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    kyc.add_attestation(&admin, &sender, &kyc_attestation::KycTier::Basic, &0u64);
+    kyc.add_attestation(&admin, &agent, &kyc_attestation::KycTier::Basic, &0u64);
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    assert_eq!(client.get_escrow(&escrow_id).sender, sender);
+}
+
+#[test]
+#[should_panic(expected = "Sender KYC verification required")]
+fn test_create_escrow_panics_for_unattested_sender() {
+    let (env, client, kyc, admin, usdc_id, _) = setup_with_kyc();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    kyc.add_attestation(&admin, &agent, &kyc_attestation::KycTier::Basic, &0u64);
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+}
+
+#[test]
+#[should_panic(expected = "Agent KYC verification required")]
+fn test_create_escrow_panics_for_unattested_agent() {
+    let (env, client, kyc, admin, usdc_id, _) = setup_with_kyc();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    kyc.add_attestation(&admin, &sender, &kyc_attestation::KycTier::Basic, &0u64);
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+}
+
+#[test]
+#[should_panic(expected = "Sender KYC verification required")]
+fn test_create_escrow_panics_for_expired_attestation() {
+    let (env, client, kyc, admin, usdc_id, _) = setup_with_kyc();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    // Attestations expire one hour from now.
+    let expiry = env.ledger().timestamp() + 3600;
+    kyc.add_attestation(&admin, &sender, &kyc_attestation::KycTier::Basic, &expiry);
+    kyc.add_attestation(&admin, &agent, &kyc_attestation::KycTier::Basic, &0u64);
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    env.ledger().with_mut(|li| li.timestamp += 3601);
+
+    client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+}
+
+#[test]
+fn test_batch_create_escrow_checks_kyc() {
+    let (env, client, kyc, admin, usdc_id, _) = setup_with_kyc();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+
+    kyc.add_attestation(&admin, &sender, &kyc_attestation::KycTier::Basic, &0u64);
+    kyc.add_attestation(&admin, &agent, &kyc_attestation::KycTier::Basic, &0u64);
+    mint_usdc(&env, &usdc_id, &admin, &sender, 2_000_0000000);
+
+    let params = EscrowParams {
+        recipient: recipient.clone(),
+        agent: agent.clone(),
+        amount: 1_000_0000000,
+        max_fee_bps: 1000,
+    };
+    let first = client.batch_create_escrow(&sender, &soroban_sdk::vec![&env, params]);
+    assert_eq!(client.get_escrow(&first).sender, sender);
+}
+
+#[test]
+fn test_disable_kyc_requires_admin_and_emits_event() {
+    let (env, client, _, admin, usdc_id, _) = setup_with_kyc();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+
+    // Explicit admin call turns KYC off and emits the event.
+    client.set_kyc_required(&admin, &false);
+    assert!(!client.is_kyc_required());
+    assert!(find_event(&env, "KycCheckDisabled").is_some());
+
+    // With KYC explicitly disabled, unattested parties may transact.
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    assert_eq!(client.get_escrow(&escrow_id).sender, sender);
+}
+
+#[test]
+#[should_panic(expected = "Only admin can perform this action")]
+fn test_disable_kyc_requires_admin() {
+    let (env, client, _, _, _, _) = setup_with_kyc();
+    let impostor = Address::generate(&env);
+    client.set_kyc_required(&impostor, &false);
+}
+
+#[test]
+#[should_panic(expected = "KYC required but no KYC contract configured")]
+fn test_kyc_required_without_contract_fails_closed() {
+    // KYC is required by default; without a configured contract the gate must
+    // fail closed rather than silently allowing the transfer.
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
+    client.create_escrow(&sender, &recipient, &agent, &1_000_0000000, &250);
+}
+
+// ── #1444: two-step admin rotation ──────────────────────────────────────────
+
+#[test]
+fn test_admin_rotation_propose_accept_swaps_admin() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    assert!(find_event(&env, "AdminProposed").is_some());
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += ADMIN_ROTATION_DELAY_SECS;
+    });
+    client.accept_admin(&new_admin);
+
+    let (stored_admin, _) = client.get_metadata();
+    assert_eq!(stored_admin, new_admin);
+
+    let (_, _, data) = find_event(&env, "AdminChanged").expect("event not emitted");
+    let payload = crate::AdminChanged::from_val(&env, &data);
+    assert_eq!(payload.old_admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Admin rotation delay has not elapsed")]
+fn test_admin_rotation_cannot_accept_before_delay() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| {
+        li.timestamp += ADMIN_ROTATION_DELAY_SECS - 1;
+    });
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic]
+fn test_admin_rotation_requires_new_admin_auth() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| {
+        li.timestamp += ADMIN_ROTATION_DELAY_SECS;
+    });
+
+    // No authorization at all: accept_admin must fail.
+    env.set_auths(&[]);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Only admin can perform this action")]
+fn test_admin_rotation_propose_requires_current_admin() {
+    let (env, client, _, _) = setup();
+    let impostor = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&impostor, &new_admin);
+}
+
+#[test]
+fn test_admin_rotation_cancel_clears_proposal() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += ADMIN_ROTATION_DELAY_SECS;
+    });
+    assert!(client.try_accept_admin(&new_admin).is_err());
+
+    let (stored_admin, _) = client.get_metadata();
+    assert_eq!(stored_admin, admin);
+}
+
+#[test]
+#[should_panic(expected = "Only admin can perform this action")]
+fn test_old_admin_loses_privileges_after_rotation() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| {
+        li.timestamp += ADMIN_ROTATION_DELAY_SECS;
+    });
+    client.accept_admin(&new_admin);
+
+    // The old admin can no longer pause the contract.
+    client.pause(&admin);
+}
+
+#[test]
+fn test_new_admin_can_pause_after_rotation() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| {
+        li.timestamp += ADMIN_ROTATION_DELAY_SECS;
+    });
+    client.accept_admin(&new_admin);
+
+    client.pause(&new_admin);
+    assert!(client.is_paused());
+}
 // ── #1365: update_fee cannot raise the fee of a funded escrow ─────────────────
 
 fn create_default_escrow(

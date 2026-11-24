@@ -28,6 +28,10 @@ pub enum DataKey {
     UserSchedules(Address),
     /// Global schedule count for full enumeration.
     TotalSchedules,
+    /// Two-step admin rotation: proposed new admin awaiting acceptance.
+    PendingAdmin,
+    /// Ledger timestamp after which the pending admin may accept.
+    PendingAdminEta,
     /// Optional fee-distributor contract that receives platform fees.
     FeeDistributor,
 }
@@ -989,6 +993,36 @@ impl RecurringPaymentsContract {
 mod governance;
 pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
 
+#[contractimpl]
+impl RecurringPaymentsContract {
+    /// Propose a new admin. The current admin must authorize. The proposal
+    /// becomes acceptable by the new admin after `ADMIN_ROTATION_DELAY_SECS`.
+    ///
+    /// The admin should be a multisig account or the `multisig-approval`
+    /// contract so a single lost or compromised key cannot take over.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        governance::propose_admin(&env, &admin, &new_admin);
+    }
+
+    /// Accept a pending admin proposal. Requires the new admin's signature and
+    /// that the rotation delay has elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        governance::accept_admin(&env, &new_admin);
+    }
+
+    /// Cancel a pending admin proposal. Only the current admin may cancel.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        governance::cancel_admin_proposal(&env, &admin);
+    }
+
+    /// Return the current admin address.
+    pub fn get_admin(env: Env) -> Address {
+        governance::get_admin(&env)
+    }
+
+    /// Return the pending admin proposal, if any, as `(new_admin, eta)`.
+    pub fn get_pending_admin(env: Env) -> Option<(Address, u64)> {
+        governance::get_pending_admin(&env)
 /// Minimal client interface for the fee-distributor contract.
 mod fee_distributor {
     use soroban_sdk::{contractclient, Address, Env};
