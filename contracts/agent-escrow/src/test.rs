@@ -8,10 +8,8 @@ use soroban_sdk::{
 
 use crate::{
     AdminOverride, AgentEscrowContract, AgentEscrowContractClient, EscrowStatus,
-    EvtEscrowCancelled, EvtEscrowConfirmed, EvtEscrowCreated,
-    EvtEscrowCancelled, EvtEscrowConfirmed, EvtEscrowCreated, EvtFeesWithdrawn, InsurancePayout,
-    EvtEscrowCancelled, EvtEscrowConfirmed, EvtEscrowCreated, EvtPartialPayoutReleased,
-    InsurancePayout,
+    EvtEscrowCancelled, EvtEscrowConfirmed, EvtEscrowCreated, EvtFeesWithdrawn,
+    EvtPartialPayoutReleased, InsurancePayout,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -444,7 +442,7 @@ fn test_withdraw_fees_transfers_to_recipient() {
     let fees = client.get_fees();
     assert_eq!(fees + insurance, total_fee);
 
-    client.withdraw_fees(&admin);
+    client.withdraw_fees(&admin, &fees);
 
     assert_eq!(client.get_fees(), 0);
     assert_eq!(TokenClient::new(&env, &usdc_id).balance(&admin), fees);
@@ -459,7 +457,7 @@ fn test_withdraw_fees_non_admin_panics() {
     let impostor = Address::generate(&env);
     // Without the admin's signature the withdrawal must be rejected.
     env.set_auths(&[]);
-    client.withdraw_fees(&impostor);
+    client.withdraw_fees(&impostor, &1);
 }
 
 #[test]
@@ -468,20 +466,9 @@ fn test_withdraw_fees_twice_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
     client.confirm_payout(&id);
-    client.withdraw_fees(&admin);
-    client.withdraw_fees(&admin);
-    let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
-    client.confirm_payout(&id);
-
     let fees = client.get_fees();
-    let treasury = Address::generate(&env);
-    client.withdraw_fees(&treasury, &fees);
-    let expected_fee = platform_share((amount * fee_bps as i128) / 10_000);
-    assert_eq!(client.get_fees(), expected_fee);
-    client.withdraw_fees(&admin, &expected_fee);
-
-    assert_eq!(client.get_fees(), 0);
-    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), fees);
+    client.withdraw_fees(&admin, &fees);
+    client.withdraw_fees(&admin, &1);
 }
 
 #[test]
@@ -497,6 +484,21 @@ fn test_withdraw_fees_partial() {
 
     assert_eq!(client.get_fees(), total_fee - partial);
     assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), partial);
+}
+
+#[test]
+fn test_withdraw_fees_to_third_party_treasury() {
+    let (env, client, admin, usdc_id) = setup();
+    let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
+    client.confirm_payout(&id);
+
+    let fees = client.get_fees();
+    let treasury = Address::generate(&env);
+    client.withdraw_fees(&treasury, &fees);
+
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), fees);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&admin), 0);
+    assert_eq!(client.get_fees(), 0);
 }
 
 #[test]
@@ -562,6 +564,39 @@ fn test_withdraw_fees_to_contract_itself_panics() {
 }
 
 #[test]
+#[should_panic(expected = "withdrawal amount exceeds accumulated fees")]
+fn test_withdraw_fees_cannot_touch_insurance_fund() {
+    // The insurance fund is held separately; only accumulated platform fees
+    // are withdrawable, so asking for fees + insurance must be rejected.
+    let (env, client, admin, usdc_id) = setup();
+    let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
+    client.confirm_payout(&id);
+
+    let fees = client.get_fees();
+    let insurance = client.get_insurance_balance();
+    assert!(insurance > 0);
+
+    let treasury = Address::generate(&env);
+    client.withdraw_fees(&treasury, &(fees + insurance));
+}
+
+#[test]
+fn test_withdraw_fees_leaves_insurance_fund_intact() {
+    let (env, client, admin, usdc_id) = setup();
+    let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
+    client.confirm_payout(&id);
+
+    let fees = client.get_fees();
+    let insurance = client.get_insurance_balance();
+    let treasury = Address::generate(&env);
+    client.withdraw_fees(&treasury, &fees);
+
+    assert_eq!(client.get_fees(), 0);
+    assert_eq!(client.get_insurance_balance(), insurance);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), fees);
+}
+
+#[test]
 fn test_get_fees_initial_is_zero() {
     let (_, client, _, _) = setup();
     assert_eq!(client.get_fees(), 0);
@@ -599,8 +634,9 @@ fn test_update_admin_new_admin_can_withdraw_fees() {
     let new_admin = Address::generate(&env);
     client.update_admin(&new_admin);
     let fees = client.get_fees();
-    client.withdraw_fees(&new_admin, &fees);
-    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&new_admin), fees);
+    let treasury = Address::generate(&env);
+    client.withdraw_fees(&treasury, &fees);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), fees);
 }
 
 #[test]
@@ -618,6 +654,110 @@ fn test_update_admin_old_admin_loses_access() {
 fn test_update_admin_same_address_panics() {
     let (_, client, admin, _) = setup();
     client.update_admin(&admin);
+}
+
+// ── two-step admin rotation (SC-190) ──────────────────────────────────────────
+
+/// Delay between `propose_admin` and `accept_admin` (24 h).
+const ADMIN_ROTATION_DELAY: u64 = 24 * 60 * 60;
+
+#[test]
+fn test_propose_admin_stores_pending_and_emits_event() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+
+    let pending = client.get_pending_admin().expect("pending admin must be stored");
+    assert_eq!(pending.new_admin, new_admin);
+    assert_eq!(pending.eta, env.ledger().timestamp() + ADMIN_ROTATION_DELAY);
+
+    let all = all_events(&env);
+    let event = find_event(&env, &all, "AdminProposed");
+    assert!(event.is_some(), "AdminProposed event not emitted");
+    let (_, _, data) = event.unwrap();
+    let payload = crate::EvtAdminProposed::from_val(&env, &data);
+    assert_eq!(payload.admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+    assert_eq!(payload.eta, pending.eta);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation delay has not elapsed")]
+fn test_accept_admin_before_eta_panics() {
+    let (env, client, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY - 1);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_accept_admin_without_new_admin_auth_panics() {
+    let (env, client, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY);
+    // Without the new admin's signature the rotation must be rejected.
+    env.set_auths(&[]);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+fn test_accept_admin_after_eta_succeeds_and_emits_event() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY);
+    client.accept_admin(&new_admin);
+
+    assert!(client.get_pending_admin().is_none(), "pending admin must be cleared");
+
+    let all = all_events(&env);
+    let event = find_event(&env, &all, "AdminChanged");
+    assert!(event.is_some(), "AdminChanged event not emitted");
+    let (_, _, data) = event.unwrap();
+    let payload = crate::EvtAdminChanged::from_val(&env, &data);
+    assert_eq!(payload.old_admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_old_admin_loses_pause_privileges_after_rotation() {
+    let (env, client, _, _) = setup();
+    let old_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.update_admin(&new_admin);
+    // The old admin must no longer be able to pause the contract.
+    client.pause(&old_admin);
+}
+
+#[test]
+fn test_new_admin_can_pause_after_rotation() {
+    let (env, client, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.update_admin(&new_admin);
+    client.pause(&new_admin);
+    assert!(client.is_paused());
+}
+
+#[test]
+fn test_cancel_admin_proposal_clears_pending_and_emits_event() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&new_admin);
+    client.cancel_admin_proposal();
+
+    assert!(client.get_pending_admin().is_none(), "pending admin must be cleared");
+
+    let all = all_events(&env);
+    let event = find_event(&env, &all, "AdminCancelled");
+    assert!(event.is_some(), "AdminCancelled event not emitted");
+    let (_, _, data) = event.unwrap();
+    let payload = crate::EvtAdminCancelled::from_val(&env, &data);
+    assert_eq!(payload.admin, admin);
+    assert_eq!(payload.new_admin, new_admin);
 }
 
 // ── admin_release ──────────────────────────────────────────────────────────────

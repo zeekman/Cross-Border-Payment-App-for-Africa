@@ -3,10 +3,18 @@ const db = require('../db');
 const logger = require('../utils/logger');
 const cache = require('../utils/cache');
 const { wsConnections } = require('../utils/metrics');
+const metrics = require('../utils/metrics');
+const ledgerState = require('./ledgerListenerState');
 
 const server = new StellarSdk.Horizon.Server(
   process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org'
 );
+
+// How often the listener compares its stream against Horizon (BE-198). The first
+// poll runs at startup, so /health/deep has a last_event_at within seconds.
+const HEALTH_POLL_MS = Number(process.env.LEDGER_HEALTH_POLL_MS) > 0
+  ? Number(process.env.LEDGER_HEALTH_POLL_MS)
+  : 15_000;
 
 // The ledger-level payments stream is network-wide, so silence this long means it is stale.
 const GLOBAL_STREAM_STALE_MS = 120_000;
@@ -81,7 +89,13 @@ function setSocketIO(socketIO) {
 }
 
 function getHealth() {
-  return { ...healthState };
+  const ledger = ledgerState.getLedgerListenerState();
+  return {
+    ...healthState,
+    last_ledger_sequence: ledger.lastLedgerSequence,
+    horizon_latest_ledger: ledger.horizonLatestLedger,
+    lag_ledgers: ledger.lagLedgers,
+  };
 }
 
 function backoffMs(attempt) {
@@ -115,6 +129,10 @@ let globalEffectsClose = null;
 let globalLastEventAt = 0;
 let globalLivenessTimer = null;
 let stopped = false;
+// Ledger of the newest payment the global payments stream has delivered (or its resume
+// cursor). Null means "not established yet": the next poll baselines it to Horizon.
+let lastPaymentStreamLedger = null;
+let healthPollTimer = null;
 
 function updateStreamMetric() {
   wsConnections.set(activeStreams.size + (globalPaymentsClose ? 1 : 0) + (globalEffectsClose ? 1 : 0));
@@ -122,6 +140,81 @@ function updateStreamMetric() {
 
 function getStreamCount() {
   return activeStreams.size + (globalPaymentsClose ? 1 : 0) + (globalEffectsClose ? 1 : 0);
+}
+
+/**
+ * Record proof of life for /health/deep: a message arrived on one of the Horizon
+ * streams, or a poll found the payments stream fully caught up with Horizon.
+ */
+function markLedgerActivity(ledgerSeq = null) {
+  const now = Date.now();
+  ledgerState.setLastLedgerEvent(now, ledgerSeq != null ? { lastLedgerSequence: ledgerSeq } : {});
+  metrics.ledgerListenerLastEventTimestampSeconds?.set(now / 1000);
+}
+
+/**
+ * How far behind Horizon is the payments stream, in ledgers?
+ *
+ * Compared against the newest *payment* on Horizon, not the newest ledger: the
+ * stream only carries payments, so "no event for a minute" is normal on a quiet
+ * network and must not read as a fault. Quiet means lag 0 and the status stays
+ * healthy; a dead stream while payments keep arriving means lag grows.
+ *
+ * With no stream position yet (first poll, or the stream restarted at "now") the
+ * Horizon position becomes the baseline, so there is nothing to be behind.
+ */
+function evaluateLedgerLag(streamLedger, latestPaymentLedger) {
+  if (latestPaymentLedger == null) return { lag: 0, baseline: streamLedger };
+  if (streamLedger == null) return { lag: 0, baseline: latestPaymentLedger };
+  return { lag: Math.max(0, latestPaymentLedger - streamLedger), baseline: streamLedger };
+}
+
+/**
+ * Compare the payments stream with Horizon once. Counts as proof of life only when
+ * the stream is open and has nothing outstanding; otherwise it just reports lag, so
+ * a dead or lagging stream stops refreshing last_event_at and goes degraded.
+ */
+async function pollHorizonOnce() {
+  if (stopped) return null;
+  try {
+    const [ledgerPage, paymentPage] = await Promise.all([
+      server.ledgers().order('desc').limit(1).call(),
+      server.payments().order('desc').limit(1).call(),
+    ]);
+    const horizonLatestLedger = Number(ledgerPage?.records?.[0]?.sequence);
+    const latestPaymentLedger = ledgerSeqFromPagingToken(paymentPage?.records?.[0]?.paging_token);
+
+    const { lag, baseline } = evaluateLedgerLag(lastPaymentStreamLedger, latestPaymentLedger);
+    if (lastPaymentStreamLedger == null) lastPaymentStreamLedger = baseline;
+
+    ledgerState.updateLedgerDetails({
+      horizonLatestLedger: Number.isFinite(horizonLatestLedger) ? horizonLatestLedger : undefined,
+      lagLedgers: lag,
+      sampledAt: Date.now(),
+    });
+    metrics.ledgerListenerLagLedgers?.set(lag);
+
+    if (lag === 0 && globalPaymentsClose) markLedgerActivity();
+    return { lag, horizonLatestLedger, latestPaymentLedger };
+  } catch (err) {
+    // Horizon unreachable: no proof of life, so health ages out to degraded.
+    logger.warn('Ledger listener health poll failed', { error: err?.message });
+    return null;
+  }
+}
+
+function startHealthPoller() {
+  if (healthPollTimer) return;
+  void pollHorizonOnce();
+  healthPollTimer = setInterval(() => { void pollHorizonOnce(); }, HEALTH_POLL_MS);
+  healthPollTimer.unref();
+}
+
+function stopHealthPoller() {
+  if (healthPollTimer) {
+    clearInterval(healthPollTimer);
+    healthPollTimer = null;
+  }
 }
 
 async function reconcileClaimableBalanceEffect(effect) {
@@ -196,6 +289,7 @@ async function startStreamForAccount(publicKey, attempt = 0) {
         healthState.last_event_at = new Date().toISOString();
         healthState.status = 'connected';
         healthState.reconnect_attempts = 0;
+        markLedgerActivity(ledgerSeqFromPagingToken(tx.paging_token));
         checkForGap(publicKey, ledgerSeqFromPagingToken(tx.paging_token));
         cache.set(`ledger:cursor:tx:${publicKey}`, tx.paging_token, 3600).catch(() => {});
         try {
@@ -293,6 +387,12 @@ async function startGlobalPaymentStream(attempt = 0) {
   } catch {}
   if (globalPaymentsClose || stopped) return;
 
+  // Where the stream will resume decides what "caught up" means. Resuming from a
+  // cursor replays everything after it, so that cursor is the stream's position.
+  // Resuming at "now" skips anything older, so forget the old position and let the
+  // next poll re-baseline against Horizon instead of reporting a false lag.
+  lastPaymentStreamLedger = pagingToken === 'now' ? null : ledgerSeqFromPagingToken(pagingToken);
+
   globalLastEventAt = Date.now();
   const close = server
     .payments()
@@ -300,6 +400,11 @@ async function startGlobalPaymentStream(attempt = 0) {
     .stream({
       onmessage: (payment) => {
         attempt = 0;
+        const paymentLedger = ledgerSeqFromPagingToken(payment.paging_token);
+        if (paymentLedger != null) {
+          lastPaymentStreamLedger = Math.max(lastPaymentStreamLedger ?? 0, paymentLedger);
+        }
+        markLedgerActivity(paymentLedger);
         checkForGap('global:payments', ledgerSeqFromPagingToken(payment.paging_token));
         try { handleGlobalPayment(payment); } catch (err) {
           logger.warn('Failed to process payment', { error: err.message });
@@ -343,6 +448,7 @@ async function startGlobalEffectsStream(attempt = 0) {
 
   const close = server.effects().cursor(pagingToken).stream({
     onmessage: async (effect) => {
+      markLedgerActivity(ledgerSeqFromPagingToken(effect.paging_token));
       try {
         if (['claimable_balance_claimed', 'claimable_balance_clawed_back'].includes(effect.type)) {
           await reconcileClaimableBalanceEffect(effect);
@@ -427,13 +533,19 @@ async function initStreams() {
   } catch (err) {
     logger.error('Failed to load push targets', { error: err.message });
   }
-  startGlobalPaymentStream();
+  ledgerState.markLedgerListenerStarted();
+  // Wait for the payments stream to open before the first health poll, so that poll
+  // sees an open stream and can record proof of life within seconds of startup.
+  await startGlobalPaymentStream();
   startGlobalEffectsStream();
+  startHealthPoller();
 }
 
 /** Close every Horizon stream (used on shutdown). */
 function stopAll() {
   stopped = true;
+  stopHealthPoller();
+  lastPaymentStreamLedger = null;
   if (globalLivenessTimer) {
     clearInterval(globalLivenessTimer);
     globalLivenessTimer = null;
@@ -464,4 +576,6 @@ module.exports = {
   getHealth,
   getStreamCount,
   reconcileClaimableBalanceEffect,
+  evaluateLedgerLag,
+  pollHorizonOnce,
 };

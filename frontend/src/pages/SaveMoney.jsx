@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
 import useStepUp from '../hooks/useStepUp';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
 
 /** Calculate remaining seconds from now until unlockTimestamp (unix seconds). */
 function secondsUntil(unlockTimestamp) {
@@ -28,18 +29,16 @@ function formatCountdown(secs) {
 
 /**
  * Per-vault countdown component.
- * Ticks every second; cleans up on unmount.
+ * Ticks every second while the tab is visible; each tick recomputes from the unlock
+ * time, so it shows the right value as soon as the tab is visible again.
  */
 function VaultCountdown({ unlockTimestamp, balance }) {
   const [secs, setSecs] = useState(() => secondsUntil(unlockTimestamp));
 
-  useEffect(() => {
-    if (secs <= 0) return;
-    const id = setInterval(() => {
-      setSecs(secondsUntil(unlockTimestamp));
-    }, 1000);
-    return () => clearInterval(id);
-  }, [unlockTimestamp]); // eslint-disable-line react-hooks/exhaustive-deps -- restart the countdown only when the unlock time changes
+  useVisibleInterval(() => setSecs(secondsUntil(unlockTimestamp)), 1000, {
+    enabled: secs > 0,
+    resetKey: unlockTimestamp,
+  });
 
   const unlocked = secs <= 0;
   const penalty = (parseFloat(balance) * 0.1).toFixed(7);

@@ -1,4 +1,4 @@
-//! Upgrade governance (SC-172 / SC-173 / SC-174).
+//! Upgrade governance (SC-172 / SC-173 / SC-174 / SC-184).
 //!
 //! WASM upgrades are timelocked on-chain: the admin proposes a new WASM hash,
 //! which can only be executed after `UPGRADE_TIMELOCK_SECS`, giving users an
@@ -9,8 +9,21 @@
 //! the version chain one step at a time, emitting `Migrated { from_version,
 //! to_version }` for each step. `execute_upgrade` must be followed by
 //! `migrate` in the same deployment run.
+//! exit window. Proposals can be cancelled. `migrate` bumps the stored
+//! contract version after an upgrade.
+//!
+//! Admin rotation is two-step: the current admin proposes a successor, which
+//! is stored as `PendingAdmin` with an ETA (`ADMIN_ROTATION_DELAY_SECS`). The
+//! successor must then call `accept_admin` with their own signature after the
+//! delay. This prevents a lost or compromised admin key from being permanent.
+//!
+//! **Recommendation:** the admin should be a multisig account (or the
+//! `multisig-approval` contract) so that no single key can rotate the admin.
+//! The implementation lives in the shared `afripay-governance` crate; this
+//! module only wires it to this contract's storage layout.
 use crate::{DataKey, DisputeResolutionContract};
-use soroban_sdk::{contractimpl, contracttype, Address, BytesN, Env, Symbol};
+use afripay_governance::{governance_impl, AdminStore};
+use soroban_sdk::Env;
 
 /// Semantic version of this contract. Bumped on every upgrade.
 pub const CONTRACT_VERSION: u32 = 1;
@@ -42,6 +55,8 @@ pub(crate) fn bump_persistent(env: &Env, key: &GovKey) {
         PERSISTENT_BUMP_AMOUNT,
     );
 }
+/// Minimum delay between proposing a new admin and accepting it (24 hours).
+pub const ADMIN_ROTATION_DELAY_SECS: u64 = 24 * 60 * 60;
 
 /// Encodes identically to a `DataKey` variant of the same name, so existing
 /// `ContractVersion` entries remain readable.
@@ -50,12 +65,20 @@ pub enum GovKey {
     ContractVersion,
     PendingUpgrade,
     Paused,
+    PendingAdmin,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub struct PendingUpgrade {
     pub new_wasm_hash: BytesN<32>,
+    pub eta: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct PendingAdmin {
+    pub new_admin: Address,
     pub eta: u64,
 }
 
@@ -189,32 +212,78 @@ impl DisputeResolutionContract {
     pub fn get_contract_version(env: Env) -> u32 {
         bump_instance(&env);
         bump_persistent(&env, &GovKey::ContractVersion);
+impl AdminStore for DisputeResolutionContract {
+    fn admin(env: &Env) -> soroban_sdk::Address {
         env.storage()
             .persistent()
-            .get(&GovKey::ContractVersion)
-            .unwrap_or(0)
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized")
     }
 
-    /// Emergency pause (SC-174). Blocks entry points that move funds into the
-    /// contract; exit paths (refund / withdraw / release / cancel) stay open.
-    pub fn pause(env: Env, admin: Address) {
+    /// Propose a new admin. The successor must call `accept_admin` after
+    /// `ADMIN_ROTATION_DELAY_SECS` to complete the rotation.
+    /// Returns the earliest acceptance timestamp (eta).
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> u64 {
         require_gov_admin(&env, &admin, "Only admin can perform this action");
         env.storage().persistent().set(&GovKey::Paused, &true);
         bump_persistent(&env, &GovKey::Paused);
         env.events().publish((Symbol::new(&env, "Paused"),), admin);
+        let eta = env.ledger().timestamp() + ADMIN_ROTATION_DELAY_SECS;
+        let pending = PendingAdmin { new_admin: new_admin.clone(), eta };
+        env.storage().persistent().set(&GovKey::PendingAdmin, &pending);
+        env.events()
+            .publish((Symbol::new(&env, "AdminProposed"),), (new_admin, eta));
+        eta
     }
 
-    pub fn unpause(env: Env, admin: Address) {
+    /// Accept a pending admin rotation. Requires the new admin's signature and
+    /// that the rotation delay has elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        let pending: PendingAdmin = env
+            .storage()
+            .persistent()
+            .get(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        if pending.new_admin != new_admin {
+            panic!("Only the proposed admin can accept");
+        }
+        if env.ledger().timestamp() < pending.eta {
+            panic!("Admin rotation delay has not expired");
+        }
+        let old_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminChanged"),),
+            (old_admin, new_admin),
+        );
+    }
+
+    /// Cancel a pending admin rotation. Only the current admin may cancel.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
         require_gov_admin(&env, &admin, "Only admin can perform this action");
         env.storage().persistent().set(&GovKey::Paused, &false);
         bump_persistent(&env, &GovKey::Paused);
         env.events().publish((Symbol::new(&env, "Unpaused"),), admin);
+        env.storage()
+            .persistent()
+            .get::<GovKey, PendingAdmin>(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.events()
+            .publish((Symbol::new(&env, "AdminProposalCancelled"),), admin);
     }
 
-    pub fn is_paused(env: Env) -> bool {
-        paused(&env)
+    pub fn get_pending_admin(env: Env) -> Option<PendingAdmin> {
+        env.storage().persistent().get(&GovKey::PendingAdmin)
     }
 }
 
 /// v1 → v2 migration step. No-op today; add data rewrites here when v2 lands.
 fn migrate_v1_to_v2(_env: &Env) {}
+governance_impl!(DisputeResolutionContract, CONTRACT_VERSION);

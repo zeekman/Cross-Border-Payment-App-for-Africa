@@ -34,6 +34,7 @@ const db = require('./db');
 const app = require('./app');
 const { detectTestnetReset, startFallbackDurationMonitor, stopFallbackDurationMonitor } = require('./services/stellar');
 const { initEmailQueue, drainEmailQueue } = require('./services/email');
+const { initWebhookQueue, drainWebhookQueue } = require('./services/webhookQueue');
 const { startPriceRefreshJob, stopPriceRefreshJob } = require('./services/priceOracle');
 const ledgerListener = require('./services/ledgerListener');
 const { Server: SocketIOServer } = require('socket.io');
@@ -51,6 +52,8 @@ const PORT = process.env.PORT || 5000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 initEmailQueue();
+// Durable webhook delivery worker; like the other background workers it never runs under Jest.
+if (process.env.NODE_ENV !== 'test') initWebhookQueue();
 startPriceRefreshJob();
 
 const server = app.listen(PORT, () => {
@@ -176,6 +179,13 @@ async function shutdown(signal) {
   // io.close() disconnects all sockets and closes the underlying HTTP server.
   io.close(async () => {
     clearTimeout(forceExit);
+    try {
+      // Before the DB pool closes: an in-flight delivery still needs the database.
+      await drainWebhookQueue();
+      logger.info('Webhook queue drained');
+    } catch (err) {
+      logger.error('Error draining webhook queue', { message: err.message });
+    }
     try {
       await drainEmailQueue();
       logger.info('Email queue drained');

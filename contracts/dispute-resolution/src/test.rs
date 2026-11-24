@@ -675,6 +675,89 @@ fn test_set_super_arbitrator_non_admin_panics() {
     client.set_super_arbitrator(&impostor, &new_super);
 }
 
+// ── admin rotation (propose + accept + cancel) ────────────────────────────────
+
+const ADMIN_ROTATION_DELAY: u64 = 24 * 60 * 60;
+
+#[test]
+fn test_propose_and_accept_admin_rotates_admin() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY + 1);
+    client.accept_admin(&new_admin);
+
+    // New admin can perform admin-only actions.
+    let new_super = Address::generate(&env);
+    client.set_super_arbitrator(&new_admin, &new_super);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation delay has not elapsed")]
+fn test_accept_admin_before_delay_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY - 1);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic]
+fn test_accept_admin_requires_new_admin_auth() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY + 1);
+    // Drop the blanket auth mock: the new admin's signature is required.
+    env.set_auths(&[]);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_propose_admin_non_admin_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let impostor = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&impostor, &new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_old_admin_loses_privileges_after_rotation() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY + 1);
+    client.accept_admin(&new_admin);
+
+    // The old admin must no longer be able to perform admin-only actions.
+    client.set_super_arbitrator(&admin, &Address::generate(&env));
+}
+
+#[test]
+fn test_cancel_admin_proposal_blocks_accept() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY + 1);
+    // After cancellation there is no pending proposal to accept.
+    let result = client.try_accept_admin(&new_admin);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_cancel_admin_proposal_non_admin_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&impostor);
+}
+
 // ── cast_vote / multi-arbitrator panel ───────────────────────────────────────
 //
 // Panel setup: 3 arbitrators, quorum = 6001 bps (>60%).

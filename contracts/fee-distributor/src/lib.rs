@@ -79,6 +79,10 @@ fn bump_persistent(env: &Env, key: &DataKey) {
         PERSISTENT_BUMP_AMOUNT,
     );
 }
+// SC-197: Maximum number of recipients accepted by a single
+// `distribute_agent_pool` call.  Each recipient costs one token transfer plus
+// events; 25 keeps a full batch comfortably inside the default resource limits.
+const MAX_DISTRIBUTION_BATCH: u32 = 25;
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
@@ -110,10 +114,36 @@ pub enum DataKey {
     /// the admin-managed fee-token allow-list.  Replaces the O(n) `TokenList`
     /// scan/rewrite that `deposit_fee` used to perform on every call.
     TokenRegistered(Address),
+    /// SC-190: The proposed next admin, awaiting `accept_admin` after the ETA.
+    PendingAdmin,
+    /// SC-190: Ledger timestamp at which the pending admin may be accepted.
+    PendingAdminEta,
+    /// SC-195: Never-cleared "this token has been appended to `TokenList`"
+    /// flag.  Distinct from `TokenRegistered`, which is cleared by
+    /// `remove_fee_token`.  Guarantees a token is pushed to `TokenList` at most
+    /// once, so remove/re-add cycles cannot duplicate entries.
+    TokenSeen(Address),
+    /// SC-197: Admin-synced local allow-list of addresses eligible to receive
+    /// agent-pool distributions.  Kept in sync by the admin via
+    /// `set_agent_eligible`.
+    AgentEligible(Address),
 }
+
+/// SC-190: Delay (in seconds) between `propose_admin` and `accept_admin`.
+/// Gives the current admin (and any monitoring) time to notice and cancel a
+/// malicious or mistaken rotation before it takes effect.
+pub const ADMIN_ROTATION_DELAY_SECS: u64 = 24 * 60 * 60;
 
 // ── Event payloads ────────────────────────────────────────────────────────────
 
+/// Emitted on every `deposit_fee`.
+///
+/// ## Authentication
+/// - `depositor` is authenticated: `depositor.require_auth()` is enforced.
+/// - `source` is authenticated **only when it is `Some`**: the contract calls
+///   `source.require_auth()`, so a depositor cannot attribute a fee to an
+///   address that did not authorise the attribution.  When `source` is `None`
+///   no provenance is claimed.
 #[derive(Debug, Clone)]
 #[contracttype]
 pub struct EvtFeeDeposited {
@@ -121,6 +151,7 @@ pub struct EvtFeeDeposited {
     pub token: Address,
     pub amount: i128,
     pub total: i128,
+    /// Authenticated originating address (authorised via `require_auth`).
     pub source: Option<Address>,
 }
 
@@ -180,6 +211,40 @@ pub struct EvtFeeTokenRemoved {
     pub token: Address,
 }
 
+/// SC-190: Emitted when the current admin proposes a new admin.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtAdminProposed {
+    pub admin: Address,
+    pub new_admin: Address,
+    pub eta: u64,
+}
+
+/// SC-190: Emitted when a pending admin accepts the rotation.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtAdminChanged {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
+/// SC-190: Emitted when the current admin cancels a pending rotation.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtAdminProposalCancelled {
+    pub admin: Address,
+/// SC-197: Summary event emitted once per `distribute_agent_pool` batch.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtAgentPoolDistributedBatch {
+    pub admin: Address,
+    pub token: Address,
+    pub count: u32,
+    pub total: i128,
+    pub remaining: i128,
+    pub timestamp: u64,
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// SC-132: Register `token` in the fee-token allow-list in O(1) storage
@@ -195,6 +260,14 @@ fn register_token(env: &Env, token: &Address) {
     }
     env.storage().persistent().set(&key, &true);
     bump_persistent(env, &key);
+
+    // SC-195: `TokenSeen` is never cleared, so a token is appended to
+    // `TokenList` at most once even across remove/re-add cycles.
+    let seen_key = DataKey::TokenSeen(token.clone());
+    if env.storage().persistent().has(&seen_key) {
+        return;
+    }
+    env.storage().persistent().set(&seen_key, &true);
 
     // Maintain the enumeration list for `get_all_accumulated_fees`.  This is
     // only touched when a genuinely new token is registered (admin-gated), so
@@ -350,7 +423,10 @@ impl FeeDistributorContract {
     /// * `depositor` — Address sending the fee (must authorise this call).
     /// * `token`     — Asset contract address for the fee token (e.g. USDC or XLM).
     /// * `amount`    — Fee amount in token stroops (must be > 0).
-    /// * `source`    — Optional originating address for audit purposes.
+    /// * `source`    — Optional originating address for audit purposes.  When
+    ///                 `Some`, the address must authorise this call
+    ///                 (`source.require_auth()`), so fees cannot be attributed
+    ///                 to an address that did not consent.
     pub fn deposit_fee(
         env: Env,
         depositor: Address,
@@ -376,6 +452,12 @@ impl FeeDistributorContract {
         }
 
         depositor.require_auth();
+
+        // SC-196: an audit `source` must be authenticated by that address,
+        // otherwise any depositor could spoof fee provenance.
+        if let Some(ref src) = source {
+            src.require_auth();
+        }
 
         // Transfer the full amount from the depositor to this contract.
         token::Client::new(&env, &token).transfer(
@@ -500,6 +582,10 @@ impl FeeDistributorContract {
     /// * `admin`        — Must be the stored admin and authorise this call.
     /// * `token`        — Asset contract address for the pool token.
     /// * `recipients`   — `(agent, amount)` pairs; each amount must be > 0.
+    ///                    At most `MAX_DISTRIBUTION_BATCH` (25) entries; each
+    ///                    recipient must be on the admin-synced agent allow-list
+    ///                    (`set_agent_eligible`), must not be a duplicate, and
+    ///                    must not be the contract's own address.
     pub fn distribute_agent_pool(
         env: Env,
         admin: Address,
@@ -524,6 +610,11 @@ impl FeeDistributorContract {
         if recipients.is_empty() {
             panic!("recipients must not be empty");
         }
+        // SC-197: bound the batch so a large list cannot exhaust the resource
+        // budget mid-loop.
+        if recipients.len() > MAX_DISTRIBUTION_BATCH {
+            panic!("recipients exceed MAX_DISTRIBUTION_BATCH");
+        }
 
         let mut pool: i128 = env
             .storage()
@@ -534,6 +625,10 @@ impl FeeDistributorContract {
         let token_client = token::Client::new(&env, &token);
         let contract = env.current_contract_address();
 
+        let mut seen: Vec<Address> = Vec::new(&env);
+        let mut batch_total: i128 = 0;
+        let mut count: u32 = 0;
+
         for (agent, amount) in recipients.iter() {
             if amount <= 0 {
                 panic!("amount must be positive");
@@ -541,8 +636,27 @@ impl FeeDistributorContract {
             if amount > pool {
                 panic!("insufficient agent pool fees");
             }
+            // SC-197: reject the contract's own address.
+            if agent == contract {
+                panic!("recipient cannot be the contract address");
+            }
+            // SC-197: reject duplicate recipients within the batch.
+            if seen.contains(&agent) {
+                panic!("duplicate recipient");
+            }
+            // SC-197: only allow-listed agents may receive pool funds.
+            if !env
+                .storage()
+                .persistent()
+                .has(&DataKey::AgentEligible(agent.clone()))
+            {
+                panic!("recipient is not a registered agent");
+            }
+            seen.push_back(agent.clone());
 
             pool -= amount;
+            batch_total += amount;
+            count += 1;
 
             token_client.transfer(&contract, &agent, &amount);
 
@@ -563,6 +677,47 @@ impl FeeDistributorContract {
             .persistent()
             .set(&DataKey::AgentPoolFees(token.clone()), &pool);
         bump_persistent(&env, &DataKey::AgentPoolFees(token.clone()));
+
+        // SC-197: one summary event per batch.
+        env.events().publish(
+            (Symbol::new(&env, "AgentPoolDistributedBatch"),),
+            EvtAgentPoolDistributedBatch {
+                admin,
+                token,
+                count,
+                total: batch_total,
+                remaining: pool,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// SC-197: Add or remove `agent` from the local agent allow-list used by
+    /// `distribute_agent_pool`.  Admin only.
+    pub fn set_agent_eligible(env: Env, admin: Address, agent: Address, eligible: bool) {
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        admin.require_auth();
+
+        let key = DataKey::AgentEligible(agent);
+        if eligible {
+            env.storage().persistent().set(&key, &true);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+    }
+
+    /// SC-197: Returns true when `agent` is on the local agent allow-list.
+    pub fn is_agent_eligible(env: Env, agent: Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::AgentEligible(agent))
     }
 
     /// Read the accumulated platform fees for a token.
@@ -579,20 +734,29 @@ impl FeeDistributorContract {
 
     /// Return all non-zero per-token platform-treasury accumulators, paginated.
     ///
-    /// Returns a `Vec` of `(token_address, accumulated_amount)` pairs for tokens
-    /// in the `TokenList` starting at index `start` (0-based), returning at most
-    /// `limit` results (capped at 100 per call — the same ceiling used by
-    /// `agent-escrow::get_registered_agents`).  Only entries with a non-zero
-    /// platform balance are included in the result; callers should advance
-    /// `start` by the number of tokens *examined* (i.e. the raw `TokenList`
-    /// slice size), not by the number of items returned.  Use
+    /// Returns a `Vec` of `(token_address, accumulated_amount, is_active)`
+    /// tuples for tokens in the `TokenList` starting at index `start` (0-based),
+    /// returning at most `limit` results (capped at 100 per call — the same
+    /// ceiling used by `agent-escrow::get_registered_agents`).  Only entries
+    /// with a non-zero platform balance are included in the result; callers
+    /// should advance `start` by the number of tokens *examined* (i.e. the raw
+    /// `TokenList` slice size), not by the number of items returned.  Use
     /// `get_token_list_len` to determine when you have reached the end.
+    ///
+    /// SC-195: `is_active` reflects whether the token is currently on the
+    /// fee-token allow-list (`TokenRegistered`).  Removed tokens that still
+    /// hold a balance remain enumerable but are flagged inactive.
     ///
     /// # Arguments
     /// * `start` — 0-based index into the raw `TokenList`.
     /// * `limit` — Maximum tokens to examine in this call (capped at 100).
     pub fn get_all_accumulated_fees(env: Env, start: u32, limit: u32) -> Vec<(Address, i128)> {
         bump_instance(&env);
+    pub fn get_all_accumulated_fees(
+        env: Env,
+        start: u32,
+        limit: u32,
+    ) -> Vec<(Address, i128, bool)> {
         let cap: u32 = if limit > 100 { 100 } else { limit };
         let list: Vec<Address> = env
             .storage()
@@ -600,7 +764,7 @@ impl FeeDistributorContract {
             .get(&DataKey::TokenList)
             .unwrap_or_else(|| vec![&env]);
 
-        let mut result: Vec<(Address, i128)> = Vec::new(&env);
+        let mut result: Vec<(Address, i128, bool)> = Vec::new(&env);
         let len = list.len();
         let mut i = start;
         while i < len && (i - start) < cap {
@@ -610,16 +774,22 @@ impl FeeDistributorContract {
             if bal > 0 {
                 bump_persistent(&env, &key);
                 result.push_back((token, bal));
+                let is_active = is_registered(&env, &token);
+                result.push_back((token, bal, is_active));
             }
             i += 1;
         }
         result
     }
 
-    /// Return the total number of distinct tokens ever deposited.
+    /// Return the total number of distinct tokens ever registered.
     /// Use this with `get_all_accumulated_fees` to know when pagination is
     /// complete: keep calling with increasing `start` until
     /// `start >= get_token_list_len()`.
+    ///
+    /// SC-195: `TokenList` holds each token at most once (guarded by the
+    /// never-cleared `TokenSeen` flag), so this equals the number of distinct
+    /// tokens ever registered.
     pub fn get_token_list_len(env: Env) -> u32 {
         bump_instance(&env);
         let list: Vec<Address> = env
@@ -732,5 +902,139 @@ pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
     pub fn is_paused(env: Env) -> bool {
         bump_instance(&env);
         env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+    }
+
+    // ── Two-step admin rotation (SC-190) ──────────────────────────────────────
+    //
+    // The admin key controls fee withdrawal, agent-pool distribution, the split
+    // ratio, the fee-token allow-list and pause/unpause.  A lost or compromised
+    // key must therefore be recoverable.  Rotation is two-step and timelocked:
+    //
+    //   1. `propose_admin(admin, new_admin)` — current admin auth; stores the
+    //      pending admin with an ETA of `ADMIN_ROTATION_DELAY_SECS` in the
+    //      future and emits `AdminProposed`.
+    //   2. `accept_admin(new_admin)` — new admin auth, only after the ETA;
+    //      swaps `Admin` and emits `AdminChanged { old, new }`.
+    //
+    // `cancel_admin_proposal(admin)` lets the current admin abort a pending
+    // rotation (e.g. if the proposal was made with a mistyped address).
+    //
+    // RECOMMENDATION: the admin should be a multisig account (or the
+    // `multisig-approval` contract) so that no single key can rotate or use the
+    // admin privileges.
+
+    /// Propose `new_admin` as the next admin. Current admin only.
+    ///
+    /// Stores the pending admin with an ETA of `ADMIN_ROTATION_DELAY_SECS` from
+    /// now.  Re-proposing overwrites any existing pending proposal and resets
+    /// the ETA.  Emits `AdminProposed`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        admin.require_auth();
+
+        if new_admin == stored_admin {
+            panic!("new admin is current admin");
+        }
+
+        let eta: u64 = env
+            .ledger()
+            .timestamp()
+            .saturating_add(ADMIN_ROTATION_DELAY_SECS);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.storage().persistent().set(&DataKey::PendingAdminEta, &eta);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminProposed"), admin.clone()),
+            EvtAdminProposed {
+                admin,
+                new_admin,
+                eta,
+            },
+        );
+    }
+
+    /// Accept a pending admin rotation. New admin only, after the ETA.
+    ///
+    /// Requires `new_admin.require_auth()` and `now >= eta`.  Swaps `Admin` to
+    /// `new_admin`, clears the pending proposal and emits
+    /// `AdminChanged { old, new }`.  The old admin loses every privilege
+    /// immediately after this call.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .expect("no pending admin proposal");
+        if pending != new_admin {
+            panic!("unauthorized");
+        }
+        new_admin.require_auth();
+
+        let eta: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdminEta)
+            .expect("no pending admin proposal");
+        if env.ledger().timestamp() < eta {
+            panic!("admin rotation timelock not elapsed");
+        }
+
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        env.storage().persistent().remove(&DataKey::PendingAdminEta);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminChanged"), new_admin.clone()),
+            EvtAdminChanged {
+                old_admin: stored_admin,
+                new_admin,
+            },
+        );
+    }
+
+    /// Cancel a pending admin rotation. Current admin only.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        admin.require_auth();
+
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        env.storage().persistent().remove(&DataKey::PendingAdminEta);
+
+        env.events().publish(
+            (Symbol::new(&env, "AdminProposalCancelled"), admin.clone()),
+            EvtAdminProposalCancelled { admin },
+        );
+    }
+
+    /// Return the pending admin and its ETA, if a rotation is in flight.
+    pub fn get_pending_admin(env: Env) -> Option<(Address, u64)> {
+        let pending: Option<Address> = env.storage().persistent().get(&DataKey::PendingAdmin);
+        let eta: Option<u64> = env.storage().persistent().get(&DataKey::PendingAdminEta);
+        match (pending, eta) {
+            (Some(p), Some(e)) => Some((p, e)),
+            _ => None,
+        }
     }
 }

@@ -41,6 +41,12 @@ pub enum DataKey {
     PausedAt,
     /// Ledger timestamp at which the contract was last unpaused.
     UnpausedAt,
+    /// Two-step admin rotation: proposed new admin awaiting acceptance.
+    PendingAdmin,
+    /// Ledger timestamp after which the pending admin may accept.
+    PendingAdminEta,
+    /// Optional fee-distributor contract that receives platform fees.
+    FeeDistributor,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -110,6 +116,8 @@ pub struct PaymentExecuted {
     pub id: u64,
     pub executor: Address,
     pub amount: i128,
+    /// Platform fee charged for this execution (0 when fees are disabled).
+    pub fee_amount: i128,
     pub next_payment_at: u64,
     pub executions_completed: u64,
 }
@@ -260,6 +268,38 @@ impl RecurringPaymentsContract {
         );
     }
 
+    /// Configure (or clear) the fee-distributor contract that receives platform
+    /// fees. Admin only.
+    ///
+    /// When set, `execute_payment` routes fees through
+    /// `fee_distributor.deposit_fee(...)` so they are split between the
+    /// platform treasury and the agent reward pool and appear in
+    /// `fee-distributor::get_accumulated_fees`. When unset, fees are sent
+    /// directly to the admin address (legacy behaviour).
+    pub fn set_fee_distributor(env: Env, admin: Address, distributor: Option<Address>) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("only the admin can set the fee distributor");
+        }
+        match distributor {
+            Some(addr) => env
+                .storage()
+                .persistent()
+                .set(&DataKey::FeeDistributor, &addr),
+            None => env.storage().persistent().remove(&DataKey::FeeDistributor),
+        }
+    }
+
+    /// Return the configured fee-distributor address, if any.
+    pub fn get_fee_distributor(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::FeeDistributor)
+    }
+
     /// Sender authorizes a recurring transfer with configurable grace period and
     /// missed-execution threshold.
     ///
@@ -299,6 +339,12 @@ impl RecurringPaymentsContract {
         }
         if max_executions == u64::MAX {
             panic!("Invalid max_executions");
+        }
+        if recipient == sender {
+            panic!("recipient cannot be the sender");
+        }
+        if recipient == env.current_contract_address() {
+            panic!("recipient cannot be the contract");
         }
 
         sender.require_auth();
@@ -625,7 +671,12 @@ impl RecurringPaymentsContract {
             .unwrap_or(0);
 
         let fee_amount = if fee_bps > 0 {
-            schedule.amount * fee_bps as i128 / 10_000
+            schedule
+                .amount
+                .checked_mul(fee_bps as i128)
+                .expect("fee calculation overflow")
+                .checked_div(10_000)
+                .expect("fee calculation overflow")
         } else {
             0
         };
@@ -639,7 +690,7 @@ impl RecurringPaymentsContract {
             &net_amount,
         );
         if fee_amount > 0 {
-            let admin: Address = env
+            let distributor: Option<Address> = env
                 .storage()
                 .instance()
                 .get(&DataKey::Admin)
@@ -650,6 +701,46 @@ impl RecurringPaymentsContract {
                 &admin,
                 &fee_amount,
             );
+                .persistent()
+                .get(&DataKey::FeeDistributor);
+            match distributor {
+                Some(distributor) => {
+                    // Pull the fee into this contract, then forward it to the
+                    // fee-distributor, which splits it between the platform
+                    // treasury and the agent reward pool and records it in its
+                    // per-token fee ledger.
+                    token.transfer_from(
+                        &env.current_contract_address(),
+                        &schedule.sender,
+                        &env.current_contract_address(),
+                        &fee_amount,
+                    );
+                    let distributor_client =
+                        fee_distributor::Client::new(&env, &distributor);
+                    distributor_client.deposit_fee(
+                        &env.current_contract_address(),
+                        &token_address,
+                        &fee_amount,
+                        &Some(schedule.sender.clone()),
+                    );
+                }
+                None => {
+                    // Fallback (no fee distributor configured): preserve the
+                    // legacy behaviour of sending the fee straight to the
+                    // admin address.
+                    let admin: Address = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::Admin)
+                        .expect("not initialized");
+                    token.transfer_from(
+                        &env.current_contract_address(),
+                        &schedule.sender,
+                        &admin,
+                        &fee_amount,
+                    );
+                }
+            }
         }
 
         // Successful execution resets the consecutive miss counter.
@@ -686,6 +777,7 @@ impl RecurringPaymentsContract {
                 id: schedule_id,
                 executor,
                 amount: schedule.amount,
+                fee_amount,
                 next_payment_at: schedule.next_payment_at,
                 executions_completed: schedule.executions_completed,
             },
@@ -907,6 +999,12 @@ impl RecurringPaymentsContract {
         if schedule.status == ScheduleStatus::Completed {
             panic!("cannot update completed schedule");
         }
+        if new_recipient == sender {
+            panic!("recipient cannot be the sender");
+        }
+        if new_recipient == env.current_contract_address() {
+            panic!("recipient cannot be the contract");
+        }
 
         let old_recipient = schedule.recipient.clone();
         schedule.recipient = new_recipient.clone();
@@ -1082,3 +1180,52 @@ impl RecurringPaymentsContract {
 
 mod governance;
 pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
+
+#[contractimpl]
+impl RecurringPaymentsContract {
+    /// Propose a new admin. The current admin must authorize. The proposal
+    /// becomes acceptable by the new admin after `ADMIN_ROTATION_DELAY_SECS`.
+    ///
+    /// The admin should be a multisig account or the `multisig-approval`
+    /// contract so a single lost or compromised key cannot take over.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        governance::propose_admin(&env, &admin, &new_admin);
+    }
+
+    /// Accept a pending admin proposal. Requires the new admin's signature and
+    /// that the rotation delay has elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        governance::accept_admin(&env, &new_admin);
+    }
+
+    /// Cancel a pending admin proposal. Only the current admin may cancel.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        governance::cancel_admin_proposal(&env, &admin);
+    }
+
+    /// Return the current admin address.
+    pub fn get_admin(env: Env) -> Address {
+        governance::get_admin(&env)
+    }
+
+    /// Return the pending admin proposal, if any, as `(new_admin, eta)`.
+    pub fn get_pending_admin(env: Env) -> Option<(Address, u64)> {
+        governance::get_pending_admin(&env)
+/// Minimal client interface for the fee-distributor contract.
+mod fee_distributor {
+    use soroban_sdk::{contractclient, Address, Env};
+
+    #[contractclient(name = "Client")]
+    pub trait FeeDistributor {
+        /// Deposit `amount` of `token` as a platform fee, attributed to
+        /// `source`. The caller must have transferred the tokens to itself and
+        /// authorize this call.
+        fn deposit_fee(
+            env: Env,
+            contract: Address,
+            token: Address,
+            amount: i128,
+            source: Option<Address>,
+        );
+    }
+}

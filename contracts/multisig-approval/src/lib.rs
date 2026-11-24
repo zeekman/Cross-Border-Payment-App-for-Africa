@@ -49,8 +49,15 @@ pub struct Proposal {
     pub description: String,
     pub amount: i128,
     pub recipient: Address,
+    /// Cumulative **signer-weight** of approvals (not a head count). Compared
+    /// against the quorum weight threshold.
     pub approvals: u32,
+    /// Number of signers who rejected the proposal (head count, not weighted).
     pub rejections: u32,
+    /// Cumulative **signer-weight** of rejections, in the same units as
+    /// `approvals`. Use this — not `rejections` — when comparing against
+    /// `approvals` or quorum.
+    pub rejection_weight: u32,
     pub status: TxStatus,
     pub expires_at: u64,
 }
@@ -137,6 +144,74 @@ pub struct EvtInitialized {
     pub quorum: u32,
 }
 
+// ── Treasury-workflow event payloads (issue #1447) ────────────────────────────
+
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtProposed {
+    pub proposer: Address,
+    pub amount: i128,
+    pub recipient: Address,
+    pub description: String,
+    pub expires_at: u64,
+}
+
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtApproved {
+    pub approver: Address,
+    pub weight: u32,
+    pub total_approvals: u32,
+    pub quorum: u32,
+}
+
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtRejected {
+    pub approver: Address,
+    pub total_rejections: u32,
+}
+
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtCancelled {
+    pub proposer: Address,
+}
+
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtExpired {
+    pub expired_at: u64,
+}
+
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtExecuted {
+    pub executed_at: u64,
+}
+
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtQuorumProposed {
+    pub proposer: Address,
+    pub new_quorum: u32,
+    pub expires_at: u64,
+}
+
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtQuorumChanged {
+    pub old_quorum: u32,
+    pub new_quorum: u32,
+}
+
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtWeightSet {
+    pub signer: Address,
+    pub weight: u32,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -145,11 +220,30 @@ pub struct MultisigContract;
 #[contractimpl]
 impl MultisigContract {
     /// Initialize the contract with a list of approvers and minimum quorum.
+    ///
+    /// Rejects an empty approver list and duplicate addresses (issue #1446):
+    /// duplicates would inflate the apparent quorum weight while only one vote
+    /// per address is possible, deadlocking the treasury.
     pub fn initialize(env: Env, admin: Address, approvers: Vec<Address>, quorum: u32) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
-        assert!(quorum > 0 && quorum <= approvers.len(), "invalid quorum");
+        assert!(!approvers.is_empty(), "no approvers");
+        // Reject duplicate approvers.
+        let mut distinct: Vec<Address> = Vec::new(&env);
+        for a in approvers.iter() {
+            if distinct.contains(&a) {
+                panic!("duplicate approver");
+            }
+            distinct.push_back(a);
+        }
+        assert!(quorum > 0, "invalid quorum");
+        // Quorum must be reachable by the distinct approvers' weights.
+        let mut total_weight: u32 = 0;
+        for a in approvers.iter() {
+            total_weight += Self::signer_weight(&env, &a);
+        }
+        assert!(quorum <= total_weight, "invalid quorum");
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Approvers, &approvers);
@@ -162,6 +256,11 @@ impl MultisigContract {
             (Symbol::new(&env, "Initialized"),),
             EvtInitialized { admin, approvers, quorum },
         );
+    }
+
+    /// Return the current approver set (issue #1446).
+    pub fn get_approvers(env: Env) -> Vec<Address> {
+        env.storage().instance().get(&DataKey::Approvers).unwrap()
     }
 
     /// Propose a new transaction. Any approver may propose.
@@ -179,18 +278,24 @@ impl MultisigContract {
         let expires_at = env.ledger().timestamp() + proposal_ttl;
 
         let proposal = Proposal {
-            proposer,
-            description,
+            proposer: proposer.clone(),
+            description: description.clone(),
             amount,
-            recipient,
+            recipient: recipient.clone(),
             approvals: 0,
             rejections: 0,
+            rejection_weight: 0,
             status: TxStatus::Pending,
             expires_at,
         };
         env.storage().persistent().set(&DataKey::Proposal(id), &proposal);
         Self::bump_persistent(&env, &DataKey::Proposal(id));
         env.storage().instance().set(&DataKey::TxCounter, &(id + 1));
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_proposed"), id),
+            EvtProposed { proposer, amount, recipient, description, expires_at },
+        );
         id
     }
 
@@ -217,16 +322,40 @@ impl MultisigContract {
         env.storage().persistent().set(&DataKey::Voted(tx_id, approver.clone()), &true);
         Self::bump_persistent(&env, &DataKey::Voted(tx_id, approver.clone()));
         proposal.approvals += Self::signer_weight(&env, &approver);
+        let weight = Self::signer_weight(&env, &approver);
+        proposal.approvals += weight;
 
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
-        if proposal.approvals >= quorum {
+        let reached_quorum = proposal.approvals >= quorum;
+        if reached_quorum {
             proposal.status = TxStatus::Executed;
         }
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
         Self::bump_persistent(&env, &DataKey::Proposal(tx_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_approved"), tx_id),
+            EvtApproved {
+                approver,
+                weight,
+                total_approvals: proposal.approvals,
+                quorum,
+            },
+        );
+        if reached_quorum {
+            env.events().publish(
+                (Symbol::new(&env, "ms_executed"), tx_id),
+                EvtExecuted { executed_at: env.ledger().timestamp() },
+            );
+        }
     }
 
-    /// Reject a pending proposal. Marks as rejected when majority of approvers reject.
+    /// Reject a pending proposal. Marks as rejected when the remaining
+    /// signer weight can no longer lift approvals to quorum.
+    ///
+    /// Rejections are tracked both as a head count (`rejections`) and as
+    /// cumulative signer weight (`rejection_weight`), the latter being in the
+    /// same units as `approvals`.
     pub fn reject(env: Env, approver: Address, tx_id: u64) {
         Self::bump_instance(&env);
         approver.require_auth();
@@ -235,9 +364,15 @@ impl MultisigContract {
         let mut proposal = Self::get_pending(&env, tx_id);
         assert!(!env.storage().persistent().has(&DataKey::Voted(tx_id, approver.clone())), "already voted");
 
+        // Check expiry
+        if env.ledger().timestamp() > proposal.expires_at {
+            panic!("Proposal has expired");
+        }
+
         env.storage().persistent().set(&DataKey::Voted(tx_id, approver.clone()), &true);
         Self::bump_persistent(&env, &DataKey::Voted(tx_id, approver.clone()));
         proposal.rejections += 1;
+        proposal.rejection_weight += Self::signer_weight(&env, &approver);
 
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
@@ -254,6 +389,14 @@ impl MultisigContract {
         }
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
         Self::bump_persistent(&env, &DataKey::Proposal(tx_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_rejected"), tx_id),
+            EvtRejected {
+                approver,
+                total_rejections: proposal.rejections,
+            },
+        );
     }
 
     /// Mark an expired proposal as Expired. Anyone may call this.
@@ -270,6 +413,11 @@ impl MultisigContract {
         proposal.status = TxStatus::Expired;
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
         Self::bump_persistent(&env, &DataKey::Proposal(tx_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_expired"), tx_id),
+            EvtExpired { expired_at: env.ledger().timestamp() },
+        );
     }
 
     /// Read a proposal.
@@ -296,6 +444,11 @@ impl MultisigContract {
         proposal.status = TxStatus::Cancelled;
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
         Self::bump_persistent(&env, &DataKey::Proposal(tx_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_cancelled"), tx_id),
+            EvtCancelled { proposer },
+        );
     }
 
     /// Propose a quorum threshold change. Any approver may propose.
@@ -312,7 +465,7 @@ impl MultisigContract {
         let expires_at = env.ledger().timestamp() + proposal_ttl;
 
         let proposal = QuorumChangeProposal {
-            proposer,
+            proposer: proposer.clone(),
             new_quorum,
             approvals: 0,
             rejections: 0,
@@ -322,6 +475,11 @@ impl MultisigContract {
         env.storage().persistent().set(&DataKey::QuorumProposal(id), &proposal);
         Self::bump_persistent(&env, &DataKey::QuorumProposal(id));
         env.storage().instance().set(&DataKey::QuorumCounter, &(id + 1));
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_quorum_proposed"), id),
+            EvtQuorumProposed { proposer, new_quorum, expires_at },
+        );
         id
     }
 
@@ -345,6 +503,11 @@ impl MultisigContract {
         }
         env.storage().persistent().set(&DataKey::QuorumProposal(id), &proposal);
         Self::bump_persistent(&env, &DataKey::QuorumProposal(id));
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_quorum_changed"), id),
+            EvtQuorumChanged { old_quorum: quorum, new_quorum: proposal.new_quorum },
+        );
     }
 
     /// Reject a pending quorum-change proposal. Marks as rejected when quorum is no longer reachable.
@@ -393,6 +556,11 @@ impl MultisigContract {
             panic!("TTL must be positive");
         }
         env.storage().instance().set(&DataKey::ProposalTtl, &new_ttl);
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_ttl_updated"),),
+            new_ttl,
+        );
     }
 
     /// Clean up an expired proposal. Anyone may call this.
@@ -435,6 +603,20 @@ impl MultisigContract {
             panic!("Rotation already pending");
         }
 
+        let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
+        match action {
+            RotationAction::Add => {
+                if approvers.contains(&signer) {
+                    panic!("signer already present");
+                }
+            }
+            RotationAction::Remove => {
+                if !approvers.contains(&signer) {
+                    panic!("signer not present");
+                }
+            }
+        }
+
         let effective_at = env.ledger().timestamp() + ROTATION_DELAY;
         let rotation = PendingRotation {
             action,
@@ -475,23 +657,27 @@ impl MultisigContract {
 
         match rotation.action {
             RotationAction::Add => {
-                if !approvers.contains(&rotation.signer) {
-                    approvers.push_back(rotation.signer.clone());
+                // Reject a signer that is already present (issue #1446).
+                if approvers.contains(&rotation.signer) {
+                    panic!("signer already present");
                 }
+                approvers.push_back(rotation.signer.clone());
             }
             RotationAction::Remove => {
                 let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
-                // After removal the list would have approvers.len() - 1 members.
-                // If that is less than quorum the threshold becomes unreachable.
-                if approvers.len() as u32 <= quorum {
-                    panic!("Cannot remove: threshold would be unreachable");
-                }
-                // Rebuild the approvers list without the target signer.
+                // Rebuild the approvers list without the target signer, then
+                // re-validate that quorum is still reachable by the remaining
+                // distinct signers' weights (issue #1446).
                 let mut new_approvers: Vec<Address> = Vec::new(&env);
+                let mut remaining_weight: u32 = 0;
                 for a in approvers.iter() {
                     if a != rotation.signer {
+                        remaining_weight += Self::signer_weight(&env, &a);
                         new_approvers.push_back(a);
                     }
+                }
+                if remaining_weight < quorum {
+                    panic!("Cannot remove: threshold would be unreachable");
                 }
                 approvers = new_approvers;
             }
@@ -631,6 +817,11 @@ impl MultisigContract {
         Self::assert_is_approver(&env, &signer);
         env.storage().persistent().set(&DataKey::SignerWeight(signer.clone()), &weight);
         Self::bump_persistent(&env, &DataKey::SignerWeight(signer));
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_weight_set"), signer.clone()),
+            EvtWeightSet { signer, weight },
+        );
     }
 
     /// Deterministic SHA-256 digest an off-chain signer signs to approve a
@@ -689,7 +880,6 @@ impl MultisigContract {
         preimage.append(&Bytes::from_array(&env, &proposal.amount.to_be_bytes()));
         preimage.append(&Bytes::from_array(&env, &proposal.expires_at.to_be_bytes()));
         preimage.append(&proposal.description.to_xdr(&env));
-        env.crypto().sha256(&preimage)
         env.crypto().sha256(&preimage).into()
     }
 
@@ -750,12 +940,6 @@ impl MultisigContract {
             // Verify ed25519 signature over the proposal hash. Only `G…` account
             // signers can sign off-chain; contract signers use `approve`.
             let pub_key = Self::account_ed25519_key(&env, &signer);
-            // Verify ed25519 signature over the proposal hash
-            let signer_xdr = signer.clone().to_xdr(&env);
-            let pub_key: BytesN<32> = signer_xdr
-                .slice(signer_xdr.len() - 32..)
-                .try_into()
-                .expect("Invalid signer public key");
             env.crypto().ed25519_verify(&pub_key, &Bytes::from(hash.clone()), &sig);
 
             total_weight += Self::signer_weight(&env, &signer);
@@ -768,6 +952,40 @@ impl MultisigContract {
         proposal.status = TxStatus::Executed;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
         Self::bump_persistent(&env, &DataKey::Proposal(proposal_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "ms_executed"), proposal_id),
+            EvtExecuted { executed_at: env.ledger().timestamp() },
+        );
+    }
+
+    // --- admin rotation (two-step, issue #1444) ---
+
+    /// Propose a new admin. Current admin only. The rotation is time-locked
+    /// (`ADMIN_ROTATION_DELAY`) and must be accepted by the new admin.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        governance::propose_admin(&env, &admin, &new_admin);
+    }
+
+    /// Accept a pending admin rotation. Requires the new admin's signature and
+    /// that the time-lock has elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        governance::accept_admin(&env, &new_admin);
+    }
+
+    /// Cancel a pending admin rotation. Current admin only.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        governance::cancel_admin_proposal(&env, &admin);
+    }
+
+    /// Read the current admin.
+    pub fn get_admin(env: Env) -> Address {
+        governance::get_admin(&env)
+    }
+
+    /// Read the pending admin rotation, if any.
+    pub fn get_pending_admin(env: Env) -> Option<governance::PendingAdmin> {
+        governance::get_pending_admin(&env)
     }
 }
 

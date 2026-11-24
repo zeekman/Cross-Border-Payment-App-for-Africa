@@ -177,6 +177,36 @@ impl LoyaltyTokenContract {
         );
     }
 
+    // ── Admin rotation (two-step, timelocked) ─────────────────────────────────
+
+    /// Propose a new admin. The current admin must authorise.
+    ///
+    /// Stores the pending admin with an ETA of `now + ADMIN_ROTATION_DELAY_SECS`
+    /// and emits `AdminProposed`. The proposal must be accepted by the new admin
+    /// via [`accept_admin`] once the delay has elapsed.
+    ///
+    /// It is recommended that the admin be a multisig account or the
+    /// `multisig-approval` contract.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        governance::propose_admin(&env, &admin, &new_admin);
+    }
+
+    /// Accept a pending admin proposal. The new admin must authorise and the
+    /// ETA must have elapsed. Emits `AdminChanged { old, new }`.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        governance::accept_admin(&env, &new_admin);
+    }
+
+    /// Cancel a pending admin proposal. The current admin must authorise.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        governance::cancel_admin_proposal(&env, &admin);
+    }
+
+    /// Return the currently stored admin address.
+    pub fn admin(env: Env) -> Address {
+        governance::get_admin(&env)
+    }
+
     // ── SEP-41: token metadata ────────────────────────────────────────────────
 
     pub fn name(env: Env) -> String {
@@ -233,6 +263,7 @@ impl LoyaltyTokenContract {
         admin.require_auth();
 
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = governance::get_admin(&env);
         if admin != stored_admin {
             panic!("unauthorized: caller is not admin");
         }
@@ -276,6 +307,7 @@ impl LoyaltyTokenContract {
         admin.require_auth();
 
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = governance::get_admin(&env);
         if admin != stored_admin {
             panic!("unauthorized: caller is not admin");
         }
@@ -533,6 +565,7 @@ impl LoyaltyTokenContract {
         governance::require_not_paused(&env);
         admin.require_auth();
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let stored_admin: Address = governance::get_admin(&env);
         if admin != stored_admin {
             panic!("unauthorized: caller is not admin");
         }

@@ -829,3 +829,137 @@ fn test_decrease_then_increase_allowance_round_trip() {
     client.increase_allowance(&owner, &spender, &30, &FAR_FUTURE);
     assert_eq!(client.allowance(&owner, &spender), 70);
 }
+
+// ── two-step admin rotation ───────────────────────────────────────────────────
+
+/// The rotation delay used by the shared governance module (24 h in seconds).
+const ADMIN_ROTATION_DELAY: u64 = 24 * 60 * 60;
+
+fn advance_past_rotation_delay(env: &Env) {
+    env.ledger()
+        .with_mut(|l| l.timestamp = BASE_TIMESTAMP + ADMIN_ROTATION_DELAY + 1);
+}
+
+#[test]
+fn test_propose_admin_stores_pending_admin() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    assert_eq!(client.pending_admin(), Some(new_admin));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_propose_admin_non_admin_panics() {
+    let (env, client, _) = setup();
+    let impostor = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&impostor, &new_admin);
+}
+
+#[test]
+fn test_accept_admin_after_delay_succeeds() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    advance_past_rotation_delay(&env);
+    client.accept_admin(&new_admin);
+    assert_eq!(client.pending_admin(), None);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation delay not elapsed")]
+fn test_accept_admin_before_delay_panics() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    // Still inside the delay window.
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "no pending admin")]
+fn test_accept_admin_without_proposal_panics() {
+    let (env, client, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not pending admin")]
+fn test_accept_admin_wrong_caller_panics() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    advance_past_rotation_delay(&env);
+    client.accept_admin(&impostor);
+}
+
+#[test]
+fn test_cancel_admin_proposal_clears_pending() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+    assert_eq!(client.pending_admin(), None);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_cancel_admin_proposal_non_admin_panics() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&impostor);
+}
+
+#[test]
+#[should_panic(expected = "no pending admin")]
+fn test_accept_admin_after_cancel_panics() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+    advance_past_rotation_delay(&env);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+fn test_new_admin_gains_privileges_after_rotation() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    advance_past_rotation_delay(&env);
+    client.accept_admin(&new_admin);
+    // New admin can mint.
+    client.mint(&new_admin, &user, &10);
+    assert_eq!(client.balance(&user), 10);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_old_admin_loses_privileges_after_rotation() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    advance_past_rotation_delay(&env);
+    client.accept_admin(&new_admin);
+    // Old admin can no longer mint.
+    client.mint(&admin, &user, &10);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_old_admin_cannot_propose_after_rotation() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+    let another = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    advance_past_rotation_delay(&env);
+    client.accept_admin(&new_admin);
+    client.propose_admin(&admin, &another);
+}

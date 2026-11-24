@@ -35,18 +35,18 @@ describe('webhook service: sign', () => {
 });
 
 describe('webhook service: deliver', () => {
-  test('queries only active webhooks subscribed to the event', async () => {
+  test('queries only the event owner\'s active webhooks subscribed to the event', async () => {
     db.query.mockResolvedValue({ rows: [] });
-    await deliver('payment.sent', { id: 'tx1' });
+    await deliver('payment.sent', 'u1', { id: 'tx1' });
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('active = true'),
-      ['payment.sent']
+      ['payment.sent', 'u1']
     );
   });
 
   test('does not throw when no webhooks are registered', async () => {
     db.query.mockResolvedValue({ rows: [] });
-    await expect(deliver('payment.sent', {})).resolves.toBeUndefined();
+    await expect(deliver('payment.sent', 'u1', {})).resolves.toBeUndefined();
   });
 });
 

@@ -762,6 +762,13 @@ impl AgentEscrowContract {
 
     /// Rotate the admin. Both the current and the new admin must authorise,
     /// so the role cannot be handed to a mistyped or uncontrolled address.
+    ///
+    /// This is the immediate, single-step rotation. For the delayed two-step
+    /// rotation (SC-190) use the governance entry points [`Self::propose_admin`],
+    /// [`Self::accept_admin`] and [`Self::cancel_admin_proposal`], which are
+    /// implemented in the shared `governance` module and compiled into this
+    /// contract. The admin should be a multisig account or the
+    /// `multisig-approval` contract so a single lost key is never fatal.
     pub fn update_admin(env: Env, new_admin: Address) {
         Self::bump_instance(&env);
         let old_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
@@ -880,3 +887,8 @@ impl AgentEscrowContract {
 
 mod governance;
 pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
+// The governance module carries its own `#[contractimpl]` block, so the
+// two-step admin rotation (`propose_admin` / `accept_admin` /
+// `cancel_admin_proposal`) is exported on `AgentEscrowContract` alongside the
+// functions above. All admin-only entry points read `DataKey::Admin`, so once
+// `accept_admin` swaps it the previous admin loses every privilege.

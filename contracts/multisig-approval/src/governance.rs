@@ -1,11 +1,10 @@
-//! Upgrade governance (SC-172 / SC-173).
+//! Upgrade governance (SC-172 / SC-173 / SC-184).
 //!
-//! WASM upgrades are timelocked on-chain: the admin proposes a new WASM hash,
-//! which can only be executed after `UPGRADE_TIMELOCK_SECS`, giving users an
-//! exit window. Proposals can be cancelled. `migrate` bumps the stored
-//! contract version after an upgrade.
+//! The implementation lives in the shared `afripay-governance` crate; this
+//! module only wires it to this contract's storage layout.
 use crate::{DataKey, MultisigContract};
-use soroban_sdk::{contractimpl, contracttype, Address, BytesN, Env, Symbol};
+use afripay_governance::{governance_impl, AdminStore};
+use soroban_sdk::Env;
 
 /// Semantic version of this contract. Bumped on every upgrade.
 pub const CONTRACT_VERSION: u32 = 1;
@@ -37,6 +36,12 @@ pub(crate) fn bump_persistent(env: &Env, key: &GovKey) {
         PERSISTENT_BUMP_AMOUNT,
     );
 }
+/// Minimum delay between proposing a new admin and accepting it (24 hours).
+///
+/// The delay gives users and integrators an exit window if the current admin
+/// key is compromised and starts a rotation. The admin should be a multisig
+/// account or the `multisig-approval` contract itself.
+pub const ADMIN_ROTATION_DELAY_SECS: u64 = 24 * 60 * 60;
 
 /// Encodes identically to a `DataKey` variant of the same name, so existing
 /// `ContractVersion` entries remain readable.
@@ -44,12 +49,21 @@ pub(crate) fn bump_persistent(env: &Env, key: &GovKey) {
 pub enum GovKey {
     ContractVersion,
     PendingUpgrade,
+    PendingAdmin,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub struct PendingUpgrade {
     pub new_wasm_hash: BytesN<32>,
+    pub eta: u64,
+}
+
+/// A proposed admin rotation, executable once `eta` has passed.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct PendingAdmin {
+    pub new_admin: Address,
     pub eta: u64,
 }
 
@@ -167,12 +181,79 @@ impl MultisigContract {
         bump_instance(&env);
         bump_persistent(&env, &GovKey::ContractVersion);
         env.storage()
+/// This contract keeps its admin in **instance** storage.
+impl AdminStore for MultisigContract {
+    fn admin(env: &Env) -> soroban_sdk::Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized")
+    }
+
+    /// Step 1 of two-step admin rotation: the current admin proposes a
+    /// successor. The rotation only completes after `ADMIN_ROTATION_DELAY_SECS`
+    /// and the new admin's own signature. Returns the earliest acceptance
+    /// timestamp (eta).
+    ///
+    /// The admin should be a multisig account or the `multisig-approval`
+    /// contract so a single lost or compromised key cannot rotate governance.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> u64 {
+        require_gov_admin(&env, &admin, "Only admin can propose a new admin");
+        let eta = env.ledger().timestamp() + ADMIN_ROTATION_DELAY_SECS;
+        let pending = PendingAdmin { new_admin: new_admin.clone(), eta };
+        env.storage().persistent().set(&GovKey::PendingAdmin, &pending);
+        env.events()
+            .publish((Symbol::new(&env, "AdminProposed"),), (new_admin, eta));
+        eta
+    }
+
+    /// Step 2 of two-step admin rotation: the proposed admin accepts, after
+    /// the delay has elapsed. Requires the new admin's signature.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        let pending: PendingAdmin = env
+            .storage()
             .persistent()
-            .get(&GovKey::ContractVersion)
-            .unwrap_or(0)
+            .get(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        if pending.new_admin != new_admin {
+            panic!("Only the proposed admin can accept");
+        }
+        if env.ledger().timestamp() < pending.eta {
+            panic!("Admin rotation delay has not expired");
+        }
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminChanged"),),
+            (old_admin, new_admin),
+        );
+    }
+
+    /// Cancel a pending admin rotation. Only the current admin may cancel.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        require_gov_admin(&env, &admin, "Only admin can cancel an admin proposal");
+        let pending: PendingAdmin = env
+            .storage()
+            .persistent()
+            .get(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.events()
+            .publish((Symbol::new(&env, "AdminProposalCancelled"),), pending.new_admin);
+    }
+
+    pub fn get_pending_admin(env: Env) -> Option<PendingAdmin> {
+        env.storage().persistent().get(&GovKey::PendingAdmin)
     }
 }
 
 /// v1 -> v2 migration step. No storage changes yet; kept as a hook so the
 /// versioned loop is exercised and future migrations have a home.
 fn migrate_v1_to_v2(_env: &Env) {}
+governance_impl!(MultisigContract, 1);

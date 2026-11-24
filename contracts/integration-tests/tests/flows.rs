@@ -117,6 +117,37 @@ fn recurring_payment_with_fee_flow() {
 }
 
 #[test]
+fn recurring_payment_fee_routes_through_fee_distributor() {
+    let s = setup();
+    let recurring = RecurringPaymentsContractClient::new(
+        &s.env,
+        &s.env.register_contract(None, RecurringPaymentsContract),
+    );
+    recurring.initialize(&s.usdc.address);
+    // Route recurring-payment fees through the fee distributor instead of the admin EOA.
+    recurring.set_fee_distributor(&s.admin, &s.fees.address);
+
+    let (sender, recipient) = (Address::generate(&s.env), Address::generate(&s.env));
+    s.usdc_admin.mint(&sender, &10_000);
+    s.usdc.approve(&sender, &recurring.address, &10_000, &(s.env.ledger().sequence() + 1_000));
+
+    let interval = 86_400u64;
+    let fee_bps = 100u32; // 1%
+    let sid = recurring.authorize_recurring(&sender, &recipient, &1_000, &interval, &fee_bps);
+    s.env.ledger().with_mut(|l| l.timestamp += interval);
+    recurring.execute_payment(&s.admin, &sid);
+
+    // Recipient receives the full amount; the fee is pulled into the distributor.
+    assert_eq!(s.usdc.balance(&recipient), 1_000);
+    assert_eq!(s.usdc.balance(&sender), 8_990);
+    assert_eq!(s.usdc.balance(&s.fees.address), 10);
+
+    // The fee is recorded in the distributor's ledger and split into the agent pool.
+    assert_eq!(s.fees.get_accumulated_fees(&s.usdc.address), 10);
+    assert!(s.fees.get_agent_pool(&s.usdc.address) > 0);
+}
+
+#[test]
 fn savings_deposit_withdraw_flow() {
     let s = setup();
     let vault = SavingsVaultContractClient::new(

@@ -1283,6 +1283,43 @@ impl DisputeResolutionContract {
         env.storage().persistent().get(&DataKey::EscrowContract)
     }
 
+    // ── Admin rotation (two-step, timelocked) ─────────────────────────────────
+
+    /// Step 1 of two-step admin rotation. The current admin nominates
+    /// `new_admin`; the change only takes effect once the nominee accepts it
+    /// after the governance timelock has elapsed.
+    ///
+    /// The admin should be a multisig account or the `multisig-approval`
+    /// contract so that a single lost or compromised key cannot lock the
+    /// contract out of administration.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        governance::propose_admin(&env, &DataKey::Admin, admin, new_admin);
+    }
+
+    /// Step 2 of two-step admin rotation. The nominee must authorise the call
+    /// and the timelock must have elapsed; the stored admin is then replaced.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        governance::accept_admin(&env, &DataKey::Admin, new_admin);
+    }
+
+    /// Cancel a pending admin proposal. Current admin only.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        governance::cancel_admin_proposal(&env, &DataKey::Admin, admin);
+    }
+
+    /// Return the pending admin proposal as `(new_admin, eta)`, if any.
+    pub fn get_pending_admin(env: Env) -> Option<(Address, u64)> {
+        governance::get_pending_admin(&env)
+    }
+
+    /// Return the current admin address.
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized")
+    }
+
     // ── Multi-arbitrator panel ────────────────────────────────────────────────
 
     /// Cast a vote on an open dispute as a registered panel arbitrator.

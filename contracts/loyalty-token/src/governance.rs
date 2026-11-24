@@ -8,8 +8,11 @@
 //! new code takes effect after the invocation ends. `migrate` must therefore be
 //! called afterwards (in the new code) to run per-version storage migrations
 //! and record the new version.
+//! The implementation lives in the shared `afripay-governance` crate; this
+//! module only wires it up to `LoyaltyTokenContract`'s storage layout.
 use crate::{DataKey, LoyaltyTokenContract};
-use soroban_sdk::{contractimpl, contracttype, Address, BytesN, Env, Symbol};
+use afripay_governance::{governance_impl, AdminStore};
+use soroban_sdk::Env;
 
 /// Semantic version of this contract. Bumped on every upgrade.
 pub const CONTRACT_VERSION: u32 = 1;
@@ -41,6 +44,8 @@ fn bump_persistent(env: &Env, key: &GovKey) {
         PERSISTENT_BUMP_AMOUNT,
     );
 }
+/// Minimum delay between proposing a new admin and accepting it (24 hours).
+pub const ADMIN_ROTATION_DELAY_SECS: u64 = 24 * 60 * 60;
 
 /// Encodes identically to a `DataKey` variant of the same name, so existing
 /// `ContractVersion` entries remain readable.
@@ -49,12 +54,21 @@ pub enum GovKey {
     ContractVersion,
     PendingUpgrade,
     Paused,
+    PendingAdmin,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub struct PendingUpgrade {
     pub new_wasm_hash: BytesN<32>,
+    pub eta: u64,
+}
+
+/// A proposed admin rotation, executable once `eta` has passed.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct PendingAdmin {
+    pub new_admin: Address,
     pub eta: u64,
 }
 
@@ -192,26 +206,79 @@ impl LoyaltyTokenContract {
             .unwrap_or(0);
         bump_persistent(&env, &GovKey::ContractVersion);
         version
+impl AdminStore for LoyaltyTokenContract {
+    fn admin(env: &Env) -> soroban_sdk::Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized")
     }
 
-    /// Emergency pause (SC-174). Blocks entry points that move funds into the
-    /// contract; exit paths (refund / withdraw / release / cancel) stay open.
-    pub fn pause(env: Env, admin: Address) {
+    /// Start a two-step admin rotation. The new admin must call
+    /// `accept_admin` after `ADMIN_ROTATION_DELAY_SECS` has elapsed.
+    ///
+    /// Recommended: the admin should be a multisig account (or the
+    /// `multisig-approval` contract) so a single lost or compromised key
+    /// cannot take over governance.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> u64 {
         require_gov_admin(&env, &admin, "Only admin can perform this action");
         env.storage().persistent().set(&GovKey::Paused, &true);
         bump_persistent(&env, &GovKey::Paused);
         env.events().publish((Symbol::new(&env, "Paused"),), admin);
+        let eta = env.ledger().timestamp() + ADMIN_ROTATION_DELAY_SECS;
+        let pending = PendingAdmin { new_admin: new_admin.clone(), eta };
+        env.storage().persistent().set(&GovKey::PendingAdmin, &pending);
+        env.events()
+            .publish((Symbol::new(&env, "AdminProposed"),), (new_admin, eta));
+        eta
     }
 
-    pub fn unpause(env: Env, admin: Address) {
+    /// Complete a pending admin rotation. Requires the new admin's signature
+    /// and that the delay has elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        let pending: PendingAdmin = env
+            .storage()
+            .persistent()
+            .get(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        if pending.new_admin != new_admin {
+            panic!("Only the proposed admin can accept");
+        }
+        if env.ledger().timestamp() < pending.eta {
+            panic!("Admin rotation delay has not expired");
+        }
+        let old_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminChanged"),),
+            (old_admin, new_admin),
+        );
+    }
+
+    /// Cancel a pending admin rotation. Only the current admin may cancel.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
         require_gov_admin(&env, &admin, "Only admin can perform this action");
         env.storage().persistent().set(&GovKey::Paused, &false);
         bump_persistent(&env, &GovKey::Paused);
         env.events().publish((Symbol::new(&env, "Unpaused"),), admin);
+        let pending: PendingAdmin = env
+            .storage()
+            .persistent()
+            .get(&GovKey::PendingAdmin)
+            .expect("No pending admin");
+        env.storage().persistent().remove(&GovKey::PendingAdmin);
+        env.events()
+            .publish((Symbol::new(&env, "AdminProposalCancelled"),), pending.new_admin);
     }
 
-    pub fn is_paused(env: Env) -> bool {
-        paused(&env)
+    pub fn get_pending_admin(env: Env) -> Option<PendingAdmin> {
+        env.storage().persistent().get(&GovKey::PendingAdmin)
     }
 }
 
@@ -220,3 +287,4 @@ impl LoyaltyTokenContract {
 /// No storage changes are required today; the hook exists so future upgrades
 /// can add data migrations without changing the `migrate` loop.
 fn migrate_v1_to_v2(_env: &Env) {}
+governance_impl!(LoyaltyTokenContract, CONTRACT_VERSION);

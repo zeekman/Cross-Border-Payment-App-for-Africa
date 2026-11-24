@@ -11,14 +11,10 @@ use crate::{AccrueInterestEvent, DepositEvent, SavingsVaultContract, SavingsVaul
 fn setup() -> (Env, SavingsVaultContractClient<'static>, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    // Start at a realistic ledger time: the contract uses 0 to mean "no
-    // emergency announced", so announcing at timestamp 0 would be invisible.
-    env.ledger().with_mut(|li| li.timestamp = 1_700_000_000);
-    let contract_id = env.register(SavingsVaultContract, ());
     // Start from a realistic timestamp: the contract uses 0 as the
     // "not announced" sentinel, and some tests subtract from `now`.
     env.ledger().set_timestamp(1_700_000_000);
-    let contract_id = env.register_contract(None, SavingsVaultContract);
+    let contract_id = env.register(SavingsVaultContract, ());
     let client = SavingsVaultContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let usdc_id = env.register_stellar_asset_contract_v2(admin.clone()).address();
@@ -1244,6 +1240,108 @@ fn test_emergency_withdraw_caps_interest_at_reserve() {
     assert_eq!(token.balance(&client.address), 0);
 }
 
+// ── #1444: two-step admin rotation ───────────────────────────────────────────
+
+#[test]
+fn test_propose_and_accept_admin_after_delay() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&admin, &new_admin);
+    let events = env.events().all();
+    assert!(events
+        .iter()
+        .any(|(_, topics, _)| topic_is(&env, &topics, "AdminProposed")));
+
+    // Not yet: the ETA has not elapsed.
+    env.ledger().with_mut(|li| li.timestamp += 86_400);
+    client.accept_admin(&new_admin);
+
+    let events = env.events().all();
+    assert!(events
+        .iter()
+        .any(|(_, topics, _)| topic_is(&env, &topics, "AdminChanged")));
+
+    // New admin can act; old admin cannot.
+    client.set_interest_rate(&new_admin, &500u32);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation delay not elapsed")]
+fn test_accept_admin_before_delay_panics() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += 86_400 - 1);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "no admin proposal pending")]
+fn test_accept_admin_without_proposal_panics() {
+    let (env, client, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_accept_admin_requires_new_admin_auth() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += 86_400);
+    env.set_auths(&[]);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_propose_admin_non_admin_panics() {
+    let (env, client, _, _) = setup();
+    let impostor = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&impostor, &new_admin);
+}
+
+#[test]
+fn test_cancel_admin_proposal() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+
+    let events = env.events().all();
+    assert!(events
+        .iter()
+        .any(|(_, topics, _)| topic_is(&env, &topics, "AdminProposalCancelled")));
+
+    // The cancelled proposal can no longer be accepted.
+    env.ledger().with_mut(|li| li.timestamp += 86_400);
+    let result = client.try_accept_admin(&new_admin);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic(expected = "no admin proposal pending")]
+fn test_cancel_admin_proposal_without_proposal_panics() {
+    let (_, client, admin, _) = setup();
+    client.cancel_admin_proposal(&admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_old_admin_loses_privileges_after_rotation() {
+    let (env, client, admin, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += 86_400);
+    client.accept_admin(&new_admin);
+
+    // The old admin can no longer pause (activate emergency) or set config.
+    client.activate_emergency(&admin);
+}
+
 #[test]
 fn test_emergency_return_funds_pays_accrued_interest() {
     let (env, client, admin, usdc_id) = setup();
@@ -1264,4 +1362,64 @@ fn test_emergency_return_funds_pays_accrued_interest() {
     assert_eq!(TokenClient::new(&env, &usdc_id).balance(&user), deposit + interest);
     assert_eq!(reserve_of(&env, &client), 1_000_0000000 - interest);
     assert_eq!(client.get_total_locked(), 0);
+}
+
+// ── SC-183: governance pause blocks inflows but never exits ───────────────────
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_deposit_rejected_while_paused() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &user, 1_0000000);
+    client.pause(&admin);
+    client.deposit(&user, &1_0000000, &(env.ledger().timestamp() + 86_400));
+}
+
+#[test]
+fn test_withdraw_while_paused_succeeds() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86_400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+
+    client.pause(&admin);
+    env.ledger().set_timestamp(unlock_time + 1);
+    client.withdraw(&user, &0, &amount);
+
+    assert_eq!(client.get_balance(&user), 0);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&user), amount);
+}
+
+#[test]
+fn test_emergency_withdraw_while_paused_succeeds() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86_400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+
+    client.pause(&admin);
+    client.announce_emergency(&admin);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 172_800);
+    client.emergency_withdraw(&admin, &user);
+
+    assert_eq!(client.get_balance(&user), 0);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&user), amount);
+}
+
+#[test]
+fn test_deposit_allowed_again_after_unpause() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &user, 1_0000000);
+
+    client.pause(&admin);
+    client.unpause(&admin);
+    client.deposit(&user, &1_0000000, &(env.ledger().timestamp() + 86_400));
+
+    assert_eq!(client.get_balance(&user), 1_0000000);
 }
