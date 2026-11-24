@@ -107,6 +107,19 @@ const MAX_TIERS: u32 = 5;
 /// Hard cap on discount_bps to prevent 100 % fee waivers.
 const MAX_DISCOUNT_BPS: u32 = 9_000;
 
+// ── TTL policy ────────────────────────────────────────────────────────────────
+// Instance storage (Admin, MaxSupply, counters) is bumped on every entry point.
+// Persistent records (balances, allowances, checkpoints, tiers) are bumped
+// whenever they are read or written. Amounts are in ledgers (~5s each).
+
+/// Bump instance storage to ~30 days when it falls below ~7 days.
+const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 120_960;
+
+/// Bump persistent records to ~30 days when they fall below ~7 days.
+const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -128,34 +141,39 @@ impl LoyaltyTokenContract {
     /// * `admin`      — Address authorised to mint tokens (the AfriPay backend).
     /// * `max_supply` — Hard ceiling on total points that can ever be minted (must be > 0).
     pub fn initialize(env: Env, admin: Address, max_supply: i128) {
-        if env.storage().persistent().has(&DataKey::Admin) {
+        Self::bump_instance(&env);
+        if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
         if max_supply <= 0 {
             panic!("max_supply must be positive");
         }
-        env.storage().persistent().set(&DataKey::Admin, &admin);
+        // The admin must co-sign so the contract cannot be front-run between
+        // deploy and initialize.
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::MaxSupply, &max_supply);
+        env.storage().instance().set(&DataKey::SnapshotCounter, &0u32);
+        env.storage().instance().set(&DataKey::SnapshotCount, &0u32);
         env.storage().persistent().set(&DataKey::TotalSupply, &0i128);
-        env.storage().persistent().set(&DataKey::MaxSupply, &max_supply);
-        env.storage().persistent().set(&DataKey::SnapshotCounter, &0u32);
-        env.storage().persistent().set(&DataKey::SnapshotCount, &0u32);
+        Self::bump_persistent(&env, &DataKey::TotalSupply);
 
         // Install default tiers.
-        env.storage().persistent().set(
-            &DataKey::Tier(0),
-            &Tier { threshold: 50, discount_bps: 1_000 },
-        );
-        env.storage().persistent().set(
-            &DataKey::Tier(1),
-            &Tier { threshold: 100, discount_bps: 2_500 },
-        );
-        env.storage().persistent().set(
-            &DataKey::Tier(2),
-            &Tier { threshold: 500, discount_bps: 5_000 },
-        );
-        env.storage().persistent().set(
-            &DataKey::Tier(3),
-            &Tier { threshold: 1_000, discount_bps: 7_500 },
+        let tiers = [
+            Tier { threshold: 50, discount_bps: 1_000 },
+            Tier { threshold: 100, discount_bps: 2_500 },
+            Tier { threshold: 500, discount_bps: 5_000 },
+            Tier { threshold: 1_000, discount_bps: 7_500 },
+        ];
+        for (i, tier) in tiers.iter().enumerate() {
+            let key = DataKey::Tier(i as u32);
+            env.storage().persistent().set(&key, tier);
+            Self::bump_persistent(&env, &key);
+        }
+
+        env.events().publish(
+            (symbol_short!("init"), symbol_short!("done")),
+            (admin, max_supply),
         );
     }
 
@@ -192,21 +210,26 @@ impl LoyaltyTokenContract {
     // ── SEP-41: token metadata ────────────────────────────────────────────────
 
     pub fn name(env: Env) -> String {
+        Self::bump_instance(&env);
         String::from_str(&env, "AfriPay Loyalty Points")
     }
 
     pub fn symbol(env: Env) -> String {
+        Self::bump_instance(&env);
         String::from_str(&env, "ALP")
     }
 
     /// Loyalty points have no sub-unit — decimals = 0.
-    pub fn decimals(_env: Env) -> u32 {
+    pub fn decimals(env: Env) -> u32 {
+        Self::bump_instance(&env);
         0
     }
 
     // ── SEP-41: supply & balances ─────────────────────────────────────────────
 
     pub fn total_supply(env: Env) -> i128 {
+        Self::bump_instance(&env);
+        Self::bump_persistent(&env, &DataKey::TotalSupply);
         env.storage()
             .persistent()
             .get(&DataKey::TotalSupply)
@@ -214,13 +237,16 @@ impl LoyaltyTokenContract {
     }
 
     pub fn max_supply(env: Env) -> i128 {
+        Self::bump_instance(&env);
         env.storage()
-            .persistent()
+            .instance()
             .get(&DataKey::MaxSupply)
             .expect("not initialized")
     }
 
     pub fn balance(env: Env, account: Address) -> i128 {
+        Self::bump_instance(&env);
+        Self::bump_persistent(&env, &DataKey::Balance(account.clone()));
         env.storage()
             .persistent()
             .get(&DataKey::Balance(account))
@@ -233,8 +259,10 @@ impl LoyaltyTokenContract {
     /// is recorded and per-account balances are reconstructed lazily from the
     /// checkpoint history written on every balance change (see [`snapshot_balance`]).
     pub fn create_snapshot(env: Env, admin: Address) -> u32 {
+        Self::bump_instance(&env);
         admin.require_auth();
 
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         let stored_admin: Address = governance::get_admin(&env);
         if admin != stored_admin {
             panic!("unauthorized: caller is not admin");
@@ -242,7 +270,7 @@ impl LoyaltyTokenContract {
 
         let active_count: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::SnapshotCount)
             .unwrap_or(0);
         if active_count >= 10 {
@@ -251,17 +279,19 @@ impl LoyaltyTokenContract {
 
         let snapshot_id: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::SnapshotCounter)
             .unwrap_or(0)
             + 1;
-        env.storage().persistent().set(&DataKey::SnapshotCounter, &snapshot_id);
+        env.storage().instance().set(&DataKey::SnapshotCounter, &snapshot_id);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::SnapshotCount, &(active_count + 1));
+        let ledger_key = DataKey::SnapshotLedger(snapshot_id);
         env.storage()
             .persistent()
-            .set(&DataKey::SnapshotLedger(snapshot_id), &env.ledger().sequence());
+            .set(&ledger_key, &env.ledger().sequence());
+        Self::bump_persistent(&env, &ledger_key);
 
         env.events().publish(
             (symbol_short!("snapshot"), symbol_short!("created")),
@@ -273,8 +303,10 @@ impl LoyaltyTokenContract {
 
     /// Delete a snapshot, freeing a slot under the active-snapshot limit. Admin only.
     pub fn delete_snapshot(env: Env, admin: Address, snapshot_id: u32) {
+        Self::bump_instance(&env);
         admin.require_auth();
 
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         let stored_admin: Address = governance::get_admin(&env);
         if admin != stored_admin {
             panic!("unauthorized: caller is not admin");
@@ -288,11 +320,11 @@ impl LoyaltyTokenContract {
 
         let active_count: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::SnapshotCount)
             .unwrap_or(0);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::SnapshotCount, &active_count.saturating_sub(1));
 
         env.events().publish(
@@ -308,18 +340,19 @@ impl LoyaltyTokenContract {
     /// When none exists the balance hasn't changed since and the current balance
     /// is returned.
     pub fn snapshot_balance(env: Env, snapshot_id: u32, account: Address) -> i128 {
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::SnapshotLedger(snapshot_id))
-        {
+        Self::bump_instance(&env);
+        let ledger_key = DataKey::SnapshotLedger(snapshot_id);
+        if !env.storage().persistent().has(&ledger_key) {
             panic!("unknown snapshot");
         }
+        Self::bump_persistent(&env, &ledger_key);
 
+        let checkpoint_key = DataKey::Checkpoints(account.clone());
+        Self::bump_persistent(&env, &checkpoint_key);
         let checkpoints: Vec<(u32, i128)> = env
             .storage()
             .persistent()
-            .get(&DataKey::Checkpoints(account.clone()))
+            .get(&checkpoint_key)
             .unwrap_or(Vec::new(&env));
 
         let (mut lo, mut hi) = (0u32, checkpoints.len());
@@ -343,6 +376,7 @@ impl LoyaltyTokenContract {
     /// Remaining allowance, or 0 once the current ledger is past the
     /// expiration ledger the owner set.
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+        Self::bump_instance(&env);
         Self::read_allowance(&env, &from, &spender).amount
     }
 
@@ -350,6 +384,7 @@ impl LoyaltyTokenContract {
     /// amount 0 so callers can't spend them.
     fn read_allowance(env: &Env, from: &Address, spender: &Address) -> AllowanceValue {
         let key = DataKey::Allowance(from.clone(), spender.clone());
+        Self::bump_persistent(env, &key);
         match env.storage().persistent().get::<DataKey, AllowanceValue>(&key) {
             Some(a) if (env.ledger().sequence() as u64) <= a.expires_at => a,
             Some(a) => AllowanceValue { amount: 0, expires_at: a.expires_at },
@@ -371,13 +406,15 @@ impl LoyaltyTokenContract {
         if current.amount < amount {
             panic!("insufficient allowance");
         }
+        let key = DataKey::Allowance(from.clone(), spender.clone());
         env.storage().persistent().set(
-            &DataKey::Allowance(from.clone(), spender.clone()),
+            &key,
             &AllowanceValue {
                 amount: current.amount - amount,
                 expires_at: current.expires_at,
             },
         );
+        Self::bump_persistent(env, &key);
     }
 
     /// Approve `spender` to spend `amount` of `from`'s tokens until `expiration_ledger`.
@@ -391,6 +428,7 @@ impl LoyaltyTokenContract {
         amount: i128,
         expiration_ledger: u32,
     ) {
+        Self::bump_instance(&env);
         from.require_auth();
         if amount < 0 {
             panic!("amount must be non-negative");
@@ -404,6 +442,7 @@ impl LoyaltyTokenContract {
                 expires_at: expiration_ledger as u64,
             },
         );
+        Self::bump_persistent(&env, &key);
         env.events().publish(
             (symbol_short!("approve"), from, spender),
             (amount, expiration_ledger),
@@ -420,6 +459,7 @@ impl LoyaltyTokenContract {
         amount: i128,
         expiration_ledger: u32,
     ) {
+        Self::bump_instance(&env);
         from.require_auth();
         if amount < 0 {
             panic!("amount must be non-negative");
@@ -435,6 +475,7 @@ impl LoyaltyTokenContract {
                 expires_at: expiration_ledger as u64,
             },
         );
+        Self::bump_persistent(&env, &key);
         env.events().publish(
             (symbol_short!("approve"), from, spender),
             (new_amount, expiration_ledger),
@@ -451,6 +492,7 @@ impl LoyaltyTokenContract {
         amount: i128,
         expiration_ledger: u32,
     ) {
+        Self::bump_instance(&env);
         from.require_auth();
         if amount < 0 {
             panic!("amount must be non-negative");
@@ -466,6 +508,7 @@ impl LoyaltyTokenContract {
                 expires_at: expiration_ledger as u64,
             },
         );
+        Self::bump_persistent(&env, &key);
         env.events().publish(
             (symbol_short!("approve"), from, spender),
             (new_amount, expiration_ledger),
@@ -479,6 +522,7 @@ impl LoyaltyTokenContract {
     /// Emits the SEP-41 `transfer` event with topics `("transfer", from, to)`
     /// and data `amount`.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        Self::bump_instance(&env);
         governance::require_not_paused(&env);
         from.require_auth();
         if amount <= 0 {
@@ -496,6 +540,7 @@ impl LoyaltyTokenContract {
     /// Emits the SEP-41 `transfer` event with topics `("transfer", from, to)`
     /// and data `amount`.
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        Self::bump_instance(&env);
         governance::require_not_paused(&env);
         spender.require_auth();
         if amount <= 0 {
@@ -516,8 +561,10 @@ impl LoyaltyTokenContract {
     /// Emits the SEP-41 `mint` event with topics `("mint", admin, to)` and
     /// data `amount`.
     pub fn mint(env: Env, admin: Address, to: Address, amount: i128) {
+        Self::bump_instance(&env);
         governance::require_not_paused(&env);
         admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         let stored_admin: Address = governance::get_admin(&env);
         if admin != stored_admin {
             panic!("unauthorized: caller is not admin");
@@ -533,6 +580,7 @@ impl LoyaltyTokenContract {
         let balance = Self::balance(env.clone(), to.clone());
         Self::set_balance(&env, &to, balance + amount);
         env.storage().persistent().set(&DataKey::TotalSupply, &(total + amount));
+        Self::bump_persistent(&env, &DataKey::TotalSupply);
         env.events().publish(
             (symbol_short!("mint"), admin, to),
             amount,
@@ -543,6 +591,7 @@ impl LoyaltyTokenContract {
     ///
     /// Emits the SEP-41 `burn` event with topics `("burn", from)` and data `amount`.
     pub fn burn(env: Env, from: Address, amount: i128) {
+        Self::bump_instance(&env);
         from.require_auth();
         if amount < 0 {
             panic!("amount must be non-negative");
@@ -554,6 +603,7 @@ impl LoyaltyTokenContract {
         Self::set_balance(&env, &from, balance - amount);
         let total: i128 = Self::total_supply(env.clone());
         env.storage().persistent().set(&DataKey::TotalSupply, &(total - amount));
+        Self::bump_persistent(&env, &DataKey::TotalSupply);
         env.events().publish(
             (symbol_short!("burn"), from),
             amount,
@@ -564,6 +614,7 @@ impl LoyaltyTokenContract {
     ///
     /// Emits the SEP-41 `burn` event with topics `("burn", from)` and data `amount`.
     pub fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
+        Self::bump_instance(&env);
         spender.require_auth();
         if amount < 0 {
             panic!("amount must be non-negative");
@@ -576,6 +627,7 @@ impl LoyaltyTokenContract {
         Self::set_balance(&env, &from, balance - amount);
         let total: i128 = Self::total_supply(env.clone());
         env.storage().persistent().set(&DataKey::TotalSupply, &(total - amount));
+        Self::bump_persistent(&env, &DataKey::TotalSupply);
         env.events().publish(
             (symbol_short!("burn"), from),
             amount,
@@ -590,14 +642,17 @@ impl LoyaltyTokenContract {
     /// Emits a `redeem` event with topics `("redeem", user)` and data
     /// `(tier_index, burned, discount_bps)`.
     pub fn redeem(env: Env, user: Address, tier_index: u32) {
+        Self::bump_instance(&env);
         user.require_auth();
         if tier_index >= MAX_TIERS {
             panic!("invalid tier index");
         }
+        let tier_key = DataKey::Tier(tier_index);
+        Self::bump_persistent(&env, &tier_key);
         let tier: Tier = env
             .storage()
             .persistent()
-            .get(&DataKey::Tier(tier_index))
+            .get(&tier_key)
             .expect("tier not configured");
         let balance = Self::balance(env.clone(), user.clone());
         if balance < tier.threshold {
@@ -608,6 +663,7 @@ impl LoyaltyTokenContract {
         env.storage()
             .persistent()
             .set(&DataKey::TotalSupply, &(total - tier.threshold));
+        Self::bump_persistent(&env, &DataKey::TotalSupply);
         env.events().publish(
             (symbol_short!("redeem"), user),
             (tier_index, tier.threshold, tier.discount_bps),
@@ -615,6 +671,20 @@ impl LoyaltyTokenContract {
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
+
+    /// Extend the TTL of instance storage (global config) if it is nearing expiry.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Extend the TTL of a persistent record if it is nearing expiry.
+    fn bump_persistent(env: &Env, key: &DataKey) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+    }
 
     /// Move `amount` from `from` to `to`, updating balances and checkpoints.
     fn move_balance(env: &Env, from: &Address, to: &Address, amount: i128) {
@@ -632,11 +702,12 @@ impl LoyaltyTokenContract {
     fn set_balance(env: &Env, account: &Address, balance: i128) {
         let latest_snapshot: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::SnapshotCounter)
             .unwrap_or(0);
         if latest_snapshot > 0 {
             let key = DataKey::Checkpoints(account.clone());
+            Self::bump_persistent(env, &key);
             let mut checkpoints: Vec<(u32, i128)> = env
                 .storage()
                 .persistent()
@@ -650,11 +721,12 @@ impl LoyaltyTokenContract {
                 let previous = Self::balance(env.clone(), account.clone());
                 checkpoints.push_back((latest_snapshot, previous));
                 env.storage().persistent().set(&key, &checkpoints);
+                Self::bump_persistent(env, &key);
             }
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(account.clone()), &balance);
+        let balance_key = DataKey::Balance(account.clone());
+        env.storage().persistent().set(&balance_key, &balance);
+        Self::bump_persistent(env, &balance_key);
     }
 }
 

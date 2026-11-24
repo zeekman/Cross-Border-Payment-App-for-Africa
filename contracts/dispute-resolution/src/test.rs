@@ -1,9 +1,9 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Bytes, Env,
+    Address, Bytes, Env, IntoVal,
 };
 
 use crate::{DisputeResolutionContract, DisputeResolutionContractClient, DisputeStatus};
@@ -64,6 +64,71 @@ fn test_initialize_succeeds() {
 fn test_double_initialize_panics() {
     let (env, client, admin, arbitrator, usdc_id, super_arbitrator) = setup();
     client.initialize(&admin, &arbitrator, &usdc_id, &256u32, &super_arbitrator);
+}
+
+#[test]
+#[should_panic]
+fn test_initialize_requires_admin_auth() {
+    let env = Env::default();
+    let contract_id = env.register(DisputeResolutionContract, ());
+    let client = DisputeResolutionContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+    let super_arbitrator = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract(admin.clone());
+
+    // A non-admin caller cannot produce the admin's signature, so the
+    // `admin.require_auth()` inside `initialize` must reject the call.
+    let impostor = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &impostor,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (&admin, &arbitrator, &usdc_id, 256u32, &super_arbitrator).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.initialize(&admin, &arbitrator, &usdc_id, &256u32, &super_arbitrator);
+}
+
+#[test]
+fn test_initialize_emits_event() {
+    let (env, client, admin, _, _, _) = setup();
+    let _ = client;
+    let events = env.events().all();
+    let found = events.iter().any(|(_, topics, _)| {
+        topics
+            .get(0)
+            .map(|t| {
+                let sym: Result<soroban_sdk::Symbol, _> = t.try_into_val(&env);
+                matches!(sym, Ok(s) if s == soroban_sdk::Symbol::new(&env, "Initialized"))
+            })
+            .unwrap_or(false)
+    });
+    assert!(found, "Initialized event was not emitted");
+    let _ = admin;
+}
+
+// ── TTL ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_dispute_readable_after_ttl_advance() {
+    let (env, client, _, _, usdc_id, _) = setup();
+    let amount = 500_0000000i128;
+    let (sender, recipient, id) = open(&env, &client, &usdc_id, amount);
+
+    // Advance well past the default entry TTL, then touch the contract again
+    // so the instance/persistent TTLs are extended.
+    env.ledger().set_sequence_number(env.ledger().sequence() + 1_000_000);
+    let _ = client.get_dispute(&id);
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 1_000_000);
+    let d = client.get_dispute(&id);
+    assert_eq!(d.sender, sender);
+    assert_eq!(d.recipient, recipient);
+    assert_eq!(d.amount, amount);
+    assert_eq!(d.status, DisputeStatus::Open);
 }
 
 // ── open_dispute ──────────────────────────────────────────────────────────────
@@ -909,4 +974,18 @@ fn test_open_escrow_dispute_unregistered_escrow_panics() {
     let recipient = Address::generate(&env);
     client.set_escrow_contract(&admin, &escrow);
     client.open_escrow_dispute(&impostor, &sender, &recipient, &500_0000000);
+}
+
+#[test]
+#[should_panic]
+fn test_open_escrow_dispute_non_escrow_caller_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let escrow = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    // Drop the blanket auth mock: a top-level caller cannot produce the
+    // escrow contract's authorization, so this must be rejected.
+    env.set_auths(&[]);
+    client.open_escrow_dispute(&escrow, &sender, &recipient, &500_0000000);
 }

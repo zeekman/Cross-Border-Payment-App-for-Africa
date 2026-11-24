@@ -370,7 +370,6 @@ cat > "$DEPLOYMENT_FILE" << EOF
   "deployed_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
   "rpc_host": "$SOROBAN_RPC_HOST",
   "network_passphrase": "$SOROBAN_NETWORK_PASSPHRASE",
-  "wasm_hash": "$WASM_HASH"
   "wasm_hash": "$EXPECTED_WASM_HASH"
 }
 EOF
@@ -397,14 +396,30 @@ fi
 
 echo -e "${GREEN}✓ Contract ID written to $DEPLOYED_IDS_FILE${NC}"
 
-# Step 6 (security — fix #336): Initialize immediately after deployment.
+# Step 6 (security — fix #336 / SC-188): Initialize immediately after deployment.
 # Eliminates the front-running window: anyone who calls initialize() first
 # becomes admin. We call it here so there is no manual gap.
+#
+# SC-188: every initialize() now requires admin.require_auth(), so the
+# initializing transaction must be signed by ADMIN_ADDRESS. We therefore invoke
+# with the deployer identity (which pays fees) and additionally supply the
+# admin's signature via --sign-with-key / the configured admin identity.
 echo -e "\n${YELLOW}Step 6: Initializing contract (front-running prevention — fix #336)...${NC}"
+
+# SC-188: the admin must co-sign initialize(). Resolve an identity that can sign
+# for ADMIN_ADDRESS. Prefer an explicit ADMIN_IDENTITY; otherwise fall back to
+# the deployer identity (valid when the deployer *is* the admin, the common case).
+ADMIN_IDENTITY="${ADMIN_IDENTITY:-$SOROBAN_IDENTITY}"
+
+INIT_SIGN_ARGS=(--source "$ADMIN_IDENTITY")
+if [ -n "${ADMIN_IDENTITY:-}" ] && [ "$ADMIN_IDENTITY" != "$SOROBAN_IDENTITY" ]; then
+    # Deployer pays fees; admin identity supplies the require_auth() signature.
+    INIT_SIGN_ARGS=(--source "$SOROBAN_IDENTITY" --sign-with-key "$ADMIN_IDENTITY")
+fi
 
 if ! $SOROBAN_CLI contract invoke \
     --id "$CONTRACT_ID" \
-    --source "$SOROBAN_SECRET_KEY" \
+    "${INIT_SIGN_ARGS[@]}" \
     --network "$NETWORK" \
     -- initialize "${INIT_ARGS[@]}"; then
     echo -e "${RED}✗ initialize() failed for $TARGET_CONTRACT ($CONTRACT_ID).${NC}"
@@ -413,10 +428,39 @@ if ! $SOROBAN_CLI contract invoke \
 fi
 echo -e "${GREEN}✓ Contract initialized. Admin: ${ADMIN_ADDRESS}${NC}"
 
+# Step 6.0 (SC-188): Verify the stored admin matches the expected admin.
+# If a front-runner managed to initialize first (or the wrong key signed), the
+# stored admin will differ. Abort loudly rather than continuing silently.
+echo -e "\n${YELLOW}Step 6.0: Verifying stored admin matches expected admin...${NC}"
+
+STORED_ADMIN=$($SOROBAN_CLI contract invoke \
+    --id "$CONTRACT_ID" \
+    --source "$SOROBAN_IDENTITY" \
+    --network "$NETWORK" \
+    -- get_admin 2>/dev/null | tail -1 | tr -d '[:space:]"' || true)
+
+if [ -z "$STORED_ADMIN" ]; then
+    echo -e "${RED}✗ Could not read back stored admin from $CONTRACT_ID.${NC}"
+    echo -e "${RED}  Refusing to continue: the contract may have been initialized by a third party.${NC}"
+    echo -e "${RED}  Verify manually before using this contract ID.${NC}"
+    exit 1
+fi
+
+if [ "$STORED_ADMIN" != "$ADMIN_ADDRESS" ]; then
+    echo -e "${RED}══════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}✗ SECURITY: stored admin does NOT match expected admin!${NC}"
+    echo -e "${RED}  Expected: $ADMIN_ADDRESS${NC}"
+    echo -e "${RED}  Stored  : $STORED_ADMIN${NC}"
+    echo -e "${RED}  Contract $CONTRACT_ID may have been front-run. DO NOT USE IT.${NC}"
+    echo -e "${RED}══════════════════════════════════════════════════════════════════${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ Stored admin verified: $STORED_ADMIN${NC}"
+
 echo -e "\n${YELLOW}Step 6a: Running migration hook...${NC}"
 $SOROBAN_CLI contract invoke \
     --id "$CONTRACT_ID" \
-    --source "$SOROBAN_SECRET_KEY" \
+    "${INIT_SIGN_ARGS[@]}" \
     --network "$NETWORK" \
     -- migrate \
     --admin "$ADMIN_ADDRESS" || { echo -e "${RED}✗ migrate() failed${NC}"; exit 1; }

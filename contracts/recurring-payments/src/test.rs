@@ -1069,6 +1069,139 @@ fn all_events(
     out
 }
 
+// ── SC-187: emergency pause ──────────────────────────────────────────────────
+
+#[test]
+fn test_contract_pause_blocks_execute_payment() {
+    let (env, contract_id, token_id, sender, recipient, executor, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let id = create(&client, &token_id, &sender, &recipient, 100_0000000, 86400);
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    advance_time(&env, 86400);
+    let res = client.try_execute_payment(&executor, &id);
+    assert!(res.is_err());
+    assert_eq!(token_balance(&env, &token_id, &recipient), 0);
+}
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_execute_payment_panics_while_contract_paused() {
+    let (env, contract_id, token_id, sender, recipient, executor, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let id = create(&client, &token_id, &sender, &recipient, 100_0000000, 86400);
+
+    client.pause(&admin);
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+}
+
+#[test]
+fn test_pause_emits_paused_and_unpaused_events() {
+    let (env, contract_id, _, _, _, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    client.pause(&admin);
+    assert_eq!(count_events(&env, &contract_id, "Paused"), 1);
+
+    client.unpause(&admin);
+    assert_eq!(count_events(&env, &contract_id, "Unpaused"), 1);
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_user_can_cancel_and_pause_schedule_while_contract_paused() {
+    let (env, contract_id, token_id, sender, recipient, _, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let id1 = create(&client, &token_id, &sender, &recipient, 100_0000000, 86400);
+    let id2 = create(&client, &token_id, &sender, &recipient, 100_0000000, 86400);
+
+    client.pause(&admin);
+
+    // Users can always opt out while the contract is paused.
+    client.cancel_recurring_payment(&sender, &id1);
+    assert_eq!(client.get_schedule(&id1).status, ScheduleStatus::Cancelled);
+
+    client.pause_recurring_payment(&sender, &id2);
+    assert_eq!(client.get_schedule(&id2).status, ScheduleStatus::Paused);
+}
+
+#[test]
+fn test_window_passing_during_pause_does_not_auto_cancel() {
+    let (env, contract_id, token_id, sender, recipient, executor, admin) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let interval = 86_400u64;
+    let grace = 3_600u64;
+    let id = client.create_recurring_payment(
+        &sender, &recipient, &token_id, &100_0000000, &interval, &0, &grace, &1,
+    );
+
+    client.pause(&admin);
+    // Several windows elapse entirely during the pause.
+    advance_time(&env, 5 * interval + grace + 1);
+    client.unpause(&admin);
+
+    // The schedule must still be active and must not have accumulated misses.
+    let s = client.get_schedule(&id);
+    assert_eq!(s.status, ScheduleStatus::Active);
+    assert_eq!(s.consecutive_misses, 0);
+    assert_eq!(client.get_missed_executions(&id), 0);
+
+    // And it can be executed once due again.
+    set_time(&env, s.next_payment_at);
+    client.execute_payment(&executor, &id);
+    assert_eq!(token_balance(&env, &token_id, &recipient), 100_0000000);
+}
+
+// ── SC-188: initialize requires the admin's signature ────────────────────────
+
+#[test]
+fn test_initialize_requires_admin_auth() {
+    let env = Env::default();
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin).address();
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let contract_id = env.register(RecurringPaymentsContract, ());
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    // Only the attacker authorizes; the admin key does not co-sign.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (&admin, &token_id, &0u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_initialize(&admin, &token_id, &0);
+    assert!(res.is_err(), "initialize must require the admin's signature");
+}
+
+// ── SC-189: TTL extension ────────────────────────────────────────────────────
+
+#[test]
+fn test_schedule_readable_after_ttl_advance() {
+    let (env, contract_id, token_id, sender, recipient, executor, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let id = create(&client, &token_id, &sender, &recipient, 100_0000000, 86400);
+
+    // Advance the ledger sequence far past the default entry TTL.
+    let start = env.ledger().sequence();
+    env.ledger().set_sequence_number(start + 5_000_000);
+
+    // Activity bumps the TTLs, so the record stays readable.
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+
+    let s = client.get_schedule(&id);
+    assert_eq!(s.sender, sender);
+    assert_eq!(s.executions_completed, 1);
+    assert_eq!(client.get_user_schedules(&sender, &0, &50).len(), 1);
 // ── Admin rotation (SC-190) ──────────────────────────────────────────────────
 
 #[test]

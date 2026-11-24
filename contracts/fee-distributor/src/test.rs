@@ -7,6 +7,8 @@ use soroban_sdk::{
 };
 
 use crate::{
+    EvtContractPaused, EvtContractUnpaused, EvtFeeDeposited, EvtFeesWithdrawn, EvtInitialized,
+    EvtSplitUpdated, FeeDistributorContract, FeeDistributorContractClient, FeeRateUpdated,
     EvtAdminChanged, EvtAdminProposed, EvtContractPaused, EvtContractUnpaused, EvtFeeDeposited,
     EvtFeesWithdrawn, EvtSplitUpdated, FeeDistributorContract, FeeDistributorContractClient,
     FeeRateUpdated,
@@ -64,6 +66,81 @@ fn test_initial_fees_are_zero() {
 fn test_double_initialize_panics() {
     let (_, client, admin, _) = setup();
     client.initialize(&admin, &0);
+}
+
+#[test]
+fn test_initialize_requires_admin_auth() {
+    // SC-188: initialize must require the admin's signature. A caller who is
+    // not the admin must not be able to initialize the contract.
+    let env = Env::default();
+    let id = env.register(FeeDistributorContract, ());
+    let client = FeeDistributorContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+
+    // Only the impostor authorizes; the admin does not co-sign.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &impostor,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &id,
+            fn_name: "initialize",
+            args: (admin.clone(), 0u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.initialize(&admin, &0);
+    }));
+    assert!(result.is_err(), "initialize must fail without admin auth");
+}
+
+#[test]
+fn test_initialize_emits_initialized_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id = env.register(FeeDistributorContract, ());
+    let client = FeeDistributorContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+
+    client.initialize(&admin, &1500);
+
+    let event_name: Val = Symbol::new(&env, "Initialized").into_val(&env);
+    let events = all_events(&env);
+    let init_event = events
+        .iter()
+        .find(|(_, topics, _)| topics.iter().any(|t| val_eq(&env, &t, &event_name)));
+    assert!(init_event.is_some(), "Initialized event not emitted");
+
+    let (_, _, data) = init_event.unwrap();
+    let payload: EvtInitialized = soroban_sdk::FromVal::from_val(&env, &data);
+    assert_eq!(payload.admin, admin);
+}
+
+// ── SC-189: TTL extension ─────────────────────────────────────────────────────
+
+#[test]
+fn test_fee_records_readable_after_ttl_advance() {
+    // SC-189: advancing the ledger far past the default TTL must not make
+    // fee records unreadable, because entry points extend the TTL.
+    let (env, client, admin, usdc_id) = setup();
+    let depositor = Address::generate(&env);
+    mint(&env, &usdc_id, &depositor, 1_000_0000000);
+    client.deposit_fee(&depositor, &usdc_id, &1_000_0000000, &None);
+
+    // Advance well past the default persistent/instance TTL.
+    env.ledger().set_sequence_number(10_000_000);
+
+    // Activity on the contract must bump the TTLs.
+    client.deposit_fee(&depositor, &usdc_id, &1_0000000, &None);
+
+    // Records must still be readable.
+    assert_eq!(client.get_accumulated_fees(&usdc_id), 1_001_0000000);
+    assert!(!client.is_paused());
+
+    // Admin operations still work after the TTL bump.
+    client.withdraw_fees(&admin, &usdc_id, &1_0000000);
+    assert_eq!(client.get_accumulated_fees(&usdc_id), 1_000_0000000);
 }
 
 // ── deposit_fee ───────────────────────────────────────────────────────────────

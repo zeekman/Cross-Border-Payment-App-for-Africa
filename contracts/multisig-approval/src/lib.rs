@@ -11,6 +11,16 @@ const DEFAULT_PROPOSAL_TTL_SECS: u64 = 604_800; // 7 days
 const EXPIRY_SECONDS: u64 = 86_400; // 24 hours
 const ROTATION_DELAY: u64 = 259_200; // 72 hours
 
+// ── TTL policy (issue #1443) ──────────────────────────────────────────────────
+/// Ledgers to extend instance storage by on each call (~30 days at 5s/ledger).
+const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
+/// Only bump instance storage when its remaining TTL drops below this (~7 days).
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 120_960;
+/// Ledgers to extend persistent records by on each touch (~30 days).
+const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
+/// Only bump persistent records when their remaining TTL drops below this (~7 days).
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
+
 /// Default weight for a signer that has never had one set explicitly.
 const DEFAULT_SIGNER_WEIGHT: u32 = 1;
 /// Upper bound on any single signer's weight. Caps how much influence one key
@@ -125,6 +135,15 @@ pub struct EvtSignerChangeCancelled {
     pub cancelled_at: u64,
 }
 
+/// Emitted once when the contract is initialized.
+#[contracttype]
+#[derive(Debug, Clone)]
+pub struct EvtInitialized {
+    pub admin: Address,
+    pub approvers: Vec<Address>,
+    pub quorum: u32,
+}
+
 // ── Treasury-workflow event payloads (issue #1447) ────────────────────────────
 
 #[contracttype]
@@ -232,6 +251,11 @@ impl MultisigContract {
         env.storage().instance().set(&DataKey::TxCounter, &0u64);
         env.storage().instance().set(&DataKey::QuorumCounter, &0u64);
         env.storage().instance().set(&DataKey::ProposalTtl, &DEFAULT_PROPOSAL_TTL_SECS);
+        Self::bump_instance(&env);
+        env.events().publish(
+            (Symbol::new(&env, "Initialized"),),
+            EvtInitialized { admin, approvers, quorum },
+        );
     }
 
     /// Return the current approver set (issue #1446).
@@ -244,6 +268,7 @@ impl MultisigContract {
     /// # Arguments
     /// * `description` — Human-readable summary of the transaction so approvers know what they are voting on.
     pub fn propose_transaction(env: Env, proposer: Address, description: String, amount: i128, recipient: Address) -> u64 {
+        Self::bump_instance(&env);
         proposer.require_auth();
         Self::assert_is_approver(&env, &proposer);
         assert!(amount > 0, "amount must be positive");
@@ -264,6 +289,7 @@ impl MultisigContract {
             expires_at,
         };
         env.storage().persistent().set(&DataKey::Proposal(id), &proposal);
+        Self::bump_persistent(&env, &DataKey::Proposal(id));
         env.storage().instance().set(&DataKey::TxCounter, &(id + 1));
 
         env.events().publish(
@@ -281,6 +307,7 @@ impl MultisigContract {
     /// `SignerWeight` (default `DEFAULT_SIGNER_WEIGHT`). Quorum is therefore a
     /// weight threshold enforced identically regardless of path (issue #1056).
     pub fn approve(env: Env, approver: Address, tx_id: u64) {
+        Self::bump_instance(&env);
         approver.require_auth();
         Self::assert_is_approver(&env, &approver);
 
@@ -293,6 +320,8 @@ impl MultisigContract {
         }
 
         env.storage().persistent().set(&DataKey::Voted(tx_id, approver.clone()), &true);
+        Self::bump_persistent(&env, &DataKey::Voted(tx_id, approver.clone()));
+        proposal.approvals += Self::signer_weight(&env, &approver);
         let weight = Self::signer_weight(&env, &approver);
         proposal.approvals += weight;
 
@@ -302,6 +331,7 @@ impl MultisigContract {
             proposal.status = TxStatus::Executed;
         }
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::Proposal(tx_id));
 
         env.events().publish(
             (Symbol::new(&env, "ms_approved"), tx_id),
@@ -327,6 +357,7 @@ impl MultisigContract {
     /// cumulative signer weight (`rejection_weight`), the latter being in the
     /// same units as `approvals`.
     pub fn reject(env: Env, approver: Address, tx_id: u64) {
+        Self::bump_instance(&env);
         approver.require_auth();
         Self::assert_is_approver(&env, &approver);
 
@@ -339,6 +370,7 @@ impl MultisigContract {
         }
 
         env.storage().persistent().set(&DataKey::Voted(tx_id, approver.clone()), &true);
+        Self::bump_persistent(&env, &DataKey::Voted(tx_id, approver.clone()));
         proposal.rejections += 1;
         proposal.rejection_weight += Self::signer_weight(&env, &approver);
 
@@ -356,6 +388,7 @@ impl MultisigContract {
             proposal.status = TxStatus::Rejected;
         }
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::Proposal(tx_id));
 
         env.events().publish(
             (Symbol::new(&env, "ms_rejected"), tx_id),
@@ -368,6 +401,7 @@ impl MultisigContract {
 
     /// Mark an expired proposal as Expired. Anyone may call this.
     pub fn execute(env: Env, tx_id: u64) {
+        Self::bump_instance(&env);
         let mut proposal: Proposal = env.storage().persistent().get(&DataKey::Proposal(tx_id))
             .expect("proposal not found");
         assert!(proposal.status == TxStatus::Pending, "not pending");
@@ -378,6 +412,7 @@ impl MultisigContract {
         
         proposal.status = TxStatus::Expired;
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::Proposal(tx_id));
 
         env.events().publish(
             (Symbol::new(&env, "ms_expired"), tx_id),
@@ -387,12 +422,16 @@ impl MultisigContract {
 
     /// Read a proposal.
     pub fn get_proposal(env: Env, tx_id: u64) -> Proposal {
-        env.storage().persistent().get(&DataKey::Proposal(tx_id))
-            .expect("proposal not found")
+        Self::bump_instance(&env);
+        let proposal: Proposal = env.storage().persistent().get(&DataKey::Proposal(tx_id))
+            .expect("proposal not found");
+        Self::bump_persistent(&env, &DataKey::Proposal(tx_id));
+        proposal
     }
 
     /// Cancel a pending proposal. Only the original proposer may call this, and only before expiry.
     pub fn cancel_proposal(env: Env, proposer: Address, tx_id: u64) {
+        Self::bump_instance(&env);
         proposer.require_auth();
 
         let mut proposal: Proposal = env.storage().persistent().get(&DataKey::Proposal(tx_id))
@@ -404,6 +443,7 @@ impl MultisigContract {
 
         proposal.status = TxStatus::Cancelled;
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::Proposal(tx_id));
 
         env.events().publish(
             (Symbol::new(&env, "ms_cancelled"), tx_id),
@@ -414,6 +454,7 @@ impl MultisigContract {
     /// Propose a quorum threshold change. Any approver may propose.
     /// The change takes effect only when the current quorum of approvers approve it.
     pub fn propose_quorum_change(env: Env, proposer: Address, new_quorum: u32) -> u64 {
+        Self::bump_instance(&env);
         proposer.require_auth();
         Self::assert_is_approver(&env, &proposer);
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
@@ -432,6 +473,7 @@ impl MultisigContract {
             expires_at,
         };
         env.storage().persistent().set(&DataKey::QuorumProposal(id), &proposal);
+        Self::bump_persistent(&env, &DataKey::QuorumProposal(id));
         env.storage().instance().set(&DataKey::QuorumCounter, &(id + 1));
 
         env.events().publish(
@@ -443,13 +485,15 @@ impl MultisigContract {
 
     /// Approve a pending quorum-change proposal. Updates quorum when threshold is reached.
     pub fn approve_quorum_change(env: Env, approver: Address, id: u64) {
+        Self::bump_instance(&env);
         approver.require_auth();
         Self::assert_is_approver(&env, &approver);
 
         let mut proposal = Self::get_pending_quorum(&env, id);
         assert!(!env.storage().persistent().has(&DataKey::QuorumVoted(id, approver.clone())), "already voted");
 
-        env.storage().persistent().set(&DataKey::QuorumVoted(id, approver), &true);
+        env.storage().persistent().set(&DataKey::QuorumVoted(id, approver.clone()), &true);
+        Self::bump_persistent(&env, &DataKey::QuorumVoted(id, approver));
         proposal.approvals += 1;
 
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
@@ -458,6 +502,7 @@ impl MultisigContract {
             env.storage().instance().set(&DataKey::Quorum, &proposal.new_quorum);
         }
         env.storage().persistent().set(&DataKey::QuorumProposal(id), &proposal);
+        Self::bump_persistent(&env, &DataKey::QuorumProposal(id));
 
         env.events().publish(
             (Symbol::new(&env, "ms_quorum_changed"), id),
@@ -467,13 +512,15 @@ impl MultisigContract {
 
     /// Reject a pending quorum-change proposal. Marks as rejected when quorum is no longer reachable.
     pub fn reject_quorum_change(env: Env, approver: Address, id: u64) {
+        Self::bump_instance(&env);
         approver.require_auth();
         Self::assert_is_approver(&env, &approver);
 
         let mut proposal = Self::get_pending_quorum(&env, id);
         assert!(!env.storage().persistent().has(&DataKey::QuorumVoted(id, approver.clone())), "already voted");
 
-        env.storage().persistent().set(&DataKey::QuorumVoted(id, approver), &true);
+        env.storage().persistent().set(&DataKey::QuorumVoted(id, approver.clone()), &true);
+        Self::bump_persistent(&env, &DataKey::QuorumVoted(id, approver));
         proposal.rejections += 1;
 
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
@@ -483,17 +530,22 @@ impl MultisigContract {
             proposal.status = TxStatus::Rejected;
         }
         env.storage().persistent().set(&DataKey::QuorumProposal(id), &proposal);
+        Self::bump_persistent(&env, &DataKey::QuorumProposal(id));
     }
 
     /// Read a quorum-change proposal.
     pub fn get_quorum_proposal(env: Env, id: u64) -> QuorumChangeProposal {
-        env.storage().persistent().get(&DataKey::QuorumProposal(id))
-            .expect("quorum proposal not found")
+        Self::bump_instance(&env);
+        let proposal: QuorumChangeProposal = env.storage().persistent().get(&DataKey::QuorumProposal(id))
+            .expect("quorum proposal not found");
+        Self::bump_persistent(&env, &DataKey::QuorumProposal(id));
+        proposal
     }
 
     /// Update the proposal TTL (time-to-live). Only admin may call this.
     /// Applies to future proposals only, not retroactively.
     pub fn update_proposal_ttl(env: Env, admin: Address, new_ttl: u64) {
+        Self::bump_instance(&env);
         admin.require_auth();
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
             .expect("Contract not initialized");
@@ -514,6 +566,7 @@ impl MultisigContract {
     /// Clean up an expired proposal. Anyone may call this.
     /// Removes the proposal from storage to reclaim ledger rent.
     pub fn cleanup_expired(env: Env, tx_id: u64) {
+        Self::bump_instance(&env);
         let proposal: Proposal = env.storage().persistent().get(&DataKey::Proposal(tx_id))
             .expect("proposal not found");
         
@@ -538,6 +591,7 @@ impl MultisigContract {
     /// * `action` — `RotationAction::Add` or `RotationAction::Remove`.
     /// * `signer` — The address to add or remove from the approvers list.
     pub fn propose_signer_change(env: Env, action: RotationAction, signer: Address) {
+        Self::bump_instance(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -587,6 +641,7 @@ impl MultisigContract {
     ///   unreachable.
     /// Emits `SignerChanged`.
     pub fn execute_signer_change(env: Env) {
+        Self::bump_instance(&env);
         let rotation: PendingRotation = env
             .storage()
             .instance()
@@ -658,6 +713,7 @@ impl MultisigContract {
     ///
     /// Emits `SignerChangeCancelled`.
     pub fn cancel_signer_change(env: Env, caller: Address) {
+        Self::bump_instance(&env);
         caller.require_auth();
 
         let admin: Address = env
@@ -691,6 +747,21 @@ impl MultisigContract {
     }
 
     // --- helpers ---
+
+    /// Extend the instance entry's TTL so `Admin`, `Approvers`, `Quorum` and
+    /// counters are never archived (issue #1443).
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Extend a persistent record's TTL whenever it is read or written.
+    fn bump_persistent(env: &Env, key: &DataKey) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+    }
 
     fn assert_is_approver(env: &Env, addr: &Address) {
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
@@ -737,6 +808,7 @@ impl MultisigContract {
     /// * `weight > MAX_SIGNER_WEIGHT` (100) is **rejected** so no single signer
     ///   can concentrate enough weight to satisfy quorum alone.
     pub fn set_signer_weight(env: Env, admin: Address, signer: Address, weight: u32) {
+        Self::bump_instance(&env);
         admin.require_auth();
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         if admin != stored_admin { panic!("Only admin can set signer weight"); }
@@ -744,6 +816,7 @@ impl MultisigContract {
         if weight > MAX_SIGNER_WEIGHT { panic!("Weight exceeds maximum"); }
         Self::assert_is_approver(&env, &signer);
         env.storage().persistent().set(&DataKey::SignerWeight(signer.clone()), &weight);
+        Self::bump_persistent(&env, &DataKey::SignerWeight(signer));
 
         env.events().publish(
             (Symbol::new(&env, "ms_weight_set"), signer.clone()),
@@ -789,8 +862,10 @@ impl MultisigContract {
     /// tooling can rebuild the preimage with `stellar-xdr` and must match this
     /// function's output.
     pub fn proposal_hash(env: Env, proposal_id: u64) -> BytesN<32> {
+        Self::bump_instance(&env);
         let proposal: Proposal = env.storage().persistent().get(&DataKey::Proposal(proposal_id))
             .expect("proposal not found");
+        Self::bump_persistent(&env, &DataKey::Proposal(proposal_id));
         let contract_addr = env.current_contract_address();
         let mut preimage = Bytes::from_slice(&env, PROPOSAL_HASH_TAG);
         preimage.push_back(PROPOSAL_HASH_VERSION);
@@ -844,6 +919,7 @@ impl MultisigContract {
         proposal_id: u64,
         signatures: Vec<(Address, BytesN<64>)>,
     ) {
+        Self::bump_instance(&env);
         let mut proposal = Self::get_pending(&env, proposal_id);
         let hash = Self::proposal_hash(env.clone(), proposal_id);
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
@@ -875,6 +951,7 @@ impl MultisigContract {
 
         proposal.status = TxStatus::Executed;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::Proposal(proposal_id));
 
         env.events().publish(
             (Symbol::new(&env, "ms_executed"), proposal_id),

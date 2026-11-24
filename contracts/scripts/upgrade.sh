@@ -102,8 +102,16 @@ main() {
       invoke "$id" get_contract_version
       ;;
     execute)
+      # execute_upgrade only schedules the WASM swap (it takes effect after the
+      # invocation ends) and emits no version. migrate must run in the SAME
+      # deployment run so the new code's per-version steps execute and the
+      # on-chain ContractVersion is advanced.
       invoke "$id" execute_upgrade --admin "$ADMIN_ADDRESS"
+      log_info "Running migrate in the new code..."
       invoke "$id" migrate --admin "$ADMIN_ADDRESS"
+      local version
+      version=$(invoke "$id" get_contract_version | tail -1)
+      log_info "On-chain contract version after migrate: $version"
       log_success "Upgrade executed and migrated"
       ;;
     cancel)
