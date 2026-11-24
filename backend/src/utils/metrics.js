@@ -113,6 +113,13 @@ const webhookEndpointsDisabledTotal = new client.Counter({
   registers: [registry],
 });
 
+const smsSendTotal = new client.Counter({
+  name: 'sms_send_total',
+  help: 'SMS send attempts by provider (twilio, africastalking, mock) and status (success, failure)',
+  labelNames: ['provider', 'status'],
+  registers: [registry],
+});
+
 const amlScreeningsTotal = new client.Counter({
   name: 'afripay_aml_screenings_total',
   help: 'Total AML screening decisions, labelled by outcome (clear, flagged, error, not_screened)',
@@ -235,6 +242,7 @@ module.exports = {
   webhookEndpointsDisabledTotal,
   amlScreeningsTotal,
   amlScreeningCoverageGauge,
+  smsSendTotal,
   rateLimiterDegraded,
   rateLimiterRedisFailuresTotal,
   distributedLockRenewalFailuresTotal,

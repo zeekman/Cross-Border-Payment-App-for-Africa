@@ -10,7 +10,6 @@ const metricsMiddleware = require('./middleware/metricsMiddleware');
 const errorHandler = require('./middleware/errorHandler');
 const { registry } = require('./utils/metrics');
 const rateLimit = require('express-rate-limit');
-const rateLimiters = require('./middleware/rateLimiter');
 
 const { getHealth: getLedgerHealth } = require('./services/ledgerListener');
 
@@ -121,10 +120,8 @@ app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avat
   },
 }));
 
-// Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set)
-app.use('/api/auth/login', rateLimiters.authLimiter);
-app.use('/api/auth/register', rateLimiters.authLimiter);
-
+// Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set).
+// Auth limiters are mounted per route in routes/auth.js (BE-194).
 app.use('/api/auth', authRoutes);
 // Authenticated wallet/payment data must never be cached (FE-162)
 app.use(['/api/wallet', '/api/payments'], (req, res, next) => {
