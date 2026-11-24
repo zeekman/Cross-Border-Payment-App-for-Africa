@@ -40,8 +40,15 @@ pub struct Proposal {
     pub description: String,
     pub amount: i128,
     pub recipient: Address,
+    /// Cumulative **signer-weight** of approvals (not a head count). Compared
+    /// against the quorum weight threshold.
     pub approvals: u32,
+    /// Number of signers who rejected the proposal (head count, not weighted).
     pub rejections: u32,
+    /// Cumulative **signer-weight** of rejections, in the same units as
+    /// `approvals`. Use this — not `rejections` — when comparing against
+    /// `approvals` or quorum.
+    pub rejection_weight: u32,
     pub status: TxStatus,
     pub expires_at: u64,
 }
@@ -161,6 +168,7 @@ impl MultisigContract {
             recipient,
             approvals: 0,
             rejections: 0,
+            rejection_weight: 0,
             status: TxStatus::Pending,
             expires_at,
         };
@@ -198,7 +206,12 @@ impl MultisigContract {
         env.storage().persistent().set(&DataKey::Proposal(tx_id), &proposal);
     }
 
-    /// Reject a pending proposal. Marks as rejected when majority of approvers reject.
+    /// Reject a pending proposal. Marks as rejected when the remaining
+    /// signer weight can no longer lift approvals to quorum.
+    ///
+    /// Rejections are tracked both as a head count (`rejections`) and as
+    /// cumulative signer weight (`rejection_weight`), the latter being in the
+    /// same units as `approvals`.
     pub fn reject(env: Env, approver: Address, tx_id: u64) {
         approver.require_auth();
         Self::assert_is_approver(&env, &approver);
@@ -206,8 +219,14 @@ impl MultisigContract {
         let mut proposal = Self::get_pending(&env, tx_id);
         assert!(!env.storage().persistent().has(&DataKey::Voted(tx_id, approver.clone())), "already voted");
 
+        // Check expiry
+        if env.ledger().timestamp() > proposal.expires_at {
+            panic!("Proposal has expired");
+        }
+
         env.storage().persistent().set(&DataKey::Voted(tx_id, approver.clone()), &true);
         proposal.rejections += 1;
+        proposal.rejection_weight += Self::signer_weight(&env, &approver);
 
         let approvers: Vec<Address> = env.storage().instance().get(&DataKey::Approvers).unwrap();
         let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
