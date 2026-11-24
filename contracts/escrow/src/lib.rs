@@ -4,6 +4,10 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, 
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
+#[cfg(test)]
+mod test_events;
 
 #[derive(Clone)]
 /// Semantic version of this contract. Bumped on every upgrade.

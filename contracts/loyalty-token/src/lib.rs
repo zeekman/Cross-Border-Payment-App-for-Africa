@@ -59,6 +59,8 @@ pub struct AllowanceValue {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
 mod test_allowance;
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
