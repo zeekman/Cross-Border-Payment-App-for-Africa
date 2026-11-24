@@ -1423,3 +1423,210 @@ fn test_deposit_allowed_again_after_unpause() {
 
     assert_eq!(client.get_balance(&user), 1_0000000);
 }
+
+// ── SC-208: bounded vault list, O(1) balance, pagination ─────────────────────
+
+const DAY: u64 = 86_400;
+
+#[test]
+#[should_panic(expected = "vault limit reached")]
+fn test_deposit_beyond_vault_cap_panics() {
+    let (env, client, _, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let cap = crate::MAX_VAULTS_PER_USER;
+    mint_usdc(&env, &usdc_id, &client.address, &user, (cap as i128 + 1) * 1_0000000);
+    let unlock = env.ledger().timestamp() + DAY;
+    for _ in 0..cap {
+        client.deposit(&user, &1_0000000, &unlock);
+    }
+    client.deposit(&user, &1_0000000, &unlock);
+}
+
+#[test]
+fn test_full_withdrawal_frees_a_vault_slot() {
+    let (env, client, _, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let cap = crate::MAX_VAULTS_PER_USER;
+    mint_usdc(&env, &usdc_id, &client.address, &user, (cap as i128 + 1) * 1_0000000);
+    let unlock = env.ledger().timestamp() + DAY;
+    for _ in 0..cap {
+        client.deposit(&user, &1_0000000, &unlock);
+    }
+    env.ledger().set_timestamp(unlock + 1);
+    client.withdraw(&user, &0, &1_0000000);
+    client.deposit(&user, &1_0000000, &(env.ledger().timestamp() + DAY));
+    assert_eq!(client.get_vault_ids(&user).len(), cap);
+    assert_eq!(client.get_balance(&user), cap as i128 * 1_0000000);
+}
+
+#[test]
+fn test_get_balance_reads_constant_entries_regardless_of_vault_count() {
+    let (env, client, _, usdc_id) = setup();
+    let cap = crate::MAX_VAULTS_PER_USER;
+    let unlock = env.ledger().timestamp() + DAY;
+
+    let small = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &client.address, &small, 1_0000000);
+    client.deposit(&small, &1_0000000, &unlock);
+
+    let large = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &client.address, &large, cap as i128 * 1_0000000);
+    for _ in 0..cap {
+        client.deposit(&large, &1_0000000, &unlock);
+    }
+
+    assert_eq!(client.get_balance(&small), 1_0000000);
+    let small_res = env.cost_estimate().resources();
+    let small_reads = small_res.disk_read_entries + small_res.memory_read_entries;
+
+    assert_eq!(client.get_balance(&large), cap as i128 * 1_0000000);
+    let large_res = env.cost_estimate().resources();
+    let large_reads = large_res.disk_read_entries + large_res.memory_read_entries;
+
+    assert_eq!(small_reads, large_reads);
+}
+
+#[test]
+fn test_get_vaults_paginates() {
+    let (env, client, _, usdc_id) = setup();
+    let user = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &client.address, &user, 5 * 1_0000000);
+    for i in 0..5u64 {
+        client.deposit(&user, &1_0000000, &(env.ledger().timestamp() + DAY * (i + 1)));
+    }
+
+    let page = client.get_vaults(&user, &1, &2);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap().0, 1);
+    assert_eq!(page.get(1).unwrap().0, 2);
+    assert_eq!(page.get(1).unwrap().1.balance, 1_0000000);
+
+    assert_eq!(client.get_vaults(&user, &4, &10).len(), 1);
+    assert_eq!(client.get_vaults(&user, &5, &10).len(), 0);
+}
+
+/// Sum of the balances of all of `user`'s open vaults, read via pagination.
+fn sum_vault_balances(client: &SavingsVaultContractClient, user: &Address) -> i128 {
+    let mut total = 0i128;
+    for (_, vault) in client.get_vaults(user, &0, &crate::MAX_VAULTS_PER_USER).iter() {
+        total += vault.balance;
+    }
+    total
+}
+
+/// Asserts the SC-209 solvency invariant: the contract always holds at least
+/// `TotalLocked` plus the interest reserve.
+fn assert_solvent(env: &Env, client: &SavingsVaultContractClient, usdc_id: &Address) {
+    let held = TokenClient::new(env, usdc_id).balance(&client.address);
+    assert!(
+        held >= client.get_total_locked() + client.get_interest_reserve_balance(),
+        "contract balance {} below TotalLocked {} + reserve {}",
+        held,
+        client.get_total_locked(),
+        client.get_interest_reserve_balance()
+    );
+}
+
+#[test]
+fn test_user_total_matches_vault_sum_over_random_sequences() {
+    // Deterministic pseudo-random sequences (LCG) of deposits and partial /
+    // full withdrawals across several seeds.
+    for seed in [1u64, 7, 42, 1337, 9001] {
+        let (env, client, admin, usdc_id) = setup();
+        let distributor = Address::generate(&env);
+        client.set_fee_distributor(&admin, &distributor);
+        mint_usdc(&env, &usdc_id, &client.address, &distributor, 1_000_0000000);
+        client.fund_interest_reserve(&distributor, &1_000_0000000);
+        client.set_interest_rate(&admin, &500u32);
+
+        let user = Address::generate(&env);
+        mint_usdc(&env, &usdc_id, &client.address, &user, 100_000_0000000);
+
+        let mut state = seed;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state >> 33
+        };
+
+        for _ in 0..40 {
+            let ids = client.get_vault_ids(&user);
+            let do_deposit = ids.is_empty() || (next() % 2 == 0 && ids.len() < crate::MAX_VAULTS_PER_USER);
+            if do_deposit {
+                let amount = (next() % 1_000 + 1) as i128 * 1_0000000;
+                let unlock = env.ledger().timestamp() + DAY * (next() % 30 + 1);
+                client.deposit(&user, &amount, &unlock);
+            } else {
+                let id = ids.get((next() % ids.len() as u64) as u32).unwrap();
+                let vault = client.get_vault(&user, &id);
+                if vault.balance > 0 {
+                    let amount = if next() % 3 == 0 {
+                        vault.balance
+                    } else {
+                        (next() as i128 % vault.balance) + 1
+                    };
+                    client.withdraw(&user, &id, &amount);
+                }
+            }
+            env.ledger().set_timestamp(env.ledger().timestamp() + DAY * (next() % 5));
+
+            assert_eq!(client.get_balance(&user), sum_vault_balances(&client, &user));
+            assert_eq!(client.get_total_locked(), client.get_balance(&user));
+            assert_solvent(&env, &client, &usdc_id);
+        }
+    }
+}
+
+// ── SC-209: CEI ordering / solvency invariant ────────────────────────────────
+
+#[test]
+fn test_withdraw_with_interest_keeps_contract_solvent() {
+    let (env, client, admin, usdc_id) = setup();
+    let distributor = Address::generate(&env);
+    client.set_fee_distributor(&admin, &distributor);
+    mint_usdc(&env, &usdc_id, &client.address, &distributor, 100_0000000);
+    client.fund_interest_reserve(&distributor, &100_0000000);
+    client.set_interest_rate(&admin, &1_000u32);
+
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock = env.ledger().timestamp() + 30 * DAY;
+    mint_usdc(&env, &usdc_id, &client.address, &user, amount);
+    client.deposit(&user, &amount, &unlock);
+    assert_solvent(&env, &client, &usdc_id);
+
+    env.ledger().set_timestamp(unlock + 1);
+    client.withdraw(&user, &0, &(amount / 2));
+    assert_solvent(&env, &client, &usdc_id);
+    assert_eq!(client.get_total_locked(), amount / 2);
+
+    client.withdraw(&user, &0, &(amount / 2));
+    assert_solvent(&env, &client, &usdc_id);
+    assert_eq!(client.get_total_locked(), 0);
+    // Principal plus some interest was paid out of the reserve.
+    assert!(TokenClient::new(&env, &usdc_id).balance(&user) > amount);
+}
+
+#[test]
+fn test_emergency_exits_keep_contract_solvent() {
+    let (env, client, admin, usdc_id) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let unlock = env.ledger().timestamp() + DAY;
+    mint_usdc(&env, &usdc_id, &client.address, &a, 10_0000000);
+    mint_usdc(&env, &usdc_id, &client.address, &b, 20_0000000);
+    client.deposit(&a, &10_0000000, &unlock);
+    client.deposit(&b, &20_0000000, &unlock);
+
+    client.announce_emergency(&admin);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 172_800);
+    client.emergency_withdraw(&admin, &a);
+    assert_solvent(&env, &client, &usdc_id);
+    assert_eq!(client.get_total_locked(), 20_0000000);
+    assert_eq!(client.get_balance(&a), 0);
+
+    client.emergency_withdraw(&admin, &b);
+    assert_solvent(&env, &client, &usdc_id);
+    assert_eq!(client.get_total_locked(), 0);
+}

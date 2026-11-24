@@ -453,6 +453,7 @@ fn test_release_escrow() {
     mint_usdc(&env, &usdc_id, &admin, &sender, amount);
 
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &fee_bps);
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
 
     let escrow = client.get_escrow(&escrow_id);
@@ -651,6 +652,7 @@ fn test_partial_release_wrong_status() {
 
     mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &1_000_0000000, &250);
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id); // moves to Released
 
     client.partial_release(&agent, &escrow_id, &1_000000000i128);
@@ -799,6 +801,7 @@ fn test_double_release() {
 
     mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &1_000_0000000, &250);
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
 }
@@ -813,6 +816,7 @@ fn test_cancel_after_release() {
 
     mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &1_000_0000000, &250);
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
     client.cancel_escrow(&sender, &escrow_id);
 }
@@ -835,6 +839,7 @@ fn test_withdraw_fees() {
     mint_usdc(&env, &usdc_id, &admin, &sender, amount);
     client.set_fee_bps(&admin, &fee_bps);
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &fee_bps);
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
 
     let expected_fee = (amount * fee_bps as i128) / 10000;
@@ -860,6 +865,7 @@ fn test_withdraw_fees_emits_event() {
     mint_usdc(&env, &usdc_id, &admin, &sender, amount);
     client.set_fee_bps(&admin, &fee_bps);
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &fee_bps);
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
 
     let expected_fee = (amount * fee_bps as i128) / 10000;
@@ -893,6 +899,7 @@ fn test_withdraw_fees_wrong_caller() {
 
     mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &1_000_0000000, &500);
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
     client.withdraw_fees(&impostor, &500_0000000);
 }
@@ -947,6 +954,7 @@ fn test_withdraw_fees_zero_amount_panics() {
     let agent = Address::generate(&env);
     mint_usdc(&env, &usdc_id, &admin, &sender, 1_000_0000000);
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &1_000_0000000, &500);
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
     client.withdraw_fees(&admin, &0);
 }
@@ -984,6 +992,7 @@ fn test_release_escrow_after_expiry_panics() {
         li.timestamp += 30 * 24 * 60 * 60 + 1;
     });
 
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id); // must panic: "Escrow has expired"
 }
 
@@ -1003,6 +1012,7 @@ fn test_release_escrow_at_exact_expiry_boundary_panics() {
         li.timestamp += 30 * 24 * 60 * 60; // exactly at boundary — >= means expired
     });
 
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id); // must panic: "Escrow has expired"
 }
 
@@ -1021,6 +1031,7 @@ fn test_release_escrow_before_expiry_succeeds() {
         li.timestamp += 30 * 24 * 60 * 60 - 1; // one second before expiry
     });
 
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
     assert_eq!(client.get_escrow(&escrow_id).status, EscrowStatus::Released);
 }
@@ -1119,6 +1130,7 @@ fn test_withdraw_fees_exceeds_accumulated_panics() {
 
     mint_usdc(&env, &usdc_id, &admin, &sender, amount);
     let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    client.confirm_delivery(&agent, &escrow_id);
     client.release_escrow(&agent, &escrow_id);
 
     let accumulated = client.get_accumulated_fees();
@@ -1546,6 +1558,7 @@ fn test_partial_release_fee_sum_equals_single_release() {
 
     // Scenario 1: Single full release
     let escrow1 = client.create_escrow(&sender, &recipient, &agent, &total_amount, &fee_bps);
+    client.confirm_delivery(&agent, &escrow1);
     client.release_escrow(&agent, &escrow1);
     let fee_single = client.get_accumulated_fees();
 
@@ -2355,4 +2368,90 @@ fn test_non_admin_cannot_set_cancel_hold_period() {
 fn test_cancel_hold_period_above_max_panics() {
     let (_, client, admin, _) = setup();
     client.set_cancel_hold_period(&admin, &(7 * 24 * 60 * 60 + 1));
+}
+
+// ── SC-210: release requires confirm_delivery ────────────────────────────────
+
+#[test]
+#[should_panic(expected = "delivery not confirmed")]
+fn test_release_escrow_without_confirm_delivery_panics() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    client.release_escrow(&agent, &escrow_id);
+}
+
+#[test]
+#[should_panic(expected = "release challenge window has not elapsed")]
+fn test_release_before_challenge_window_ends_panics() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    client.set_release_challenge_period(&admin, &3_600u64);
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    client.confirm_delivery(&agent, &escrow_id);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3_599);
+    client.release_escrow(&agent, &escrow_id);
+}
+
+#[test]
+fn test_release_after_challenge_window_succeeds() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    client.set_release_challenge_period(&admin, &3_600u64);
+    assert_eq!(client.get_release_challenge_period(), 3_600u64);
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    client.confirm_delivery(&agent, &escrow_id);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3_600);
+    client.release_escrow(&agent, &escrow_id);
+
+    assert_eq!(client.get_escrow(&escrow_id).status, EscrowStatus::Released);
+}
+
+#[test]
+fn test_recipient_dispute_inside_challenge_window_succeeds() {
+    let (env, escrow, _escrow_contract_id, _dispute_resolution_id, admin, usdc_id, _) =
+        setup_with_dispute();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount);
+
+    escrow.set_release_challenge_period(&admin, &3_600u64);
+    let escrow_id = escrow.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    escrow.confirm_delivery(&agent, &escrow_id);
+
+    // Inside the window: the agent cannot release yet, the recipient can dispute.
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert!(escrow.try_release_escrow(&agent, &escrow_id).is_err());
+
+    mint_usdc(&env, &usdc_id, &admin, &recipient, DISPUTE_FILING_FEE);
+    escrow.dispute_escrow(&recipient, &escrow_id);
+    assert_eq!(
+        escrow.get_escrow(&escrow_id).status,
+        EscrowStatus::UnderDispute
+    );
+}
+
+#[test]
+#[should_panic(expected = "Challenge period exceeds maximum of 7 days")]
+fn test_set_release_challenge_period_above_cap_panics() {
+    let (_env, client, admin, _usdc_id) = setup();
+    client.set_release_challenge_period(&admin, &(7 * 24 * 60 * 60 + 1));
 }

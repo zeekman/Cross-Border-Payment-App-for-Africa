@@ -38,6 +38,17 @@
 //!    quorum (in basis points) has been reached.
 //! 5. Once quorum is reached the funds are released immediately and the dispute is
 //!    marked `ResolvedForRecipient` or `ResolvedForSender`.
+//!
+//! ## Conflict of interest (SC-207)
+//! An arbitrator, panel member or super-arbitrator who is the sender,
+//! recipient or escrow agent of a dispute may not vote on or resolve it
+//! (`arbitrator is a party to this dispute`).
+//! - Conflicted panel members are recused (`ArbitratorRecused` is emitted when
+//!   the dispute is opened) and excluded from the quorum denominator.
+//! - If the single arbitrator is conflicted, the dispute is decided by the
+//!   panel via [`cast_vote`].
+//! - If the super-arbitrator is conflicted, the admin escalates by appointing a
+//!   per-dispute substitute via [`assign_substitute_super_arbitrator`].
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, Bytes, Env, IntoVal, Symbol, Vec,
@@ -126,6 +137,9 @@ pub enum DataKey {
     /// `(escrow contract, escrow_id)` backing an escrow dispute. Used to report
     /// the outcome back via `close_disputed_escrow`.
     EscrowRef(u64),
+    /// Per-dispute substitute for the super-arbitrator, appointed by the admin
+    /// when the super-arbitrator is a party to the dispute (SC-207).
+    SubstituteSuperArbitrator(u64),
 }
 
 // ── Domain types ──────────────────────────────────────────────────────────────
@@ -269,6 +283,25 @@ pub struct EvtQuorumReached {
     pub amount: i128,
 }
 
+/// Emitted when a panel arbitrator is excluded from a dispute because they are
+/// one of its parties (sender, recipient or escrow agent). Recused members
+/// cannot vote and do not count towards the quorum denominator.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtArbitratorRecused {
+    pub dispute_id: u64,
+    pub arbitrator: Address,
+}
+
+/// Emitted when the admin appoints a substitute super-arbitrator for a
+/// dispute the super-arbitrator is a party to.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtSubstituteSuperArbitratorAssigned {
+    pub dispute_id: u64,
+    pub substitute: Address,
+}
+
 /// Emitted once by [`DisputeResolutionContract::initialize`].
 #[derive(Debug, Clone)]
 #[contracttype]
@@ -333,6 +366,44 @@ fn dispute_agent(env: &Env, dispute_id: u64) -> Option<Address> {
         bump_persistent(env, &DataKey::DisputeAgent(dispute_id));
     }
     agent
+}
+
+/// `true` if `addr` is a party to `dispute`: its sender, recipient or (for
+/// escrow disputes) payout agent. Such an address has a conflict of interest
+/// and may not vote on or resolve the dispute (SC-207).
+fn is_party(env: &Env, dispute: &Dispute, addr: &Address) -> bool {
+    *addr == dispute.sender
+        || *addr == dispute.recipient
+        || dispute_agent(env, dispute.id).as_ref() == Some(addr)
+}
+
+/// Panic if `arbitrator` is a party to `dispute`.
+fn require_not_party(env: &Env, dispute: &Dispute, arbitrator: &Address) {
+    if is_party(env, dispute, arbitrator) {
+        panic!("arbitrator is a party to this dispute");
+    }
+}
+
+/// Emit `ArbitratorRecused` for every panel member who is a party to the
+/// newly opened `dispute`. Those members are excluded from voting and from
+/// the quorum denominator in [`DisputeResolutionContract::cast_vote`].
+fn emit_recusals(env: &Env, dispute: &Dispute) {
+    let panel: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Arbitrators)
+        .unwrap_or_else(|| Vec::new(env));
+    for member in panel.iter() {
+        if is_party(env, dispute, &member) {
+            env.events().publish(
+                (Symbol::new(env, "ArbitratorRecused"),),
+                EvtArbitratorRecused {
+                    dispute_id: dispute.id,
+                    arbitrator: member,
+                },
+            );
+        }
+    }
 }
 
 fn payout_confirmed(env: &Env, dispute_id: u64) -> bool {
@@ -545,6 +616,8 @@ impl DisputeResolutionContract {
             bump_persistent(&env, &DataKey::UserDisputes(user));
         }
 
+        emit_recusals(&env, &dispute);
+
         env.events().publish(
             (Symbol::new(&env, "DisputeOpened"),),
             EvtDisputeOpened {
@@ -714,6 +787,9 @@ impl DisputeResolutionContract {
             bump_persistent(&env, &DataKey::UserDisputes(user));
         }
 
+        // The agent is stored above, so agent-arbitrators are recused too.
+        emit_recusals(&env, &dispute);
+
         env.events().publish(
             (Symbol::new(&env, "DisputeOpened"),),
             EvtDisputeOpened {
@@ -847,6 +923,11 @@ impl DisputeResolutionContract {
         if dispute.status != DisputeStatus::Open {
             panic!("dispute is not open");
         }
+
+        // Conflict of interest (SC-207): the arbitrator may not rule on a
+        // dispute they are a party to. Such disputes must be decided by the
+        // panel via `cast_vote` (where the arbitrator is recused) instead.
+        require_not_party(env, &dispute, &arbitrator);
 
         let now = env.ledger().timestamp();
         dispute.status = DisputeStatus::Appealing;
@@ -1002,11 +1083,23 @@ impl DisputeResolutionContract {
         bump_instance(env);
         super_arbitrator.require_auth();
 
-        let stored_super: Address = env
+        // A substitute appointed via `assign_substitute_super_arbitrator`
+        // replaces the (conflicted) super-arbitrator for this dispute only.
+        let substitute: Option<Address> = env
             .storage()
-            .instance()
-            .get(&DataKey::SuperArbitrator)
-            .expect("super arbitrator not set");
+            .persistent()
+            .get(&DataKey::SubstituteSuperArbitrator(dispute_id));
+        let stored_super: Address = match substitute {
+            Some(substitute) => {
+                bump_persistent(env, &DataKey::SubstituteSuperArbitrator(dispute_id));
+                substitute
+            }
+            None => env
+                .storage()
+                .instance()
+                .get(&DataKey::SuperArbitrator)
+                .expect("super arbitrator not set"),
+        };
 
         if super_arbitrator != stored_super {
             panic!("unauthorized: caller is not the super arbitrator");
@@ -1017,6 +1110,10 @@ impl DisputeResolutionContract {
         if dispute.status != DisputeStatus::UnderAppeal {
             panic!("dispute is not under appeal");
         }
+
+        // Conflict of interest (SC-207). A conflicted super-arbitrator is
+        // escalated to the admin, who appoints a per-dispute substitute.
+        require_not_party(env, &dispute, &super_arbitrator);
 
         record_ruling(env, &mut dispute, ruling);
         Self::award(env, dispute, ruling);
@@ -1261,6 +1358,68 @@ impl DisputeResolutionContract {
         env.storage().persistent().set(&DataKey::SuperArbitrator, &super_arbitrator);
     }
 
+    /// Admin escalation path for a conflicted super-arbitrator (SC-207).
+    ///
+    /// When the super-arbitrator is the sender, recipient or agent of a
+    /// dispute, [`resolve_appeal`] rejects them. The admin then appoints a
+    /// `substitute` who may call `resolve_appeal` / `resolve_appeal_for_agent`
+    /// for this dispute only. The global super-arbitrator is unchanged.
+    ///
+    /// Panics if the dispute is already settled, if the current
+    /// super-arbitrator is not conflicted, or if `substitute` is itself a
+    /// party to the dispute.
+    pub fn assign_substitute_super_arbitrator(
+        env: Env,
+        admin: Address,
+        dispute_id: u64,
+        substitute: Address,
+    ) {
+        bump_instance(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .or_else(|| env.storage().persistent().get(&DataKey::Admin))
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized: caller is not admin");
+        }
+
+        let dispute: Dispute = load_dispute(&env, dispute_id);
+        if dispute.status != DisputeStatus::Open
+            && dispute.status != DisputeStatus::Appealing
+            && dispute.status != DisputeStatus::UnderAppeal
+        {
+            panic!("dispute is already settled");
+        }
+
+        let stored_super: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::SuperArbitrator)
+            .expect("super arbitrator not set");
+        if !is_party(&env, &dispute, &stored_super) {
+            panic!("super arbitrator is not a party to this dispute");
+        }
+        if is_party(&env, &dispute, &substitute) {
+            panic!("arbitrator is a party to this dispute");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SubstituteSuperArbitrator(dispute_id), &substitute);
+        bump_persistent(&env, &DataKey::SubstituteSuperArbitrator(dispute_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "SubstituteSuperArbAssigned"),),
+            EvtSubstituteSuperArbitratorAssigned {
+                dispute_id,
+                substitute,
+            },
+        );
+    }
+
     /// Register the escrow contract authorised to open disputes via
     /// [`open_escrow_dispute`]. Admin only.
     ///
@@ -1328,6 +1487,11 @@ impl DisputeResolutionContract {
     /// vote the contract tallies the results and, if the configured quorum is
     /// reached, immediately releases funds to the winning side.
     ///
+    /// Panel members who are a party to the dispute (sender, recipient or
+    /// escrow agent) are recused: they cannot vote (panics with
+    /// `arbitrator is a party to this dispute`) and are excluded from the
+    /// quorum denominator.
+    ///
     /// # Arguments
     /// * `arbitrator`    — Must be a member of the `Arbitrators` panel.
     /// * `dispute_id`    — ID returned by `open_dispute`.
@@ -1373,19 +1537,29 @@ impl DisputeResolutionContract {
             panic!("dispute is not open");
         }
 
+        // Conflict of interest (SC-207): a panel member who is the sender,
+        // recipient or agent of this dispute is recused and may not vote.
+        require_not_party(&env, &dispute, &arbitrator);
+
         // Record the vote.
         env.storage()
             .persistent()
             .set(&DataKey::Vote(dispute_id, arbitrator.clone()), &for_recipient);
 
-        // Tally all votes cast so far for this dispute.
-        let panel_size = panel.len();
+        // Tally all votes cast so far for this dispute. Recused (conflicted)
+        // members are excluded from the quorum denominator, so `panel_size`
+        // counts only the arbitrators eligible to vote on this dispute.
+        let mut panel_size: u32 = 0;
         let mut votes_for_recipient: u32 = 0;
         let mut votes_for_sender: u32 = 0;
         let mut total_votes: u32 = 0;
 
-        for i in 0..panel_size {
+        for i in 0..panel.len() {
             let member = panel.get(i).unwrap();
+            if is_party(&env, &dispute, &member) {
+                continue;
+            }
+            panel_size += 1;
             let key = DataKey::Vote(dispute_id, member);
             if let Some(vote) = env.storage().persistent().get::<DataKey, bool>(&key) {
                 total_votes += 1;
@@ -1414,8 +1588,9 @@ impl DisputeResolutionContract {
             .get(&DataKey::QuorumBps)
             .unwrap_or(DEFAULT_QUORUM_BPS);
 
-        // A side reaches quorum when its vote share (in bps) strictly exceeds
-        // quorum_bps: votes_for_side * 10_000 / panel_size > quorum_bps.
+        // A side reaches quorum when its vote share (in bps) of the eligible
+        // (non-recused) panel strictly exceeds quorum_bps:
+        // votes_for_side * 10_000 / panel_size > quorum_bps.
         // We rearrange to avoid division: votes_for_side * 10_000 > quorum_bps * panel_size.
         let quorum_threshold = quorum_bps as u64 * panel_size as u64;
 
