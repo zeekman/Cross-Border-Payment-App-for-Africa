@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { Eye, EyeOff, ArrowLeft, Check, X, AlertCircle, Clock } from 'lucide-react';
@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
 import { getPasswordStrength, getPasswordError, getPasswordChecklist } from '../utils/passwordValidator';
 import { usePasswordPolicy } from '../hooks/usePasswordPolicy';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
 
 export default function ResetPassword() {
   const navigate = useNavigate();
@@ -51,25 +52,24 @@ export default function ResetPassword() {
       });
   }, [tokenFromUrl]);
 
-  // Countdown tick
+  // Countdown tick, derived from the expiry time, so pausing it in a hidden tab is safe:
+  // it recomputes straight away when the tab is visible again.
+  const tickCountdown = useCallback(() => {
+    const remaining = Math.ceil((expiresAt - Date.now()) / 1000);
+    if (remaining <= 0) {
+      setTokenStatus('expired');
+      return;
+    }
+    const mins = Math.floor(remaining / 60);
+    const secs = remaining % 60;
+    setCountdown(`${mins}m ${String(secs).padStart(2, '0')}s`);
+  }, [expiresAt]);
+
   useEffect(() => {
-    if (tokenStatus !== 'valid' || !expiresAt) return;
+    if (tokenStatus === 'valid' && expiresAt) tickCountdown();
+  }, [tokenStatus, expiresAt, tickCountdown]);
 
-    const tick = () => {
-      const remaining = Math.ceil((expiresAt - Date.now()) / 1000);
-      if (remaining <= 0) {
-        setTokenStatus('expired');
-        return;
-      }
-      const mins = Math.floor(remaining / 60);
-      const secs = remaining % 60;
-      setCountdown(`${mins}m ${String(secs).padStart(2, '0')}s`);
-    };
-
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [tokenStatus, expiresAt]);
+  useVisibleInterval(tickCountdown, 1000, { enabled: tokenStatus === 'valid' && Boolean(expiresAt) });
 
   // Strength checks derive from the backend password policy (single source of
   // truth) so the reset form enforces exactly what /reset-password enforces.

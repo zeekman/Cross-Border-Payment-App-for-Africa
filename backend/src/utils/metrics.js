@@ -77,6 +77,42 @@ const emailQueueDepth = new client.Gauge({
   registers: [registry],
 });
 
+// Ledger-listener liveness (BE-198). Lag is measured in ledgers between the newest
+// payment Horizon has and the newest payment the listener's stream has delivered, so
+// a quiet network reads 0 rather than looking stale.
+const ledgerListenerLagLedgers = new client.Gauge({
+  name: 'ledger_listener_lag_ledgers',
+  help: 'Ledgers between the newest payment on Horizon and the newest payment the listener stream has delivered',
+  registers: [registry],
+});
+
+const ledgerListenerLastEventTimestampSeconds = new client.Gauge({
+  name: 'ledger_listener_last_event_timestamp_seconds',
+  help: 'Unix time of the last proof of life from the ledger listener (stream event or caught-up poll)',
+  registers: [registry],
+});
+
+// Durable webhook delivery queue (BE-217), same pattern as the email queue gauge.
+const webhookQueueDepth = new client.Gauge({
+  name: 'afripay_webhook_queue_depth',
+  help: 'Webhook delivery jobs by state',
+  labelNames: ['state'],
+  registers: [registry],
+});
+
+const webhookDeliveriesTotal = new client.Counter({
+  name: 'afripay_webhook_deliveries_total',
+  help: 'Webhook delivery attempts by result (delivered, retry, failed, skipped)',
+  labelNames: ['result'],
+  registers: [registry],
+});
+
+const webhookEndpointsDisabledTotal = new client.Counter({
+  name: 'afripay_webhook_endpoints_disabled_total',
+  help: 'Webhook endpoints automatically disabled after consecutive failed events',
+  registers: [registry],
+});
+
 const amlScreeningsTotal = new client.Counter({
   name: 'afripay_aml_screenings_total',
   help: 'Total AML screening decisions, labelled by outcome (clear, flagged, error, not_screened)',
@@ -192,6 +228,11 @@ module.exports = {
   afripayHorizonDuration,
   activeUsers,
   emailQueueDepth,
+  ledgerListenerLagLedgers,
+  ledgerListenerLastEventTimestampSeconds,
+  webhookQueueDepth,
+  webhookDeliveriesTotal,
+  webhookEndpointsDisabledTotal,
   amlScreeningsTotal,
   amlScreeningCoverageGauge,
   rateLimiterDegraded,

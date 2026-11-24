@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import { Eye, EyeOff, ArrowLeft, ShieldCheck, MailCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
 
 export default function Login() {
   const { login, updateUser } = useAuth();
@@ -56,9 +57,9 @@ export default function Login() {
   }, [requires2fa, useBackupCode]);
 
   // Tick the cooldown down every second; re-enable the button automatically at 0.
-  useEffect(() => {
-    if (secondsLeft <= 0) return undefined;
-    const timer = setInterval(() => {
+  // Recomputed from the stored deadline on every tick, so pausing it in a hidden tab is safe.
+  useVisibleInterval(
+    () => {
       const until = parseInt(sessionStorage.getItem(COOLDOWN_KEY) || '0', 10);
       const remaining = Math.ceil((until - Date.now()) / 1000);
       if (remaining <= 0) {
@@ -67,9 +68,10 @@ export default function Login() {
       } else {
         setSecondsLeft(remaining);
       }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [secondsLeft]);
+    },
+    1000,
+    { enabled: secondsLeft > 0 },
+  );
 
   const startCooldown = (seconds) => {
     const until = Date.now() + seconds * 1000;

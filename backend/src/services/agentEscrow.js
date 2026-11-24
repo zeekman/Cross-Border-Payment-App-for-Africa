@@ -258,4 +258,61 @@ async function cancelEscrow({ encryptedSecretKey, escrowId }) {
   return { txHash: result.hash };
 }
 
-module.exports = { createEscrow, confirmPayout, cancelEscrow, subscribeToEscrowEvents, ESCROW_EVENT_NAMES };
+/**
+ * Admin withdraws accrued fees from the contract to an explicit recipient.
+ *
+ * Contract signature: withdraw_fees(to: Address, amount: i128)
+ * The contract reads the stored admin from its own state and authorises the
+ * call against it, so the admin address is NOT passed as an argument.
+ *
+ * Returns { txHash }.
+ */
+async function withdrawFees({ encryptedSecretKey, to, amount }) {
+  const secretKey = decryptSecret(encryptedSecretKey);
+  const keypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const admin = keypair.publicKey();
+  const rpc = getRpc();
+
+  const account = await rpc.getAccount(admin);
+  const contract = new StellarSdk.Contract(CONTRACT_ID);
+  const fee = await getRecommendedFee(rpc);
+
+  // Argument order must match the contract: (to, amount).
+  const args = [
+    StellarSdk.nativeToScVal(to, { type: "address" }),
+    StellarSdk.nativeToScVal(BigInt(amount), { type: "i128" }),
+  ];
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee,
+    networkPassphrase,
+  })
+    .addOperation(contract.call("withdraw_fees", ...args))
+    .setTimeout(30)
+    .build();
+
+  const prepared = await rpc.prepareTransaction(tx);
+  prepared.sign(keypair);
+
+  const result = await rpc.sendTransaction(prepared);
+  if (result.status === "ERROR") {
+    throw Object.assign(new Error(`withdraw_fees failed: ${result.errorResult}`), { status: 400 });
+  }
+
+  const response = await waitForSorobanTx(rpc, result, { timeoutMs: CONFIRMATION_TIMEOUT_MS });
+
+  if (response.status !== "SUCCESS") {
+    throw Object.assign(new Error(`Transaction failed: ${response.status}`), { status: 400 });
+  }
+
+  return { txHash: result.hash };
+}
+
+module.exports = {
+  createEscrow,
+  confirmPayout,
+  cancelEscrow,
+  withdrawFees,
+  subscribeToEscrowEvents,
+  ESCROW_EVENT_NAMES,
+};

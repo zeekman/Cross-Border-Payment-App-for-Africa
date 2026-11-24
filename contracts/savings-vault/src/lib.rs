@@ -809,7 +809,18 @@ impl SavingsVaultContract {
     ///
     /// Each deposit is its own vault: it never changes the unlock time (or
     /// penalty exposure) of funds the user already has in other vaults.
+    ///
+    /// Inflows are gated by two independent kill switches, both of which must
+    /// be clear for a deposit to succeed:
+    /// - the governance `pause` flag (checked first, panics with
+    ///   `Contract is paused`), and
+    /// - the emergency state machine (`announce_emergency` /
+    ///   `activate_emergency`, checked by `assert_accepting_deposits`).
+    ///
+    /// Exit paths (`withdraw`, `emergency_withdraw`) are never blocked by
+    /// either switch.
     pub fn deposit(env: Env, user: Address, amount: i128, unlock_time: u64) -> u32 {
+        governance::require_not_paused(&env);
         user.require_auth();
         governance::require_not_paused(&env);
         Self::assert_accepting_deposits(&env);

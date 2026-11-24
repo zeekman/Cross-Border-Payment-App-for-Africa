@@ -1249,6 +1249,222 @@ fn test_new_admin_can_propose_next_rotation() {
     advance_time(&env, ADMIN_ROTATION_DELAY);
     client.accept_admin(&third_admin);
     assert_eq!(client.get_admin(), third_admin);
+// ── #1452 / #1453: fee routing, checked fee math, recipient validation ───────
+
+/// Minimal mock of the `fee-distributor` contract used to verify that
+/// recurring-payment fees are routed through it instead of the admin EOA.
+mod mock_fee_distributor {
+    use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
+
+    #[contracttype]
+    #[derive(Clone)]
+    pub enum DataKey {
+        Token,
+        Treasury,
+        AgentPool,
+        Accumulated,
+    }
+
+    #[contract]
+    pub struct MockFeeDistributor;
+
+    #[contractimpl]
+    impl MockFeeDistributor {
+        pub fn initialize(env: Env, token: Address, treasury: Address) {
+            env.storage().instance().set(&DataKey::Token, &token);
+            env.storage().instance().set(&DataKey::Treasury, &treasury);
+            env.storage().instance().set(&DataKey::AgentPool, &0i128);
+            env.storage().instance().set(&DataKey::Accumulated, &0i128);
+        }
+
+        /// Pulls `amount` from `payer` and splits it 50/50 between the
+        /// treasury and the agent reward pool.
+        pub fn deposit_fee(env: Env, _contract: Address, token: Address, amount: i128, payer: Option<Address>) {
+            let payer = payer.expect("payer required");
+            payer.require_auth();
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer_from(&env.current_contract_address(), &payer, &env.current_contract_address(), &amount);
+
+            let treasury: Address = env.storage().instance().get(&DataKey::Treasury).unwrap();
+            let half = amount / 2;
+            token_client.transfer(&env.current_contract_address(), &treasury, &half);
+
+            let pool: i128 = env.storage().instance().get(&DataKey::AgentPool).unwrap();
+            env.storage().instance().set(&DataKey::AgentPool, &(pool + (amount - half)));
+
+            let acc: i128 = env.storage().instance().get(&DataKey::Accumulated).unwrap();
+            env.storage().instance().set(&DataKey::Accumulated, &(acc + amount));
+        }
+
+        pub fn get_accumulated_fees(env: Env, _token: Address) -> i128 {
+            env.storage().instance().get(&DataKey::Accumulated).unwrap_or(0)
+        }
+
+        pub fn get_agent_pool(env: Env) -> i128 {
+            env.storage().instance().get(&DataKey::AgentPool).unwrap_or(0)
+        }
+    }
+}
+
+use mock_fee_distributor::{MockFeeDistributor, MockFeeDistributorClient};
+
+/// Deploy the mock fee distributor, fund it with `amount` of `token_id` and
+/// approve the recurring-payments contract to pull from it.
+fn deploy_fee_distributor(
+    env: &Env,
+    contract_id: &Address,
+    token_id: &Address,
+    amount: i128,
+) -> Address {
+    let treasury = Address::generate(env);
+    let distributor_id = env.register(MockFeeDistributor, ());
+    MockFeeDistributorClient::new(env, &distributor_id).initialize(token_id, &treasury);
+    StellarAssetClient::new(env, token_id).mint(&distributor_id, &amount);
+    TokenClient::new(env, token_id).approve(
+        &distributor_id,
+        contract_id,
+        &i128::MAX,
+        &(env.ledger().sequence() + 10_000),
+    );
+    distributor_id
+}
+
+#[test]
+fn test_fee_routed_through_fee_distributor() {
+    let (env, contract_id, token_id, sender, recipient, executor, admin) = setup_with_fee(500); // 5 %
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    let distributor_id = deploy_fee_distributor(&env, &contract_id, &token_id, 1_000_0000000);
+    client.set_fee_distributor(&admin, &distributor_id);
+
+    let amount = 1_000_0000000i128;
+    let id = create(&client, &token_id, &sender, &recipient, amount, 86400);
+
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+
+    let expected_fee = amount * 500 / 10_000;
+    let expected_net = amount - expected_fee;
+
+    // Recipient still receives the net amount.
+    assert_eq!(token_balance(&env, &token_id, &recipient), expected_net);
+    // Admin EOA receives nothing: the fee went to the distributor.
+    assert_eq!(token_balance(&env, &token_id, &admin), 0);
+    // The fee is visible in the distributor ledger and the agent pool.
+    let dist = MockFeeDistributorClient::new(&env, &distributor_id);
+    assert_eq!(dist.get_accumulated_fees(&token_id), expected_fee);
+    assert_eq!(dist.get_agent_pool(), expected_fee / 2);
+}
+
+#[test]
+fn test_fee_falls_back_to_admin_without_distributor() {
+    let (env, contract_id, token_id, sender, recipient, executor, admin) = setup_with_fee(500); // 5 %
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let amount = 1_000_0000000i128;
+    let id = create(&client, &token_id, &sender, &recipient, amount, 86400);
+
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+
+    let expected_fee = amount * 500 / 10_000;
+    assert_eq!(token_balance(&env, &token_id, &admin), expected_fee);
+    assert_eq!(token_balance(&env, &token_id, &recipient), amount - expected_fee);
+}
+
+#[test]
+fn test_fee_arithmetic_handles_large_amounts() {
+    let (env, contract_id, token_id, sender, recipient, executor, admin) = setup_with_fee(10_000); // 100 %
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    // Large but valid amount: fee == amount, no overflow.
+    let amount = 10_000_0000000i128;
+    let id = create(&client, &token_id, &sender, &recipient, amount, 86400);
+
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+
+    assert_eq!(token_balance(&env, &token_id, &admin), amount);
+    assert_eq!(token_balance(&env, &token_id, &recipient), 0);
+}
+
+#[test]
+#[should_panic(expected = "fee calculation overflow")]
+fn test_fee_arithmetic_overflow_panics_with_descriptive_message() {
+    let (env, contract_id, token_id, sender, recipient, executor, _) = setup_with_fee(10_000); // 100 %
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    // amount * fee_bps overflows i128.
+    let amount = i128::MAX / 2;
+    let id = create(&client, &token_id, &sender, &recipient, amount, 86400);
+
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+}
+
+#[test]
+fn test_payment_executed_event_includes_fee_amount() {
+    let (env, contract_id, token_id, sender, recipient, executor, _) = setup_with_fee(500); // 5 %
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let amount = 1_000_0000000i128;
+    let id = create(&client, &token_id, &sender, &recipient, amount, 86400);
+
+    advance_time(&env, 86400);
+    client.execute_payment(&executor, &id);
+    let events = all_events(&env);
+
+    let expected_fee = amount * 500 / 10_000;
+    let mut found = false;
+    for i in 0..events.len() {
+        let (contract, topics, data) = events.get(i).unwrap();
+        if contract != contract_id || topics.is_empty() {
+            continue;
+        }
+        if let Ok(sym) = soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()) {
+            if sym == soroban_sdk::Symbol::new(&env, "PaymentExecuted") {
+                if let Ok(event) = PaymentExecuted::try_from_val(&env, &data) {
+                    assert_eq!(event.schedule_id, id);
+                    assert_eq!(event.amount, amount);
+                    assert_eq!(event.fee_amount, expected_fee);
+                    found = true;
+                }
+            }
+        }
+    }
+    assert!(found, "PaymentExecuted event with fee_amount was not emitted");
+}
+
+#[test]
+#[should_panic(expected = "recipient cannot be the sender")]
+fn test_create_with_recipient_equal_sender_panics() {
+    let (env, contract_id, token_id, sender, _, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    create(&client, &token_id, &sender, &sender, 100_0000000, 86400);
+}
+
+#[test]
+#[should_panic(expected = "recipient cannot be the contract")]
+fn test_create_with_recipient_equal_contract_panics() {
+    let (env, contract_id, token_id, sender, _, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    create(&client, &token_id, &sender, &contract_id, 100_0000000, 86400);
+}
+
+#[test]
+#[should_panic(expected = "recipient cannot be the sender")]
+fn test_update_recipient_to_sender_panics() {
+    let (env, contract_id, token_id, sender, recipient, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let id = create(&client, &token_id, &sender, &recipient, 100_0000000, 86400);
+    client.update_recipient(&sender, &id, &sender);
+}
+
+#[test]
+#[should_panic(expected = "recipient cannot be the contract")]
+fn test_update_recipient_to_contract_panics() {
+    let (env, contract_id, token_id, sender, recipient, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+    let id = create(&client, &token_id, &sender, &recipient, 100_0000000, 86400);
+    client.update_recipient(&sender, &id, &contract_id);
 }
 
 // ── Due-date anchoring: late executions must not drift the schedule ──────────

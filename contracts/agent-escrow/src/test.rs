@@ -8,10 +8,8 @@ use soroban_sdk::{
 
 use crate::{
     AdminOverride, AgentEscrowContract, AgentEscrowContractClient, EscrowStatus,
-    EvtEscrowCancelled, EvtEscrowConfirmed, EvtEscrowCreated,
-    EvtEscrowCancelled, EvtEscrowConfirmed, EvtEscrowCreated, EvtFeesWithdrawn, InsurancePayout,
-    EvtEscrowCancelled, EvtEscrowConfirmed, EvtEscrowCreated, EvtPartialPayoutReleased,
-    InsurancePayout,
+    EvtEscrowCancelled, EvtEscrowConfirmed, EvtEscrowCreated, EvtFeesWithdrawn,
+    EvtPartialPayoutReleased, InsurancePayout,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -406,7 +404,7 @@ fn test_withdraw_fees_transfers_to_recipient() {
     let fees = client.get_fees();
     assert_eq!(fees + insurance, total_fee);
 
-    client.withdraw_fees(&admin);
+    client.withdraw_fees(&admin, &fees);
 
     assert_eq!(client.get_fees(), 0);
     assert_eq!(TokenClient::new(&env, &usdc_id).balance(&admin), fees);
@@ -421,7 +419,7 @@ fn test_withdraw_fees_non_admin_panics() {
     let impostor = Address::generate(&env);
     // Without the admin's signature the withdrawal must be rejected.
     env.set_auths(&[]);
-    client.withdraw_fees(&impostor);
+    client.withdraw_fees(&impostor, &1);
 }
 
 #[test]
@@ -430,20 +428,9 @@ fn test_withdraw_fees_twice_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
     client.confirm_payout(&id);
-    client.withdraw_fees(&admin);
-    client.withdraw_fees(&admin);
-    let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
-    client.confirm_payout(&id);
-
     let fees = client.get_fees();
-    let treasury = Address::generate(&env);
-    client.withdraw_fees(&treasury, &fees);
-    let expected_fee = platform_share((amount * fee_bps as i128) / 10_000);
-    assert_eq!(client.get_fees(), expected_fee);
-    client.withdraw_fees(&admin, &expected_fee);
-
-    assert_eq!(client.get_fees(), 0);
-    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), fees);
+    client.withdraw_fees(&admin, &fees);
+    client.withdraw_fees(&admin, &1);
 }
 
 #[test]
@@ -459,6 +446,21 @@ fn test_withdraw_fees_partial() {
 
     assert_eq!(client.get_fees(), total_fee - partial);
     assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), partial);
+}
+
+#[test]
+fn test_withdraw_fees_to_third_party_treasury() {
+    let (env, client, admin, usdc_id) = setup();
+    let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
+    client.confirm_payout(&id);
+
+    let fees = client.get_fees();
+    let treasury = Address::generate(&env);
+    client.withdraw_fees(&treasury, &fees);
+
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), fees);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&admin), 0);
+    assert_eq!(client.get_fees(), 0);
 }
 
 #[test]
@@ -524,6 +526,39 @@ fn test_withdraw_fees_to_contract_itself_panics() {
 }
 
 #[test]
+#[should_panic(expected = "withdrawal amount exceeds accumulated fees")]
+fn test_withdraw_fees_cannot_touch_insurance_fund() {
+    // The insurance fund is held separately; only accumulated platform fees
+    // are withdrawable, so asking for fees + insurance must be rejected.
+    let (env, client, admin, usdc_id) = setup();
+    let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
+    client.confirm_payout(&id);
+
+    let fees = client.get_fees();
+    let insurance = client.get_insurance_balance();
+    assert!(insurance > 0);
+
+    let treasury = Address::generate(&env);
+    client.withdraw_fees(&treasury, &(fees + insurance));
+}
+
+#[test]
+fn test_withdraw_fees_leaves_insurance_fund_intact() {
+    let (env, client, admin, usdc_id) = setup();
+    let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
+    client.confirm_payout(&id);
+
+    let fees = client.get_fees();
+    let insurance = client.get_insurance_balance();
+    let treasury = Address::generate(&env);
+    client.withdraw_fees(&treasury, &fees);
+
+    assert_eq!(client.get_fees(), 0);
+    assert_eq!(client.get_insurance_balance(), insurance);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), fees);
+}
+
+#[test]
 fn test_get_fees_initial_is_zero() {
     let (_, client, _, _) = setup();
     assert_eq!(client.get_fees(), 0);
@@ -561,8 +596,9 @@ fn test_update_admin_new_admin_can_withdraw_fees() {
     let new_admin = Address::generate(&env);
     client.update_admin(&new_admin);
     let fees = client.get_fees();
-    client.withdraw_fees(&new_admin, &fees);
-    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&new_admin), fees);
+    let treasury = Address::generate(&env);
+    client.withdraw_fees(&treasury, &fees);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&treasury), fees);
 }
 
 #[test]

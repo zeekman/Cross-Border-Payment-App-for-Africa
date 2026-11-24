@@ -652,30 +652,6 @@ impl AgentEscrowContract {
             (Symbol::new(&env, "FeesWithdrawn"),),
             EvtFeesWithdrawn { admin, to, amount, remaining_fees },
         );
-    /// Withdraw accumulated platform fees to the admin address. Insurance
-    /// contributions are held separately in `InsuranceFund`; they are spent
-    /// only through [`Self::insurance_payout`].
-    ///
-    /// # Arguments
-    /// * `admin`  — Must match the stored admin.
-    /// * `amount` — Amount to withdraw (> 0, <= accumulated fees).
-    pub fn withdraw_fees(env: Env, admin: Address, amount: i128) {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().persistent().get(&DataKey::Admin).unwrap();
-        if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
-        }
-        if amount <= 0 {
-            panic!("withdrawal amount must be greater than zero");
-        }
-        let fees: i128 = env.storage().persistent().get(&DataKey::Fees).unwrap_or(0i128);
-        if amount > fees {
-            panic!("withdrawal amount exceeds accumulated fees");
-        }
-        env.storage().persistent().set(&DataKey::Fees, &(fees - amount));
-        let usdc: Address = env.storage().persistent().get(&DataKey::UsdcAddress).unwrap();
-        let token_client = token::Client::new(&env, &usdc);
-        token_client.transfer(&env.current_contract_address(), &admin, &amount);
     }
 
     /// Rotate the admin. Both the current and the new admin must authorise,

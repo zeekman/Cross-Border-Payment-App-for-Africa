@@ -216,20 +216,136 @@ async function fetchContractEvents(contractId, startLedger = 0, limit = BATCH_SI
 }
 
 /**
+ * Decode a single Soroban SCVal into a plain JS value.
+ * Handles the subset of types used by the kyc-attestation contract events.
+ */
+function decodeScVal(scval) {
+  if (scval === null || scval === undefined) return null;
+
+  // Already a plain JS value (some RPCs / test fixtures)
+  if (typeof scval !== 'object' || scval.switch === undefined) {
+    return scval;
+  }
+
+  try {
+    return StellarSdk.scValToNative(scval);
+  } catch (err) {
+    logger.warn('Failed to decode SCVal, returning raw value', { error: err.message });
+    return scval;
+  }
+}
+
+/**
+ * Decode an array of SCVals (e.g. topics or a vec payload).
+ */
+function decodeScValArray(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map(decodeScVal);
+}
+
+/**
+ * Normalize a decoded event name (symbol) to a lowercase string.
+ */
+function normalizeEventName(name) {
+  if (name === null || name === undefined) return null;
+  if (typeof name === 'string') return name.toLowerCase();
+  if (typeof name === 'object' && name.sym) {
+    return Buffer.from(name.sym, 'base64').toString('utf8').toLowerCase();
+  }
+  return String(name).toLowerCase();
+}
+
+/**
+ * Extract the structured kyc-attestation payload from a decoded event.
+ *
+ * New schema (issue #1455):
+ *   ("kyc_attested", user, tier)  -> { admin, kyc_hash, attested_at, expires_at, is_renewal }
+ *   ("kyc_renewed", user, tier)   -> { admin, kyc_hash, attested_at, expires_at, is_renewal }
+ *   ("kyc_revoked", user, tier)   -> { admin, revoked_at, revocation_count }
+ *   ("kyc_batch_revoked")         -> { admin, count }
+ *
+ * Returns null when the event is not a known kyc-attestation event.
+ */
+function extractKycAttestationPayload(eventName, topics, data) {
+  const KYC_EVENTS = ['kyc_attested', 'kyc_renewed', 'kyc_revoked', 'kyc_batch_revoked'];
+  if (!KYC_EVENTS.includes(eventName)) return null;
+
+  // Topics: [eventName, user?, tier?]
+  const user = topics.length > 1 ? topics[1] : null;
+  const tier = topics.length > 2 ? topics[2] : null;
+
+  // Payload may be delivered as a map (object) or a vec (array).
+  let payload = {};
+  if (Array.isArray(data)) {
+    // Fallback for vec-encoded payloads: positional fields per event.
+    const fields = eventName === 'kyc_revoked'
+      ? ['admin', 'revoked_at', 'revocation_count']
+      : eventName === 'kyc_batch_revoked'
+        ? ['admin', 'count']
+        : ['admin', 'kyc_hash', 'attested_at', 'expires_at', 'is_renewal'];
+    fields.forEach((field, i) => {
+      if (i < data.length) payload[field] = data[i];
+    });
+  } else if (data && typeof data === 'object') {
+    payload = { ...data };
+  }
+
+  const normalized = {
+    event: eventName,
+    user,
+    tier,
+  };
+
+  if (eventName === 'kyc_attested' || eventName === 'kyc_renewed') {
+    normalized.admin = payload.admin ?? null;
+    normalized.kyc_hash = payload.kyc_hash ?? null;
+    normalized.attested_at = payload.attested_at ?? null;
+    normalized.expires_at = payload.expires_at ?? null;
+    normalized.is_renewal = payload.is_renewal ?? (eventName === 'kyc_renewed');
+  } else if (eventName === 'kyc_revoked') {
+    normalized.admin = payload.admin ?? null;
+    normalized.revoked_at = payload.revoked_at ?? null;
+    normalized.revocation_count = payload.revocation_count ?? null;
+  } else if (eventName === 'kyc_batch_revoked') {
+    normalized.admin = payload.admin ?? null;
+    normalized.count = payload.count ?? null;
+  }
+
+  return normalized;
+}
+
+/**
  * Parse and normalize contract event data
  */
 function parseEventData(rawEvent) {
   try {
-    return {
+    const rawTopics = rawEvent.topic || [];
+    const decodedTopics = decodeScValArray(rawTopics);
+    const decodedData = decodeScVal(rawEvent.data);
+
+    const eventName = normalizeEventName(decodedTopics[0]);
+
+    const parsed = {
       type: rawEvent.type || 'unknown',
-      topics: rawEvent.topic || [],
-      data: rawEvent.data || {},
+      eventName,
+      topics: decodedTopics,
+      data: decodedData || {},
       contractId: rawEvent.contractId,
       ledgerCloseTime: rawEvent.ledgerCloseTime,
       ledgerSequence: rawEvent.ledgerSequence,
       transactionHash: rawEvent.transactionHash,
       txResult: rawEvent.txResult || {}
     };
+
+    // Attach structured kyc-attestation payload when applicable so indexers
+    // can rebuild Attestation state without follow-up RPC reads.
+    const kycPayload = extractKycAttestationPayload(eventName, decodedTopics, decodedData);
+    if (kycPayload) {
+      parsed.kyc = kycPayload;
+      parsed.user = kycPayload.user;
+    }
+
+    return parsed;
   } catch (err) {
     logger.error('Failed to parse event data', { error: err.message, rawEvent });
     return null;
@@ -375,6 +491,8 @@ async function indexContractEvents(contractId, contractName = null) {
         // Determine event type from topics
         const eventType = resolveEventType(eventData.topics);
         const eventSubject = extractEventSubject(eventData.topics);
+        // Determine event type from topics (normalized event name)
+        const eventType = eventData.eventName || 'generic';
 
         // Insert into database
         await db.query(

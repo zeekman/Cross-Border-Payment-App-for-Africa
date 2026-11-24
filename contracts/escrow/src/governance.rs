@@ -13,8 +13,11 @@
 //! accepted. **Recommendation:** the admin should be a multisig account or the
 //! `multisig-approval` contract, so a single lost or compromised key can never
 //! permanently lock the contract.
+//! The implementation lives in the shared `afripay-governance` crate; this
+//! module only wires it to the escrow contract's storage layout.
 use crate::{DataKey, EscrowContract};
-use soroban_sdk::{contractimpl, contracttype, Address, BytesN, Env, Symbol};
+use afripay_governance::{governance_impl, AdminStore};
+use soroban_sdk::Env;
 
 /// Semantic version of this contract. Bumped on every upgrade.
 pub const CONTRACT_VERSION: u32 = 4;
@@ -147,28 +150,12 @@ impl EscrowContract {
     }
 
     pub fn get_contract_version(env: Env) -> u32 {
+impl AdminStore for EscrowContract {
+    fn admin(env: &Env) -> soroban_sdk::Address {
         env.storage()
             .persistent()
-            .get(&GovKey::ContractVersion)
-            .unwrap_or(0)
-    }
-
-    /// Emergency pause (SC-174). Blocks entry points that move funds into the
-    /// contract; exit paths (refund / withdraw / release / cancel) stay open.
-    pub fn pause(env: Env, admin: Address) {
-        require_gov_admin(&env, &admin, "Only admin can perform this action");
-        env.storage().persistent().set(&GovKey::Paused, &true);
-        env.events().publish((Symbol::new(&env, "Paused"),), admin);
-    }
-
-    pub fn unpause(env: Env, admin: Address) {
-        require_gov_admin(&env, &admin, "Only admin can perform this action");
-        env.storage().persistent().set(&GovKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "Unpaused"),), admin);
-    }
-
-    pub fn is_paused(env: Env) -> bool {
-        paused(&env)
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized")
     }
 
     /// Propose a new admin (SC-120). The successor must call `accept_admin`
@@ -233,3 +220,5 @@ impl EscrowContract {
         env.storage().persistent().get(&GovKey::PendingAdmin)
     }
 }
+
+governance_impl!(EscrowContract, CONTRACT_VERSION);

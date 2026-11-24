@@ -1,11 +1,10 @@
 //! Upgrade governance (SC-172 / SC-173 / SC-174).
 //!
-//! WASM upgrades are timelocked on-chain: the admin proposes a new WASM hash,
-//! which can only be executed after `UPGRADE_TIMELOCK_SECS`, giving users an
-//! exit window. Proposals can be cancelled. `migrate` bumps the stored
-//! contract version after an upgrade.
+//! The implementation lives in the shared `afripay-governance` crate; this
+//! module only wires it up to `LoyaltyTokenContract`'s storage layout.
 use crate::{DataKey, LoyaltyTokenContract};
-use soroban_sdk::{contractimpl, contracttype, Address, BytesN, Env, Symbol};
+use afripay_governance::{governance_impl, AdminStore};
+use soroban_sdk::Env;
 
 /// Semantic version of this contract. Bumped on every upgrade.
 pub const CONTRACT_VERSION: u32 = 1;
@@ -139,28 +138,12 @@ impl LoyaltyTokenContract {
     }
 
     pub fn get_contract_version(env: Env) -> u32 {
+impl AdminStore for LoyaltyTokenContract {
+    fn admin(env: &Env) -> soroban_sdk::Address {
         env.storage()
             .persistent()
-            .get(&GovKey::ContractVersion)
-            .unwrap_or(0)
-    }
-
-    /// Emergency pause (SC-174). Blocks entry points that move funds into the
-    /// contract; exit paths (refund / withdraw / release / cancel) stay open.
-    pub fn pause(env: Env, admin: Address) {
-        require_gov_admin(&env, &admin, "Only admin can perform this action");
-        env.storage().persistent().set(&GovKey::Paused, &true);
-        env.events().publish((Symbol::new(&env, "Paused"),), admin);
-    }
-
-    pub fn unpause(env: Env, admin: Address) {
-        require_gov_admin(&env, &admin, "Only admin can perform this action");
-        env.storage().persistent().set(&GovKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "Unpaused"),), admin);
-    }
-
-    pub fn is_paused(env: Env) -> bool {
-        paused(&env)
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized")
     }
 
     /// Start a two-step admin rotation. The new admin must call
@@ -224,3 +207,5 @@ impl LoyaltyTokenContract {
         env.storage().persistent().get(&GovKey::PendingAdmin)
     }
 }
+
+governance_impl!(LoyaltyTokenContract, CONTRACT_VERSION);

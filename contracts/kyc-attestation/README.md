@@ -11,9 +11,49 @@ The contract enforces three-tier KYC levels:
 
 ## Access Control
 
-- `attest`, `revoke`, `batch_revoke` — admin only
+- `attest`, `revoke`, `batch_revoke`, `migrate` — admin only
 - `is_verified`, `is_valid_and_unexpired`, `get_attestation` — public
 - `get_highest_tier` — public
+
+## Storage Model (Issue #1454)
+
+`DataKey::TieredAttestation(user, tier)` is the **single source of truth** for attestation records. Every reader and writer goes through the private helpers `load_attestation(user, tier)` / `store_attestation(user, tier, rec)`, so there is exactly one storage key per `(user, tier)` pair.
+
+The legacy mirror keys are **no longer written**:
+
+- `DataKey::Attestation(user)` — previously a "whichever tier was written last" mirror (misleading by construction).
+- `DataKey::AttestationByTier(user, tier)` — a duplicate of `TieredAttestation` under a different key.
+
+Removing these mirrors cuts persistent rent and write fees on the hottest admin path (`attest`/`revoke`) to roughly one third of the previous cost, and eliminates the class of bug where a write updated only one of the copies (e.g. a revoked user still reading as verified).
+
+### Migration (`migrate`)
+
+For deployments that still hold data in the old layout, a one-time admin-only `migrate` step (SC-186) is provided:
+
+1. Copies any `AttestationByTier`-only records into `TieredAttestation` (existing `TieredAttestation` entries win).
+2. Deletes both legacy keys (`Attestation` and `AttestationByTier`).
+
+`migrate` is idempotent and intended to be run **once** immediately after upgrading the contract; after it completes, no legacy keys remain and all reads are served from `TieredAttestation`. See `src/test.rs` for a migration test that seeds old-layout data and verifies reads after `migrate`.
+
+## Events (Issue #1455)
+
+Events are structured `#[contracttype]` payloads with the user in the topics so indexers can filter by user without decoding every payload. Payloads carry everything needed to rebuild an `Attestation` without follow-up RPC reads (important for backfills and for entries that have since been archived).
+
+| Event | Topics | Payload |
+| --- | --- | --- |
+| `kyc_attested` | `("kyc_attested", user, tier)` | `{ admin, kyc_hash, attested_at, expires_at, is_renewal }` |
+| `kyc_renewed` | `("kyc_renewed", user, tier)` | `{ admin, kyc_hash, attested_at, expires_at, is_renewal }` |
+| `kyc_revoked` | `("kyc_revoked", user, tier)` | `{ admin, revoked_at, revocation_count }` |
+| `kyc_batch_revoked` | `("kyc_batch_revoked")` | `{ admin, count }` |
+
+Notes for consumers:
+
+- `is_renewal` distinguishes a fresh attestation from a renewal of an existing one.
+- `kyc_hash` is the SHA-256 commitment to the KYC evidence; auditors can prove which evidence hash was attested at a given time from the event log alone.
+- `revocation_count` lets indexers track repeat revocations per user.
+- `kyc_batch_revoked` is emitted once per batch call (`revoke_batch` / `batch_revoke`); per-user details are available from the corresponding `kyc_revoked` events.
+
+The backend `contractEventIndexer.js` is updated in a linked backend issue to consume this schema.
 
 ## Cross-Contract Call Costs (Issue #1072)
 

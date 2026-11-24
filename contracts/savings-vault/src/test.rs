@@ -11,14 +11,10 @@ use crate::{AccrueInterestEvent, DepositEvent, SavingsVaultContract, SavingsVaul
 fn setup() -> (Env, SavingsVaultContractClient<'static>, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    // Start at a realistic ledger time: the contract uses 0 to mean "no
-    // emergency announced", so announcing at timestamp 0 would be invisible.
-    env.ledger().with_mut(|li| li.timestamp = 1_700_000_000);
-    let contract_id = env.register(SavingsVaultContract, ());
     // Start from a realistic timestamp: the contract uses 0 as the
     // "not announced" sentinel, and some tests subtract from `now`.
     env.ledger().set_timestamp(1_700_000_000);
-    let contract_id = env.register_contract(None, SavingsVaultContract);
+    let contract_id = env.register(SavingsVaultContract, ());
     let client = SavingsVaultContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let usdc_id = env.register_stellar_asset_contract_v2(admin.clone()).address();
@@ -1296,4 +1292,64 @@ fn test_emergency_return_funds_pays_accrued_interest() {
     assert_eq!(TokenClient::new(&env, &usdc_id).balance(&user), deposit + interest);
     assert_eq!(reserve_of(&env, &client), 1_000_0000000 - interest);
     assert_eq!(client.get_total_locked(), 0);
+}
+
+// ── SC-183: governance pause blocks inflows but never exits ───────────────────
+
+#[test]
+#[should_panic(expected = "Contract is paused")]
+fn test_deposit_rejected_while_paused() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &user, 1_0000000);
+    client.pause(&admin);
+    client.deposit(&user, &1_0000000, &(env.ledger().timestamp() + 86_400));
+}
+
+#[test]
+fn test_withdraw_while_paused_succeeds() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86_400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+
+    client.pause(&admin);
+    env.ledger().set_timestamp(unlock_time + 1);
+    client.withdraw(&user, &0, &amount);
+
+    assert_eq!(client.get_balance(&user), 0);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&user), amount);
+}
+
+#[test]
+fn test_emergency_withdraw_while_paused_succeeds() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86_400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+
+    client.pause(&admin);
+    client.announce_emergency(&admin);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 172_800);
+    client.emergency_withdraw(&admin, &user);
+
+    assert_eq!(client.get_balance(&user), 0);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&user), amount);
+}
+
+#[test]
+fn test_deposit_allowed_again_after_unpause() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &admin, &user, 1_0000000);
+
+    client.pause(&admin);
+    client.unpause(&admin);
+    client.deposit(&user, &1_0000000, &(env.ledger().timestamp() + 86_400));
+
+    assert_eq!(client.get_balance(&user), 1_0000000);
 }

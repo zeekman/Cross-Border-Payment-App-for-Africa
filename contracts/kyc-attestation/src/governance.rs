@@ -10,8 +10,13 @@
 //! signature. This lets a lost or compromised admin key be replaced.
 //! **Recommendation:** the admin should be a multisig account or the
 //! `multisig-approval` contract, never a single hot key.
+//! Upgrade governance (SC-172 / SC-173 / SC-184).
+//!
+//! The implementation lives in the shared `afripay-governance` crate; this
+//! module only wires it to this contract's storage layout.
 use crate::{DataKey, KycAttestationContract};
-use soroban_sdk::{contractimpl, contracttype, Address, BytesN, Env, Symbol};
+use afripay_governance::{governance_impl, AdminStore};
+use soroban_sdk::{Address, Env};
 
 /// Semantic version of this contract. Bumped on every upgrade.
 pub const CONTRACT_VERSION: u32 = 1;
@@ -133,10 +138,12 @@ impl KycAttestationContract {
     }
 
     pub fn get_contract_version(env: Env) -> u32 {
+impl AdminStore for KycAttestationContract {
+    fn admin(env: &Env) -> Address {
         env.storage()
             .persistent()
-            .get(&GovKey::ContractVersion)
-            .unwrap_or(0)
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized")
     }
 
     /// Step 1 of admin rotation: the current admin nominates a successor.
@@ -199,3 +206,5 @@ impl KycAttestationContract {
         env.storage().persistent().get(&GovKey::PendingAdmin)
     }
 }
+
+governance_impl!(KycAttestationContract, CONTRACT_VERSION);

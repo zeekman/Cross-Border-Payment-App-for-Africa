@@ -349,6 +349,67 @@ fn test_reject_after_expiry_panics() {
     client.reject(&approvers.get(0).unwrap(), &tx_id);
 }
 
+// ── #1448: reject honours expiry and tracks weighted rejections ──────────────
+
+#[test]
+#[should_panic(expected = "Proposal has expired")]
+fn test_reject_after_expires_at_panics_1448() {
+    // Issue #1448: `reject` must enforce the same expiry check as `approve`,
+    // so an expired proposal cannot be moved to Rejected by late voters.
+    let (env, contract_id, approvers, _) = setup(2, 3);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    let tx_id = propose(&env, &contract_id, &approvers.get(0).unwrap());
+
+    // Advance past the proposal TTL (24 h).
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.reject(&approvers.get(0).unwrap(), &tx_id);
+}
+
+#[test]
+fn test_reject_tracks_weighted_rejection_weight_1448() {
+    // Issue #1448: `rejections` counts heads while `rejection_weight`
+    // accumulates signer weights, mirroring how `approvals` is weighted.
+    let (env, contract_id, approvers, admin) = setup(3, 5);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    client.set_signer_weight(&admin, &approvers.get(0).unwrap(), &3);
+
+    let tx_id = propose(&env, &contract_id, &approvers.get(0).unwrap());
+
+    // First rejection: weight-3 signer → 1 head, 3 weight.
+    client.reject(&approvers.get(0).unwrap(), &tx_id);
+    let p = client.get_proposal(&tx_id);
+    assert_eq!(p.rejections, 1);
+    assert_eq!(p.rejection_weight, 3);
+    assert_eq!(p.status, TxStatus::Pending);
+
+    // Second rejection: default weight-1 signer → 2 heads, 4 weight.
+    client.reject(&approvers.get(1).unwrap(), &tx_id);
+    let p = client.get_proposal(&tx_id);
+    assert_eq!(p.rejections, 2);
+    assert_eq!(p.rejection_weight, 4);
+    assert_eq!(p.status, TxStatus::Pending);
+}
+
+#[test]
+fn test_proposal_reports_weighted_approvals_and_rejections_1448() {
+    // Issue #1448: `approvals` and `rejection_weight` are both weights and
+    // therefore directly comparable; `rejections` is a head count.
+    let (env, contract_id, approvers, admin) = setup(3, 5);
+    let client = MultisigContractClient::new(&env, &contract_id);
+    client.set_signer_weight(&admin, &approvers.get(0).unwrap(), &2);
+
+    let tx_id = propose(&env, &contract_id, &approvers.get(0).unwrap());
+
+    client.approve(&approvers.get(0).unwrap(), &tx_id);
+    client.reject(&approvers.get(1).unwrap(), &tx_id);
+
+    let p = client.get_proposal(&tx_id);
+    assert_eq!(p.approvals, 2); // weighted
+    assert_eq!(p.rejections, 1); // head count
+    assert_eq!(p.rejection_weight, 1); // weighted
+    assert_eq!(p.status, TxStatus::Pending);
+}
+
 // ── expiry boundary conditions ────────────────────────────────────────────────
 
 #[test]
@@ -395,6 +456,7 @@ fn test_proposal_fields_correct() {
     assert_eq!(p.description, desc);
     assert_eq!(p.approvals, 0);
     assert_eq!(p.rejections, 0);
+    assert_eq!(p.rejection_weight, 0);
     assert_eq!(p.status, TxStatus::Pending);
 }
 
@@ -1009,6 +1071,11 @@ fn test_reject_uses_weight_for_reachability() {
     client.reject(&approvers.get(2).unwrap(), &id);
     client.reject(&approvers.get(3).unwrap(), &id);
     assert_eq!(client.get_proposal(&id).status, TxStatus::Pending);
+
+    // #1448: rejections are tracked both as heads and as weights.
+    let p = client.get_proposal(&id);
+    assert_eq!(p.rejections, 3);
+    assert_eq!(p.rejection_weight, 3);
 
     client.approve(&approvers.get(0).unwrap(), &id);
     assert_eq!(client.get_proposal(&id).status, TxStatus::Executed);

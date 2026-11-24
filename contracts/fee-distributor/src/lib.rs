@@ -51,6 +51,11 @@ mod test;
 // decimal-precision mismatch depositing an amount 10,000× too large).
 const MAX_DEPOSIT_AMOUNT: i128 = 10_000_000_000_000;
 
+// SC-197: Maximum number of recipients accepted by a single
+// `distribute_agent_pool` call.  Each recipient costs one token transfer plus
+// events; 25 keeps a full batch comfortably inside the default resource limits.
+const MAX_DISTRIBUTION_BATCH: u32 = 25;
+
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
 // SC-014: Removed the duplicate, single-fee-rate design's dead storage keys
@@ -85,6 +90,15 @@ pub enum DataKey {
     PendingAdmin,
     /// SC-190: Ledger timestamp at which the pending admin may be accepted.
     PendingAdminEta,
+    /// SC-195: Never-cleared "this token has been appended to `TokenList`"
+    /// flag.  Distinct from `TokenRegistered`, which is cleared by
+    /// `remove_fee_token`.  Guarantees a token is pushed to `TokenList` at most
+    /// once, so remove/re-add cycles cannot duplicate entries.
+    TokenSeen(Address),
+    /// SC-197: Admin-synced local allow-list of addresses eligible to receive
+    /// agent-pool distributions.  Kept in sync by the admin via
+    /// `set_agent_eligible`.
+    AgentEligible(Address),
 }
 
 /// SC-190: Delay (in seconds) between `propose_admin` and `accept_admin`.
@@ -94,6 +108,14 @@ pub const ADMIN_ROTATION_DELAY_SECS: u64 = 24 * 60 * 60;
 
 // ── Event payloads ────────────────────────────────────────────────────────────
 
+/// Emitted on every `deposit_fee`.
+///
+/// ## Authentication
+/// - `depositor` is authenticated: `depositor.require_auth()` is enforced.
+/// - `source` is authenticated **only when it is `Some`**: the contract calls
+///   `source.require_auth()`, so a depositor cannot attribute a fee to an
+///   address that did not authorise the attribution.  When `source` is `None`
+///   no provenance is claimed.
 #[derive(Debug, Clone)]
 #[contracttype]
 pub struct EvtFeeDeposited {
@@ -101,6 +123,7 @@ pub struct EvtFeeDeposited {
     pub token: Address,
     pub amount: i128,
     pub total: i128,
+    /// Authenticated originating address (authorised via `require_auth`).
     pub source: Option<Address>,
 }
 
@@ -182,6 +205,16 @@ pub struct EvtAdminChanged {
 #[contracttype]
 pub struct EvtAdminProposalCancelled {
     pub admin: Address,
+/// SC-197: Summary event emitted once per `distribute_agent_pool` batch.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtAgentPoolDistributedBatch {
+    pub admin: Address,
+    pub token: Address,
+    pub count: u32,
+    pub total: i128,
+    pub remaining: i128,
+    pub timestamp: u64,
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -197,6 +230,14 @@ fn register_token(env: &Env, token: &Address) {
         return;
     }
     env.storage().persistent().set(&key, &true);
+
+    // SC-195: `TokenSeen` is never cleared, so a token is appended to
+    // `TokenList` at most once even across remove/re-add cycles.
+    let seen_key = DataKey::TokenSeen(token.clone());
+    if env.storage().persistent().has(&seen_key) {
+        return;
+    }
+    env.storage().persistent().set(&seen_key, &true);
 
     // Maintain the enumeration list for `get_all_accumulated_fees`.  This is
     // only touched when a genuinely new token is registered (admin-gated), so
@@ -330,7 +371,10 @@ impl FeeDistributorContract {
     /// * `depositor` — Address sending the fee (must authorise this call).
     /// * `token`     — Asset contract address for the fee token (e.g. USDC or XLM).
     /// * `amount`    — Fee amount in token stroops (must be > 0).
-    /// * `source`    — Optional originating address for audit purposes.
+    /// * `source`    — Optional originating address for audit purposes.  When
+    ///                 `Some`, the address must authorise this call
+    ///                 (`source.require_auth()`), so fees cannot be attributed
+    ///                 to an address that did not consent.
     pub fn deposit_fee(
         env: Env,
         depositor: Address,
@@ -355,6 +399,12 @@ impl FeeDistributorContract {
         }
 
         depositor.require_auth();
+
+        // SC-196: an audit `source` must be authenticated by that address,
+        // otherwise any depositor could spoof fee provenance.
+        if let Some(ref src) = source {
+            src.require_auth();
+        }
 
         // Transfer the full amount from the depositor to this contract.
         token::Client::new(&env, &token).transfer(
@@ -475,6 +525,10 @@ impl FeeDistributorContract {
     /// * `admin`        — Must be the stored admin and authorise this call.
     /// * `token`        — Asset contract address for the pool token.
     /// * `recipients`   — `(agent, amount)` pairs; each amount must be > 0.
+    ///                    At most `MAX_DISTRIBUTION_BATCH` (25) entries; each
+    ///                    recipient must be on the admin-synced agent allow-list
+    ///                    (`set_agent_eligible`), must not be a duplicate, and
+    ///                    must not be the contract's own address.
     pub fn distribute_agent_pool(
         env: Env,
         admin: Address,
@@ -498,6 +552,11 @@ impl FeeDistributorContract {
         if recipients.is_empty() {
             panic!("recipients must not be empty");
         }
+        // SC-197: bound the batch so a large list cannot exhaust the resource
+        // budget mid-loop.
+        if recipients.len() > MAX_DISTRIBUTION_BATCH {
+            panic!("recipients exceed MAX_DISTRIBUTION_BATCH");
+        }
 
         let mut pool: i128 = env
             .storage()
@@ -508,6 +567,10 @@ impl FeeDistributorContract {
         let token_client = token::Client::new(&env, &token);
         let contract = env.current_contract_address();
 
+        let mut seen: Vec<Address> = Vec::new(&env);
+        let mut batch_total: i128 = 0;
+        let mut count: u32 = 0;
+
         for (agent, amount) in recipients.iter() {
             if amount <= 0 {
                 panic!("amount must be positive");
@@ -515,8 +578,27 @@ impl FeeDistributorContract {
             if amount > pool {
                 panic!("insufficient agent pool fees");
             }
+            // SC-197: reject the contract's own address.
+            if agent == contract {
+                panic!("recipient cannot be the contract address");
+            }
+            // SC-197: reject duplicate recipients within the batch.
+            if seen.contains(&agent) {
+                panic!("duplicate recipient");
+            }
+            // SC-197: only allow-listed agents may receive pool funds.
+            if !env
+                .storage()
+                .persistent()
+                .has(&DataKey::AgentEligible(agent.clone()))
+            {
+                panic!("recipient is not a registered agent");
+            }
+            seen.push_back(agent.clone());
 
             pool -= amount;
+            batch_total += amount;
+            count += 1;
 
             token_client.transfer(&contract, &agent, &amount);
 
@@ -536,6 +618,47 @@ impl FeeDistributorContract {
         env.storage()
             .persistent()
             .set(&DataKey::AgentPoolFees(token.clone()), &pool);
+
+        // SC-197: one summary event per batch.
+        env.events().publish(
+            (Symbol::new(&env, "AgentPoolDistributedBatch"),),
+            EvtAgentPoolDistributedBatch {
+                admin,
+                token,
+                count,
+                total: batch_total,
+                remaining: pool,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// SC-197: Add or remove `agent` from the local agent allow-list used by
+    /// `distribute_agent_pool`.  Admin only.
+    pub fn set_agent_eligible(env: Env, admin: Address, agent: Address, eligible: bool) {
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        admin.require_auth();
+
+        let key = DataKey::AgentEligible(agent);
+        if eligible {
+            env.storage().persistent().set(&key, &true);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+    }
+
+    /// SC-197: Returns true when `agent` is on the local agent allow-list.
+    pub fn is_agent_eligible(env: Env, agent: Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::AgentEligible(agent))
     }
 
     /// Read the accumulated platform fees for a token.
@@ -549,19 +672,27 @@ impl FeeDistributorContract {
 
     /// Return all non-zero per-token platform-treasury accumulators, paginated.
     ///
-    /// Returns a `Vec` of `(token_address, accumulated_amount)` pairs for tokens
-    /// in the `TokenList` starting at index `start` (0-based), returning at most
-    /// `limit` results (capped at 100 per call — the same ceiling used by
-    /// `agent-escrow::get_registered_agents`).  Only entries with a non-zero
-    /// platform balance are included in the result; callers should advance
-    /// `start` by the number of tokens *examined* (i.e. the raw `TokenList`
-    /// slice size), not by the number of items returned.  Use
+    /// Returns a `Vec` of `(token_address, accumulated_amount, is_active)`
+    /// tuples for tokens in the `TokenList` starting at index `start` (0-based),
+    /// returning at most `limit` results (capped at 100 per call — the same
+    /// ceiling used by `agent-escrow::get_registered_agents`).  Only entries
+    /// with a non-zero platform balance are included in the result; callers
+    /// should advance `start` by the number of tokens *examined* (i.e. the raw
+    /// `TokenList` slice size), not by the number of items returned.  Use
     /// `get_token_list_len` to determine when you have reached the end.
+    ///
+    /// SC-195: `is_active` reflects whether the token is currently on the
+    /// fee-token allow-list (`TokenRegistered`).  Removed tokens that still
+    /// hold a balance remain enumerable but are flagged inactive.
     ///
     /// # Arguments
     /// * `start` — 0-based index into the raw `TokenList`.
     /// * `limit` — Maximum tokens to examine in this call (capped at 100).
-    pub fn get_all_accumulated_fees(env: Env, start: u32, limit: u32) -> Vec<(Address, i128)> {
+    pub fn get_all_accumulated_fees(
+        env: Env,
+        start: u32,
+        limit: u32,
+    ) -> Vec<(Address, i128, bool)> {
         let cap: u32 = if limit > 100 { 100 } else { limit };
         let list: Vec<Address> = env
             .storage()
@@ -569,7 +700,7 @@ impl FeeDistributorContract {
             .get(&DataKey::TokenList)
             .unwrap_or_else(|| vec![&env]);
 
-        let mut result: Vec<(Address, i128)> = Vec::new(&env);
+        let mut result: Vec<(Address, i128, bool)> = Vec::new(&env);
         let len = list.len();
         let mut i = start;
         while i < len && (i - start) < cap {
@@ -580,17 +711,22 @@ impl FeeDistributorContract {
                 .get(&DataKey::AccumulatedFees(token.clone()))
                 .unwrap_or(0);
             if bal > 0 {
-                result.push_back((token, bal));
+                let is_active = is_registered(&env, &token);
+                result.push_back((token, bal, is_active));
             }
             i += 1;
         }
         result
     }
 
-    /// Return the total number of distinct tokens ever deposited.
+    /// Return the total number of distinct tokens ever registered.
     /// Use this with `get_all_accumulated_fees` to know when pagination is
     /// complete: keep calling with increasing `start` until
     /// `start >= get_token_list_len()`.
+    ///
+    /// SC-195: `TokenList` holds each token at most once (guarded by the
+    /// never-cleared `TokenSeen` flag), so this equals the number of distinct
+    /// tokens ever registered.
     pub fn get_token_list_len(env: Env) -> u32 {
         let list: Vec<Address> = env
             .storage()

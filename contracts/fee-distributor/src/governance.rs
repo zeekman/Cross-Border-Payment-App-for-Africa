@@ -1,11 +1,10 @@
-//! Upgrade governance (SC-172 / SC-173).
+//! Upgrade governance (SC-172 / SC-173 / SC-184).
 //!
-//! WASM upgrades are timelocked on-chain: the admin proposes a new WASM hash,
-//! which can only be executed after `UPGRADE_TIMELOCK_SECS`, giving users an
-//! exit window. Proposals can be cancelled. `migrate` bumps the stored
-//! contract version after an upgrade.
+//! The implementation lives in the shared `afripay-governance` crate; this
+//! module only wires the contract's storage layout into it.
 use crate::{DataKey, FeeDistributorContract};
-use soroban_sdk::{contractimpl, contracttype, Address, BytesN, Env, Symbol};
+use afripay_governance::AdminStore;
+use soroban_sdk::{Address, Env};
 
 /// Semantic version of this contract. Bumped on every upgrade.
 pub const CONTRACT_VERSION: u32 = 1;
@@ -189,9 +188,13 @@ impl FeeDistributorContract {
     }
 
     pub fn get_contract_version(env: Env) -> u32 {
+impl AdminStore for FeeDistributorContract {
+    fn admin(env: &Env) -> Address {
         env.storage()
             .persistent()
-            .get(&GovKey::ContractVersion)
-            .unwrap_or(0)
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized")
     }
 }
+
+afripay_governance::governance_impl!(FeeDistributorContract, CONTRACT_VERSION);

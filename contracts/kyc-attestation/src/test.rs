@@ -1,8 +1,14 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Bytes, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _, Ledger},
+    Address, Bytes, Env, IntoVal, Symbol, TryFromVal,
+};
 
-use crate::{KycAttestationContract, KycAttestationContractClient, KycTier};
+use crate::{
+    KycAttestationContract, KycAttestationContractClient, KycTier, KycAttestedEvent,
+    KycBatchRevokedEvent, KycRevokedEvent,
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -645,4 +651,260 @@ fn test_new_admin_can_propose_next_rotation() {
     advance(&env, ADMIN_ROTATION_DELAY);
     client.accept_admin(&next_admin);
     assert_eq!(client.get_admin(), next_admin);
+// ── SC-200 (#1454): single-key storage + migration ────────────────────────────
+
+/// Seeds the pre-migration layout directly into contract storage: a record under
+/// the legacy `AttestationByTier` key and a (possibly stale) `Attestation` mirror.
+fn seed_legacy_layout(
+    env: &Env,
+    contract_id: &Address,
+    user: &Address,
+    tier: KycTier,
+    record: &crate::Attestation,
+) {
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&crate::DataKey::AttestationByTier(user.clone(), tier), record);
+        env.storage()
+            .persistent()
+            .set(&crate::DataKey::Attestation(user.clone()), record);
+    });
+}
+
+fn legacy_keys_present(env: &Env, contract_id: &Address, user: &Address, tier: KycTier) -> bool {
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .has(&crate::DataKey::AttestationByTier(user.clone(), tier))
+            || env.storage()
+                .persistent()
+                .has(&crate::DataKey::Attestation(user.clone()))
+    })
+}
+
+fn tiered_key_present(env: &Env, contract_id: &Address, user: &Address, tier: KycTier) -> bool {
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .has(&crate::DataKey::TieredAttestation(user.clone(), tier))
+    })
+}
+
+#[test]
+fn test_attest_writes_only_tiered_key() {
+    let (env, client, admin) = setup();
+    let contract_id = client.address.clone();
+    let user = Address::generate(&env);
+
+    client.attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+
+    assert!(tiered_key_present(&env, &contract_id, &user, &KycTier::Basic));
+    assert!(!legacy_keys_present(&env, &contract_id, &user, &KycTier::Basic));
+}
+
+#[test]
+fn test_revoke_writes_only_tiered_key() {
+    let (env, client, admin) = setup();
+    let contract_id = client.address.clone();
+    let user = Address::generate(&env);
+
+    client.attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.revoke(&admin, &user, &KycTier::Basic);
+
+    assert!(tiered_key_present(&env, &contract_id, &user, &KycTier::Basic));
+    assert!(!legacy_keys_present(&env, &contract_id, &user, &KycTier::Basic));
+}
+
+#[test]
+fn test_migrate_copies_attestation_by_tier_and_clears_legacy_keys() {
+    let (env, client, admin) = setup();
+    let contract_id = client.address.clone();
+    let user = Address::generate(&env);
+    let kyc_hash = hash(&env);
+    let attested_at = env.ledger().timestamp();
+
+    // Old layout: record only under AttestationByTier + the legacy mirror.
+    let legacy = crate::Attestation {
+        kyc_hash: kyc_hash.clone(),
+        attested_at,
+        expires_at: 0,
+        revoked_at: 0,
+        revocation_count: 0,
+        last_revoked_at: 0,
+    };
+    seed_legacy_layout(&env, &contract_id, &user, KycTier::Enhanced, &legacy);
+
+    // Before migration the tiered key is absent.
+    assert!(!tiered_key_present(&env, &contract_id, &user, &KycTier::Enhanced));
+
+    client.migrate(&admin);
+
+    // Record now readable through the single source of truth.
+    let record = client.get_attestation(&user, &KycTier::Enhanced);
+    assert_eq!(record.kyc_hash, kyc_hash);
+    assert_eq!(record.attested_at, attested_at);
+    assert_eq!(record.revoked_at, 0);
+    assert!(client.is_valid_and_unexpired(&user, &KycTier::Enhanced));
+    assert!(client.is_verified(&user, &KycTier::Enhanced));
+
+    // Legacy keys are gone.
+    assert!(!legacy_keys_present(&env, &contract_id, &user, &KycTier::Enhanced));
+}
+
+#[test]
+fn test_migrate_preserves_revoked_state() {
+    let (env, client, admin) = setup();
+    let contract_id = client.address.clone();
+    let user = Address::generate(&env);
+
+    let revoked_at = env.ledger().timestamp();
+    let legacy = crate::Attestation {
+        kyc_hash: hash(&env),
+        attested_at: revoked_at - 10,
+        expires_at: 0,
+        revoked_at,
+        revocation_count: 1,
+        last_revoked_at: revoked_at,
+    };
+    seed_legacy_layout(&env, &contract_id, &user, KycTier::Basic, &legacy);
+
+    client.migrate(&admin);
+
+    let record = client.get_attestation(&user, &KycTier::Basic);
+    assert_eq!(record.revoked_at, revoked_at);
+    assert_eq!(record.revocation_count, 1);
+    assert!(!client.is_valid_and_unexpired(&user, &KycTier::Basic));
+}
+
+#[test]
+fn test_migrate_does_not_clobber_existing_tiered_record() {
+    let (env, client, admin) = setup();
+    let contract_id = client.address.clone();
+    let user = Address::generate(&env);
+
+    // Current layout already holds the authoritative record.
+    client.attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+    let current = client.get_attestation(&user, &KycTier::Basic);
+
+    // A stale legacy copy exists alongside it.
+    let stale = crate::Attestation {
+        kyc_hash: Bytes::from_array(&env, &[0x11u8; 32]),
+        attested_at: 1,
+        expires_at: 0,
+        revoked_at: 0,
+        revocation_count: 0,
+        last_revoked_at: 0,
+    };
+    seed_legacy_layout(&env, &contract_id, &user, &KycTier::Basic, &stale);
+
+    client.migrate(&admin);
+
+    let after = client.get_attestation(&user, &KycTier::Basic);
+    assert_eq!(after.kyc_hash, current.kyc_hash);
+    assert_eq!(after.attested_at, current.attested_at);
+    assert!(!legacy_keys_present(&env, &contract_id, &user, &KycTier::Basic));
+}
+
+// ── SC-201 (#1455): structured events ─────────────────────────────────────────
+
+/// Returns the decoded `KycAttestedEvent` payload for the most recent
+/// `kyc_attested` event, asserting the user is present in the topics.
+fn last_attested_event(env: &Env, user: &Address, tier: KycTier) -> KycAttestedEvent {
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("no events published");
+    assert_eq!(topics.len(), 3);
+    let name = Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap();
+    assert_eq!(name, Symbol::new(env, "kyc_attested"));
+    let topic_user = Address::try_from_val(env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_user, *user);
+    let topic_tier = KycTier::try_from_val(env, &topics.get(2).unwrap()).unwrap();
+    assert_eq!(topic_tier, tier);
+    KycAttestedEvent::try_from_val(env, &data).unwrap()
+}
+
+fn last_revoked_event(env: &Env, user: &Address, tier: KycTier) -> KycRevokedEvent {
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("no events published");
+    assert_eq!(topics.len(), 3);
+    let name = Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap();
+    assert_eq!(name, Symbol::new(env, "kyc_revoked"));
+    let topic_user = Address::try_from_val(env, &topics.get(1).unwrap()).unwrap();
+    assert_eq!(topic_user, *user);
+    let topic_tier = KycTier::try_from_val(env, &topics.get(2).unwrap()).unwrap();
+    assert_eq!(topic_tier, tier);
+    KycRevokedEvent::try_from_val(env, &data).unwrap()
+}
+
+#[test]
+fn test_attested_event_payload_is_complete() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+    let kyc_hash = hash(&env);
+    let expires_at = env.ledger().timestamp() + 5_000;
+
+    client.attest(&admin, &user, &KycTier::Enhanced, &kyc_hash, &expires_at);
+
+    let event = last_attested_event(&env, &user, KycTier::Enhanced);
+    assert_eq!(event.admin, admin);
+    assert_eq!(event.kyc_hash, kyc_hash);
+    assert_eq!(event.attested_at, env.ledger().timestamp());
+    assert_eq!(event.expires_at, expires_at);
+    assert!(!event.is_renewal);
+}
+
+#[test]
+fn test_renewal_event_sets_is_renewal() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+
+    client.attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.revoke(&admin, &user, &KycTier::Basic);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+
+    let event = last_attested_event(&env, &user, KycTier::Basic);
+    assert!(event.is_renewal);
+    assert_eq!(event.admin, admin);
+}
+
+#[test]
+fn test_revoked_event_payload_is_complete() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+
+    client.attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.revoke(&admin, &user, &KycTier::Basic);
+
+    let event = last_revoked_event(&env, &user, KycTier::Basic);
+    assert_eq!(event.admin, admin);
+    assert_eq!(event.revoked_at, env.ledger().timestamp());
+    assert_eq!(event.revocation_count, 1);
+}
+
+#[test]
+fn test_batch_revoked_event_payload() {
+    let (env, client, admin) = setup();
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.attest(&admin, &user1, &KycTier::Basic, &hash(&env), &0);
+    client.attest(&admin, &user2, &KycTier::Basic, &hash(&env), &0);
+
+    let mut users = soroban_sdk::Vec::new(&env);
+    users.push_back(user1.clone());
+    users.push_back(user2.clone());
+    client.revoke_batch(&admin, &users);
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("no events published");
+    assert_eq!(topics.len(), 1);
+    let name = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    assert_eq!(name, Symbol::new(&env, "kyc_batch_revoked"));
+    let event = KycBatchRevokedEvent::try_from_val(&env, &data).unwrap();
+    assert_eq!(event.admin, admin);
+    assert_eq!(event.count, 2);
 }
