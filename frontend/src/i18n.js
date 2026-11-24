@@ -5,8 +5,10 @@ import sw from './locales/sw/translation.json';
 import fr from './locales/fr/translation.json';
 import ha from './locales/ha/translation.json';
 import yo from './locales/yo/translation.json';
+import pt from './locales/pt/translation.json';
+import am from './locales/am/translation.json';
 
-export const SUPPORTED_LANGUAGES = ['en', 'sw', 'fr', 'ha', 'yo'];
+export const SUPPORTED_LANGUAGES = ['en', 'sw', 'fr', 'ha', 'yo', 'pt', 'am'];
 
 export function detectBrowserLanguage() {
   if (typeof navigator === 'undefined') return null;
@@ -29,7 +31,9 @@ i18n.use(initReactI18next).init({
     sw: { translation: sw },
     fr: { translation: fr },
     ha: { translation: ha },
-    yo: { translation: yo }
+    yo: { translation: yo },
+    pt: { translation: pt },
+    am: { translation: am }
   },
   lng: initialLanguage,
   fallbackLng: 'en',
