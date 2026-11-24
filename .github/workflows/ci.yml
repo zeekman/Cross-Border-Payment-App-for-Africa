@@ -41,6 +41,16 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
     - uses: actions/checkout@v4
@@ -103,6 +113,18 @@ jobs:
         cd backend
         node scripts/check-migration-prefixes.js
 
+    - name: Smoke test (backend)
+      if: matrix.component == 'backend'
+      run: |
+        cd backend
+        node scripts/smoke-test.js
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+        JWT_SECRET: test-jwt-secret-min-32-chars-long-for-hs256
+        REDIS_URL: redis://localhost:6379/0
+        STELLAR_NETWORK: mock
+        NODE_ENV: test
+
     - name: Install frontend deps
       if: matrix.component == 'frontend'
       run: |
@@ -132,6 +154,17 @@ jobs:
       run: |
         cd frontend
         npm audit --audit-level=high
+
+    - name: Smoke test (frontend)
+      if: matrix.component == 'frontend'
+      run: |
+        cd frontend
+        node scripts/smoke-test.js
+      env:
+        CI: true
+        REACT_APP_API_URL: http://localhost:5000/api
+        REACT_APP_STELLAR_NETWORK: testnet
+        GENERATE_SOURCEMAP: false
 
     - name: Run backend tests
       if: matrix.component == 'backend'
