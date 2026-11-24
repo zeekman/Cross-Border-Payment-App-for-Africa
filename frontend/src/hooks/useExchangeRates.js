@@ -5,6 +5,7 @@ import {
   convertFromXLM as convertFromXLMUtil,
 } from '../utils/currency';
 import api from '../utils/api';
+import { useVisibleInterval } from './useVisibleInterval';
 
 const PRICES_PATH = '/prices/xlm';
 const TTL_MS = 60_000;
@@ -103,9 +104,10 @@ export function useExchangeRates() {
 
   useEffect(() => {
     fetchRates();
-    const id = setInterval(fetchRates, TTL_MS);
-    return () => clearInterval(id);
   }, [fetchRates]);
+
+  // Refresh on a timer, but not while the tab is hidden (and straight away on return).
+  useVisibleInterval(fetchRates, TTL_MS);
 
   const convertFromXLM = useCallback(
     (xlmAmount, targetCurrency) =>

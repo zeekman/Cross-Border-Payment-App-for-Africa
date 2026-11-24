@@ -26,6 +26,7 @@ import XDRInspectorModal from '../components/XDRInspectorModal';
 import PushNotificationPrompt from '../components/PushNotificationPrompt';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import { usePaymentStream, CONNECTION_STATE } from '../hooks/usePaymentStream';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
 
 // Lazy-loaded so react-qr-reader and @ledgerhq/* stay out of the main bundle.
 const QRScanner = lazy(() => import('../components/QRScanner'));
@@ -523,16 +524,16 @@ export default function SendMoney() {
 
   // Issue #998: while the user sits on the Review/Confirm screens, watch for a
   // stale quote and re-quote automatically instead of confirming the original.
-  useEffect(() => {
-    if (step < 3 || !quoteFetchedAt) return undefined;
-    const check = () => {
+  // Paused while the tab is hidden; returning to it checks straight away.
+  useVisibleInterval(
+    () => {
       if (Date.now() - quoteFetchedAt > QUOTE_FRESHNESS_MS) {
         refreshQuote();
       }
-    };
-    const timer = setInterval(check, 5000);
-    return () => clearInterval(timer);
-  }, [step, quoteFetchedAt, refreshQuote]);
+    },
+    5000,
+    { enabled: step >= 3 && Boolean(quoteFetchedAt) },
+  );
 
   const checkMemoRequired = useCallback(async (address) => {
     if (!address || address.length < 56) {
