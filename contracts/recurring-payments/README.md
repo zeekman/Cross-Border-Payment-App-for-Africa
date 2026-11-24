@@ -13,6 +13,7 @@ A Soroban smart contract that lets users authorize on-chain recurring transfers 
 | Function | Auth required | Description |
 |---|---|---|
 | `initialize(admin, token_address, fee_bps)` | — | One-time setup: admin, token contract and fee |
+| `set_fee_distributor(admin, fee_distributor)` | admin | Sets (or clears, with `None`) the fee-distributor contract; stored under `DataKey::FeeDistributor` |
 | `create_recurring_payment(sender, recipient, asset, amount, interval, max_executions, grace_period_secs, max_missed_executions)` | sender | Creates a recurring schedule, returns schedule ID |
 | `execute_payment(executor, schedule_id)` | executor | Executes a due payment; anyone may call this |
 | `pause_recurring_payment(sender, schedule_id)` / `resume_recurring_payment(sender, schedule_id)` | sender | Pause or resume a schedule |
@@ -25,6 +26,43 @@ A Soroban smart contract that lets users authorize on-chain recurring transfers 
 The old aliases `authorize_recurring`, `cancel_recurring`, `get_recurring_payment`
 and `get_schedule_by_id` were removed. Use `create_recurring_payment`,
 `cancel_recurring_payment` and `get_schedule` instead.
+
+## Fees
+
+`execute_payment` charges `fee_bps` of the schedule amount on every successful
+payment. The fee is computed with checked arithmetic
+(`checked_mul` / `checked_div`); an overflow panics with
+`"fee calculation overflow"` instead of silently wrapping.
+
+Routing depends on whether a fee distributor is configured:
+
+- **Fee distributor set** (`set_fee_distributor`): the fee is pulled into the
+  contract with `transfer_from`, then forwarded via
+  `fee_distributor.deposit_fee(contract, token, fee_amount, Some(sender))`.
+  The distributor splits the fee between the platform treasury and the agent
+  reward pool, so recurring-payment fees appear in
+  `fee-distributor::get_accumulated_fees` and in the agent pool.
+- **No fee distributor set** (fallback): the fee is transferred directly to the
+  admin address, preserving the original behaviour. This is documented
+  behaviour, not a bug: fees routed this way do **not** reach the agent pool and
+  do **not** appear in `get_accumulated_fees`. Deployments that want full fee
+  accounting should call `set_fee_distributor`.
+
+`PaymentExecuted` carries the charged `fee_amount` alongside the schedule ID,
+sender, recipient, amount and timestamp so indexers can reconcile fees without
+recomputing them.
+
+## Recipient validation
+
+`create_recurring_payment` and `update_recipient` reject payees that would
+drain fees or strand funds. The backend should map these panic messages:
+
+| Panic message | Cause |
+|---|---|
+| `"recipient cannot be the sender"` | `recipient == sender`; every execution would move funds to the payer while still charging the fee |
+| `"recipient cannot be the contract"` | `recipient == env.current_contract_address()`; tokens would be sent to the contract with no way to withdraw them |
+| `"recipient cannot be the admin"` | `recipient` equals the configured admin / fee recipient, which would confuse fee accounting |
+| `"fee calculation overflow"` | `amount * fee_bps` overflowed during `execute_payment` |
 
 ## Schedule lifecycle
 
