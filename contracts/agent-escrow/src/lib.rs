@@ -16,6 +16,10 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Sym
 #[cfg(test)]
 mod test;
 
+mod errors;
+pub use errors::Error;
+use soroban_sdk::panic_with_error;
+
 // ── Storage keys ─────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -248,7 +252,7 @@ impl AgentEscrowContract {
         Self::bump_instance(&env);
         admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialized");
+            panic_with_error!(env, Error::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::UsdcAddress, &usdc_address);
@@ -313,7 +317,7 @@ impl AgentEscrowContract {
         let mut list: soroban_sdk::Vec<Address> = Self::get_persistent(&env, &DataKey::AgentList)
             .unwrap_or(soroban_sdk::Vec::new(&env));
         if list.len() >= 10000 {
-            panic!("Agent list capacity reached");
+            panic_with_error!(env, Error::AgentListFull);
         }
         list.push_back(agent.clone());
         Self::set_persistent(&env, &DataKey::AgentList, &list);
@@ -361,12 +365,12 @@ impl AgentEscrowContract {
         admin.require_auth();
 
         let mut escrow: AgentEscrow = Self::get_persistent(&env, &DataKey::Escrow(escrow_id))
-            .expect("escrow not found");
+            .unwrap_or_else(|| panic_with_error!(env, Error::EscrowNotFound));
         if escrow.status != EscrowStatus::Pending {
-            panic!("escrow not pending");
+            panic_with_error!(env, Error::EscrowNotPending);
         }
         if new_agent == escrow.agent {
-            panic!("new agent is the current agent");
+            panic_with_error!(env, Error::SameAgent);
         }
         Self::require_registered_agent(&env, &new_agent);
 
@@ -382,7 +386,7 @@ impl AgentEscrowContract {
 
     fn require_registered_agent(env: &Env, agent: &Address) {
         if !Self::is_registered_agent(env.clone(), agent.clone()) {
-            panic!("agent not registered");
+            panic_with_error!(env, Error::AgentNotRegistered);
         }
     }
 
@@ -461,13 +465,13 @@ impl AgentEscrowContract {
         governance::require_not_paused(&env);
         sender.require_auth();
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(env, Error::InvalidAmount);
         }
         if fee_bps > 10_000 {
-            panic!("fee_bps cannot exceed 10000");
+            panic_with_error!(env, Error::FeeTooHigh);
         }
         if !Self::is_registered_agent(env.clone(), agent.clone()) {
-            panic!("Agent not registered");
+            panic_with_error!(env, Error::AgentNotRegistered);
         }
 
         let usdc: Address = env.storage().instance().get(&DataKey::UsdcAddress).unwrap();
@@ -513,12 +517,12 @@ impl AgentEscrowContract {
         agent.require_auth();
 
         let mut escrow: AgentEscrow = Self::get_persistent(&env, &DataKey::Escrow(escrow_id))
-            .expect("escrow not found");
+            .unwrap_or_else(|| panic_with_error!(env, Error::EscrowNotFound));
         if agent != escrow.agent {
-            panic!("unauthorized: caller is not the escrow agent");
+            panic_with_error!(env, Error::NotAgent);
         }
         if escrow.status != EscrowStatus::Pending {
-            panic!("escrow is not pending");
+            panic_with_error!(env, Error::EscrowNotPending);
         }
         escrow.agent.require_auth();
         // A removed (e.g. fraudulent or compromised) agent must not be able
@@ -556,31 +560,31 @@ impl AgentEscrowContract {
     pub fn partial_confirm_payout(env: Env, agent: Address, escrow_id: u64, amount: i128) {
         Self::bump_instance(&env);
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(env, Error::InvalidAmount);
         }
         agent.require_auth();
 
         let mut escrow: AgentEscrow = Self::get_persistent(&env, &DataKey::Escrow(escrow_id))
-            .expect("escrow not found");
+            .unwrap_or_else(|| panic_with_error!(env, Error::EscrowNotFound));
         if agent != escrow.agent {
-            panic!("unauthorized: caller is not the escrow agent");
+            panic_with_error!(env, Error::NotAgent);
         }
         if escrow.status != EscrowStatus::Pending {
-            panic!("escrow is not pending");
+            panic_with_error!(env, Error::EscrowNotPending);
         }
         escrow.agent.require_auth();
         // A removed (e.g. fraudulent or compromised) agent must not be able
         // to claim escrows that were assigned to them before removal.
         Self::require_registered_agent(&env, &escrow.agent);
         if release_amount <= 0 {
-            panic!("release_amount must be positive");
+            panic_with_error!(env, Error::InvalidAmount);
         if env.ledger().timestamp() >= escrow.expires_at {
-            panic!("escrow has expired");
+            panic_with_error!(env, Error::EscrowExpired);
         }
 
         let remaining = escrow.amount - escrow.released_amount;
         if amount > remaining {
-            panic!("Release exceeds remaining balance");
+            panic_with_error!(env, Error::ReleaseExceedsBalance);
         }
 
         let fee_amount = amount * (escrow.fee_bps as i128) / 10_000;
@@ -621,15 +625,15 @@ impl AgentEscrowContract {
         sender.require_auth();
 
         let mut escrow: AgentEscrow = Self::get_persistent(&env, &DataKey::Escrow(escrow_id))
-            .expect("escrow not found");
+            .unwrap_or_else(|| panic_with_error!(env, Error::EscrowNotFound));
         if sender != escrow.sender {
-            panic!("unauthorized: caller is not the escrow sender");
+            panic_with_error!(env, Error::NotSender);
         }
         if escrow.status != EscrowStatus::Pending {
-            panic!("escrow is not pending");
+            panic_with_error!(env, Error::EscrowNotPending);
         }
         if env.ledger().timestamp() < escrow.expires_at {
-            panic!("cancellation window has not elapsed");
+            panic_with_error!(env, Error::CancellationWindowActive);
         }
 
         let refund_amount = escrow.amount - escrow.released_amount;
@@ -656,9 +660,9 @@ impl AgentEscrowContract {
         admin.require_auth();
 
         let mut escrow: AgentEscrow = Self::get_persistent(&env, &DataKey::Escrow(escrow_id))
-            .expect("escrow not found");
+            .unwrap_or_else(|| panic_with_error!(env, Error::EscrowNotFound));
         if escrow.status != EscrowStatus::Pending {
-            panic!("escrow is not pending");
+            panic_with_error!(env, Error::EscrowNotPending);
         }
 
         let remaining = escrow.amount - escrow.released_amount;
@@ -713,14 +717,14 @@ impl AgentEscrowContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(env, Error::InvalidAmount);
         }
         if to == env.current_contract_address() {
-            panic!("invalid recipient: cannot withdraw to the contract itself");
+            panic_with_error!(env, Error::InvalidRecipient);
         }
         let fees: i128 = env.storage().instance().get(&DataKey::Fees).unwrap_or(0i128);
         if amount > fees {
-            panic!("insufficient accumulated fees");
+            panic_with_error!(env, Error::InsufficientFees);
         }
 
         let remaining_fees = fees - amount;
@@ -745,14 +749,14 @@ impl AgentEscrowContract {
         admin.require_auth();
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
         if amount <= 0 {
-            panic!("withdrawal amount must be greater than zero");
+            panic_with_error!(env, Error::InvalidAmount);
         }
         let fees: i128 = env.storage().instance().get(&DataKey::Fees).unwrap_or(0i128);
         if amount > fees {
-            panic!("withdrawal amount exceeds accumulated fees");
+            panic_with_error!(env, Error::InsufficientFees);
         }
         env.storage().instance().set(&DataKey::Fees, &(fees - amount));
         let usdc: Address = env.storage().instance().get(&DataKey::UsdcAddress).unwrap();
@@ -774,7 +778,7 @@ impl AgentEscrowContract {
         let old_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         old_admin.require_auth();
         if new_admin == old_admin {
-            panic!("new admin must differ from current admin");
+            panic_with_error!(env, Error::SameAdmin);
         }
         new_admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
@@ -793,7 +797,7 @@ impl AgentEscrowContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         if new_bps > MAX_INSURANCE_CONTRIBUTION_BPS {
-            panic!("contribution rate cannot exceed 1000 bps (10%)");
+            panic_with_error!(env, Error::ContributionRateTooHigh);
         }
         let old_bps: u32 = env.storage().instance()
             .get(&DataKey::InsuranceContributionBps).unwrap_or(0u32);
@@ -824,23 +828,23 @@ impl AgentEscrowContract {
         admin.require_auth();
 
         let escrow: AgentEscrow = Self::get_persistent(&env, &DataKey::Escrow(escrow_id))
-            .expect("escrow not found");
+            .unwrap_or_else(|| panic_with_error!(env, Error::EscrowNotFound));
         if escrow.status != EscrowStatus::Cancelled {
-            panic!("insurance_payout: escrow must be in Cancelled status");
+            panic_with_error!(env, Error::EscrowNotCancelled);
         }
 
         let already_paid: i128 = Self::get_persistent(&env, &DataKey::InsurancePaid(escrow_id))
             .unwrap_or(0i128);
         let outstanding = escrow.released_amount - already_paid;
         if outstanding <= 0 {
-            panic!("insurance_payout: no outstanding loss for this escrow");
+            panic_with_error!(env, Error::NoOutstandingLoss);
         }
 
         let fund: i128 = env.storage().instance()
             .get(&DataKey::InsuranceFund).unwrap_or(0i128);
         let payout_amount = if outstanding < fund { outstanding } else { fund };
         if payout_amount <= 0 {
-            panic!("insufficient insurance fund balance");
+            panic_with_error!(env, Error::InsufficientInsuranceFund);
         }
 
         env.storage().instance().set(&DataKey::InsuranceFund, &(fund - payout_amount));
@@ -881,7 +885,17 @@ impl AgentEscrowContract {
 
     /// Returns the escrow record for `escrow_id`.
     pub fn get_escrow(env: Env, escrow_id: u64) -> AgentEscrow {
-        env.storage().persistent().get(&DataKey::Escrow(escrow_id)).expect("escrow not found")
+        env.storage().persistent().get(&DataKey::Escrow(escrow_id)).unwrap_or_else(|| panic_with_error!(env, Error::EscrowNotFound))
+    }
+}
+
+// SC-214: this contract implements its interface from `afripay-types`, so the
+// compiler checks the exported signature against the one consumers call.
+// Changing the entry point without updating the shared trait breaks this build;
+// updating the trait breaks every consumer still using the old signature.
+impl afripay_types::AgentRegistryInterface for AgentEscrowContract {
+    fn is_registered_agent(env: Env, agent: Address) -> bool {
+        AgentEscrowContract::is_registered_agent(env, agent)
     }
 }
 
