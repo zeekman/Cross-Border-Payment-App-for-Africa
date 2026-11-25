@@ -28,6 +28,7 @@ const {
 const { buildTransaction, submitSigned } = require("../controllers/ledgerController");
 const { resolveFederationAddress } = require("../services/stellar");
 const { isMemoRequired } = require("../services/memoRequired");
+const logger = require("../utils/logger");
 const { ALLOWED_HISTORY_ASSETS } = require("../utils/historyQuery");
 
 const VALID_ASSETS = ["XLM", "USDC", "NGN", "GHS", "KES"];
@@ -118,12 +119,15 @@ router.get(
   "/resolve-federation",
   [query("address").notEmpty().withMessage("Address is required")],
   validate,
-  async (req, res) => {
+  async (req, res, next) => {
     try {
       const publicKey = await resolveFederationAddress(req.query.address);
       res.json({ public_key: publicKey });
     } catch (err) {
-      res.status(err.status || 400).json({ error: err.message });
+      if (err.code && [400, 404, 502].includes(err.status)) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
+      next(err);
     }
   },
 );
@@ -136,9 +140,12 @@ router.get(
   async (req, res) => {
     try {
       const required = await isMemoRequired(req.query.address);
-      res.json({ memo_required: required });
+      res.json({ memo_required: required, checked: true });
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      // Fail open for UX, but tell the client the check did not run.
+      // Never leak upstream/DB error text to the client.
+      logger.warn('memo-required check failed', { error: err.message });
+      res.json({ memo_required: false, checked: false });
     }
   },
 );
