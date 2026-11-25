@@ -573,7 +573,7 @@ async function verifyPhone(req, res, next) {
 async function getMe(req, res, next) {
   try {
     const result = await db.query(
-      `SELECT u.id, u.full_name, u.email, u.email_verified, u.phone, u.phone_verified, u.pin_setup_completed, u.totp_enabled, u.account_type, u.avatar_url, u.onboarding_completed, w.public_key
+      `SELECT u.id, u.full_name, u.email, u.email_verified, u.phone, u.phone_verified, u.country_code, u.pin_setup_completed, u.totp_enabled, u.account_type, u.avatar_url, u.onboarding_completed, w.public_key
        FROM users u LEFT JOIN wallets w ON w.user_id = u.id
        WHERE u.id = $1`,
       [req.user.userId]
@@ -587,6 +587,7 @@ async function getMe(req, res, next) {
       email_verified: u.email_verified,
       phone: u.phone,
       phone_verified: u.phone_verified,
+      country_code: u.country_code,
       wallet_address: u.public_key,
       pin_setup_completed: u.pin_setup_completed,
       totp_enabled: u.totp_enabled,
@@ -1069,8 +1070,11 @@ async function validateResetToken(req, res, next) {
 
 async function updateProfile(req, res, next) {
   try {
-    const { full_name, phone, preferred_language } = req.body;
+    const { full_name, phone, preferred_language, country_code } = req.body;
     const userId = req.user.userId;
+    if (country_code !== undefined && !/^[A-Z]{2}$/i.test(country_code)) {
+      return res.status(400).json({ error: 'country_code must be an ISO alpha-2 code' });
+    }
 
     const oldUserResult = await db.query('SELECT phone FROM users WHERE id = $1', [userId]);
     const oldPhone = oldUserResult.rows[0]?.phone;
@@ -1100,9 +1104,11 @@ async function updateProfile(req, res, next) {
         phone_verified = COALESCE($3, phone_verified),
         phone_otp_hash = COALESCE($4, phone_otp_hash),
         phone_otp_expires_at = COALESCE($5, phone_otp_expires_at),
-        preferred_language = COALESCE($6, preferred_language)
-      WHERE id = $7`,
-      [full_name || null, phone || null, phoneVerified, otpHashed, otpExpiresAt, sanitizedLocale, userId]
+        preferred_language = COALESCE($6, preferred_language),
+        country_code = COALESCE($7, country_code)
+      WHERE id = $8`,
+      [full_name || null, phone || null, phoneVerified, otpHashed, otpExpiresAt, sanitizedLocale,
+        country_code ? country_code.toUpperCase() : null, userId]
     );
 
     if (otpRaw && phone) {

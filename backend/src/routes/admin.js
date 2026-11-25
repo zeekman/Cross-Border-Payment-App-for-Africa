@@ -35,6 +35,10 @@ const {
   getGeoDenialsReport,
   overrideAmlFlag,
   getAmlOverrides,
+  getCorridorConfigs,
+  saveCorridorConfig,
+  getTransactionMonitoringCases,
+  updateTransactionMonitoringCase,
 } = require('../controllers/adminController');
 const { getDeadLetterNotifications } = require('../controllers/notificationController');
 const {
@@ -108,7 +112,12 @@ router.post('/clawback',
   clawback
 );
 
-router.post('/kyc/:userId/approve', approveKYC);
+router.post(
+  '/kyc/:userId/approve',
+  [body('tier').optional().isIn(['basic', 'enhanced', 'business'])],
+  validate,
+  approveKYC
+);
 router.post('/kyc/:userId/revoke', revokeKYC);
 
 router.post(
@@ -206,6 +215,7 @@ router.post('/fraud-rules',
     body('parameters').isObject(),
     // BE-033: optional at creation — defaults to 'shadow' in the controller.
     body('mode').optional().isIn(['shadow', 'active']),
+    body('action').optional().isIn(['block', 'hold', 'allow']),
   ],
   validate,
   createFraudRule
@@ -217,6 +227,7 @@ router.patch('/fraud-rules/:id',
     body('parameters').optional().isObject(),
     body('is_active').optional().isBoolean(),
     body('mode').optional().isIn(['shadow', 'active']),
+    body('action').optional().isIn(['block', 'hold', 'allow']),
   ],
   validate,
   updateFraudRule
@@ -325,6 +336,39 @@ router.post(
  *         description: List of overrides
  */
 router.get('/aml/overrides', getAmlOverrides);
+
+router.get('/corridors', getCorridorConfigs);
+router.put(
+  '/corridors',
+  [
+    body('origin_country').matches(/^[A-Za-z]{2}$/),
+    body('destination_country').matches(/^[A-Za-z]{2}$/),
+    body('required_kyc_tier').isIn(['basic', 'enhanced', 'business']),
+    body('allowed_assets').isArray({ min: 1 }),
+    body('daily_limit_usd').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('single_transaction_limit_usd').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('kyc_threshold_usd').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('phone_verification_threshold_usd').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('is_active').optional().isBoolean(),
+  ],
+  validate,
+  saveCorridorConfig
+);
+
+router.get('/tm/cases', getTransactionMonitoringCases);
+router.patch(
+  '/tm/cases/:id',
+  [
+    param('id').isUUID(),
+    body('status').optional().isIn(['open', 'under_review', 'closed']),
+    body('disposition').optional().isIn(['released', 'rejected', 'confirmed', 'false_positive']),
+    body('reason').optional().isString().trim().isLength({ max: 2000 }),
+    body('assigned_to').optional({ nullable: true }).isUUID(),
+    body('str_reference').optional().isString().trim().isLength({ min: 1, max: 128 }),
+  ],
+  validate,
+  updateTransactionMonitoringCase
+);
 
 // ---------------------------------------------------------------------------
 // Fee Configuration CRUD with Audit Trail

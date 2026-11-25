@@ -238,7 +238,7 @@ router.post(
     body("recipient_address")
       .notEmpty()
       .custom((value) => {
-        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) throw new Error("Invalid Stellar wallet address");
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value) && !StellarSdk.StrKey.isValidMed25519PublicKey(value)) throw new Error("Invalid Stellar wallet address");
         return true;
       }),
   ],
@@ -259,7 +259,7 @@ router.post(
     body("recipient_address")
       .notEmpty()
       .custom((value) => {
-        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) throw new Error("Invalid Stellar wallet address");
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value) && !StellarSdk.StrKey.isValidMed25519PublicKey(value)) throw new Error("Invalid Stellar wallet address");
         return true;
       }),
     body("source_asset").isIn(VALID_ASSETS).withMessage("Invalid source asset"),
@@ -283,7 +283,7 @@ router.post(
     body("recipient_address")
       .notEmpty()
       .custom((value) => {
-        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) throw new Error("Invalid Stellar wallet address");
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value) && !StellarSdk.StrKey.isValidMed25519PublicKey(value)) throw new Error("Invalid Stellar wallet address");
         return true;
       }),
   ],
@@ -301,7 +301,7 @@ router.post(
     body("recipient_address")
       .notEmpty()
       .custom((value) => {
-        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) throw new Error("Invalid Stellar wallet address");
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value) && !StellarSdk.StrKey.isValidMed25519PublicKey(value)) throw new Error("Invalid Stellar wallet address");
         return true;
       }),
     body("source_asset").isIn(VALID_ASSETS).withMessage("Invalid source asset"),
@@ -322,7 +322,7 @@ router.post(
     body("recipient_address")
       .notEmpty()
       .custom((v) => {
-        if (!StellarSdk.StrKey.isValidEd25519PublicKey(v)) throw new Error("Invalid Stellar address");
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(v) && !StellarSdk.StrKey.isValidMed25519PublicKey(v)) throw new Error("Invalid Stellar address");
         return true;
       }),
     body("amount").isFloat({ gt: 0 }).withMessage("Amount must be greater than 0"),

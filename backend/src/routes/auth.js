@@ -127,7 +127,13 @@ router.post(
   verifyPhone
 );
 router.get('/me', authMiddleware, getMe);
-router.patch('/me', authMiddleware, updateProfile);
+router.patch(
+  '/me',
+  authMiddleware,
+  [body('country_code').optional().matches(/^[A-Za-z]{2}$/).withMessage('country_code must be an ISO alpha-2 code')],
+  validate,
+  updateProfile
+);
 router.post(
   '/change-email',
   authMiddleware,

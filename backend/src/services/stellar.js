@@ -5,6 +5,7 @@ const { withRetry, retryWithBackoff } = require('../utils/retry');
 const { withTimeout } = require('../utils/withTimeout');
 const { enqueue } = require('../utils/txQueue');
 const { checkMemoRequired } = require('./memoRequired');
+const { baseAccountAddress } = require('../utils/stellarAddress');
 const { getRpc: getSorobanRpc, waitForSorobanTx } = require('../config/soroban');
 const {
   AccountResponseSchema,
@@ -672,7 +673,8 @@ async function _sendPaymentOnce({
   validateNetworkPassphrase(networkPassphrase);
 
   // Enforce memo requirement for known exchange destinations
-  const memoRequired = await checkMemoRequired(recipientPublicKey);
+  const recipientAccount = baseAccountAddress(recipientPublicKey);
+  const memoRequired = await checkMemoRequired(recipientAccount);
   if (memoRequired && !memo) {
     const err = new Error('The destination account requires a transaction memo. Please add a memo and retry.');
     err.status = 400;
@@ -683,7 +685,7 @@ async function _sendPaymentOnce({
   const assetObj = resolveAsset(asset);
 
   if (asset !== 'XLM') {
-    await checkTrustline(recipientPublicKey, assetObj);
+    await checkTrustline(recipientAccount, assetObj);
   }
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
@@ -781,10 +783,11 @@ async function validateBatchRecipient({
   recipientPublicKey,
   asset = 'XLM'
 }) {
+  const recipientBaseAddress = baseAccountAddress(recipientPublicKey);
   let recipientAccount;
   try {
     recipientAccount = await withRetry(
-      () => withFallback(s => s.loadAccount(recipientPublicKey)),
+      () => withFallback(s => s.loadAccount(recipientBaseAddress)),
       { label: 'loadAccount(batchRecipient)' }
     );
   } catch (e) {
@@ -1105,9 +1108,10 @@ async function sendPathPayment({
 }, logger = require('../utils/logger')) {
   const srcAsset = resolveAsset(sourceAsset);
   const dstAsset = resolveAsset(destinationAsset);
+  const recipientAccount = baseAccountAddress(recipientPublicKey);
 
   if (destinationAsset !== 'XLM') {
-    await checkTrustline(recipientPublicKey, dstAsset);
+    await checkTrustline(recipientAccount, dstAsset);
   }
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
@@ -1174,9 +1178,10 @@ async function sendStrictReceivePathPayment({
 }) {
   const srcAsset = resolveAsset(sourceAsset);
   const dstAsset = resolveAsset(destinationAsset);
+  const recipientAccount = baseAccountAddress(recipientPublicKey);
 
   if (destinationAsset !== 'XLM') {
-    await checkTrustline(recipientPublicKey, dstAsset);
+    await checkTrustline(recipientAccount, dstAsset);
   }
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
@@ -1753,6 +1758,7 @@ module.exports = {
   getAccountFlags,
   setAccountFlags,
   findReceivePath,
+  baseAccountAddress,
   sendStrictReceivePathPayment,
   withFallback,
   isBadSeq,
