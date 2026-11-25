@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { skipWaiting } from '../serviceWorker';
 
 const SNOOZE_KEY = 'afripay_sw_update_snoozed_until';
 const SNOOZE_MS = 30 * 60 * 1000;
 
 export default function UpdateBanner() {
+  const { t } = useTranslation();
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
@@ -31,19 +33,19 @@ export default function UpdateBanner() {
       aria-live="polite"
       className="fixed bottom-0 left-0 right-0 z-50 bg-gray-900 border-t border-gray-700 px-4 py-3 flex items-center justify-between gap-3 shadow-lg"
     >
-      <p className="text-sm text-white">A new version of AfriPay is available.</p>
+      <p className="text-sm text-white">{t('shared.newVersion', 'A new version of AfriPay is available.')}</p>
       <div className="flex items-center gap-2 shrink-0">
         <button
           onClick={handleLater}
           className="text-sm text-gray-400 hover:text-white px-3 py-1.5 rounded-lg transition-colors"
         >
-          Later
+          {t('shared.later', 'Later')}
         </button>
         <button
           onClick={handleUpdate}
           className="text-sm bg-primary-500 hover:bg-primary-600 text-white font-medium px-3 py-1.5 rounded-lg transition-colors"
         >
-          Update Now
+          {t('shared.updateNow', 'Update Now')}
         </button>
       </div>
     </div>

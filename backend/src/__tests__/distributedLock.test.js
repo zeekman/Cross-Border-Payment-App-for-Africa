@@ -13,12 +13,13 @@ jest.mock('ioredis', () => {
       mockStore.set(key, value);
       return 'OK';
     });
-    this.eval = jest.fn(async (_script, _numKeys, key, value) => {
-      if (mockStore.get(key) === value) {
-        mockStore.delete(key);
-        return 1;
-      }
-      return 0;
+    this.eval = jest.fn(async (_script, _numKeys, key, value, ttl) => {
+      if (mockStore.get(key) !== value) return 0;
+      // Renew script passes a ttl arg and only extends the TTL (no delete);
+      // release script has no ttl arg and deletes the key.
+      if (ttl !== undefined) return 1;
+      mockStore.delete(key);
+      return 1;
     });
   }
   return MockRedis;
@@ -117,5 +118,63 @@ describe('withLock', () => {
     const ran = await withLock('lock:noop', 55, fn);
     expect(ran).toBe(true);
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// BE-034: heartbeat/renewal for long-running lock holders
+describe('withLock heartbeat/renewal', () => {
+  beforeEach(() => {
+    jest.useFakeTimers({ advanceTimers: true });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('renews the lock via heartbeat while a job runs past the original TTL', async () => {
+    const { withLock, acquireLock } = require('../utils/distributedLock');
+    const ttlSeconds = 3; // heartbeat interval = max(1000, 3000/3) = 1000ms
+
+    const jobDone = { resolved: false };
+    const runPromise = withLock('lock:heartbeat', ttlSeconds, async () => {
+      // Simulate a job that outlives the original TTL: advance fake time by
+      // more than ttlSeconds worth of heartbeats before finishing.
+      await jest.advanceTimersByTimeAsync(3500);
+      jobDone.resolved = true;
+    });
+
+    await runPromise;
+    expect(jobDone.resolved).toBe(true);
+
+    // Lock should have been renewed (still present until release at the end,
+    // then cleaned up) — verifying a fresh acquirer can get it post-release
+    // confirms the lock lifecycle completed cleanly despite outliving the TTL.
+    const acquired = await acquireLock('lock:heartbeat', ttlSeconds, 'new-holder');
+    expect(acquired).toBe(true);
+  });
+
+  test('flags lock loss and records a metric when renewal fails (lock stolen/expired)', async () => {
+    const { distributedLockLostTotal, distributedLockRenewalFailuresTotal } = require('../utils/metrics');
+    const lostSpy = jest.spyOn(distributedLockLostTotal, 'inc');
+    const failSpy = jest.spyOn(distributedLockRenewalFailuresTotal, 'inc');
+
+    const { withLock } = require('../utils/distributedLock');
+    const ttlSeconds = 3;
+
+    let sawLockLost = false;
+    await withLock('lock:stolen', ttlSeconds, async ({ isLockLost }) => {
+      // Simulate the key being deleted out from under us (e.g. TTL truly
+      // expired and another process grabbed it) before the next heartbeat.
+      mockStore.delete('lock:stolen');
+      await jest.advanceTimersByTimeAsync(1100); // past one heartbeat interval
+      sawLockLost = isLockLost();
+    });
+
+    expect(sawLockLost).toBe(true);
+    expect(lostSpy).toHaveBeenCalledWith({ lock_key: 'lock:stolen' });
+    expect(failSpy).toHaveBeenCalledWith({ lock_key: 'lock:stolen' });
+
+    lostSpy.mockRestore();
+    failSpy.mockRestore();
   });
 });

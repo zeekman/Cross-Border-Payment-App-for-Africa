@@ -1,13 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Lock, X, AlertCircle, Fingerprint } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
 
-const hasWebAuthn = () =>
+const browserSupportsWebAuthn = () =>
   typeof navigator?.credentials?.get === 'function' &&
-  typeof window?.PublicKeyCredential === 'function' &&
+  typeof window?.PublicKeyCredential === 'function';
+
+const localFlagSaysRegistered = () =>
   localStorage.getItem('afripay_webauthn_registered') === 'true';
+
+function clearLocalBiometricFlag() {
+  localStorage.removeItem('afripay_webauthn_registered');
+  localStorage.removeItem('afripay_webauthn_credential_id');
+}
 
 async function verifyWebAuthn() {
   const storedId = localStorage.getItem('afripay_webauthn_credential_id');
@@ -37,6 +44,44 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
   const [attempts, setAttempts] = useState(0);
   const [bioLoading, setBioLoading] = useState(false);
   const [useBiometric, setUseBiometric] = useState(false);
+  // null = still checking with the server, true/false once resolved.
+  const [biometricServerVerified, setBiometricServerVerified] = useState(null);
+  const [biometricNotice, setBiometricNotice] = useState('');
+
+  // A localStorage flag alone is not trustworthy: the credential could have
+  // been revoked, or set up on a different device that shares the same
+  // browser profile. Confirm with the server before offering the biometric
+  // path, and tell the user (instead of silently hiding the option) when it
+  // stops working.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+
+    if (!browserSupportsWebAuthn() || !localFlagSaysRegistered()) {
+      setBiometricServerVerified(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    api.get('/auth/biometric/status')
+      .then(({ data }) => {
+        if (cancelled) return;
+        const registered = !!data?.registered;
+        setBiometricServerVerified(registered);
+        if (!registered) {
+          clearLocalBiometricFlag();
+          setBiometricNotice('Biometric login is no longer set up on this account. Use your PIN, or set up biometrics again in Settings.');
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Can't reach the server to confirm — don't silently disable, but
+        // don't silently trust localStorage either: explain the fallback.
+        setBiometricServerVerified(false);
+        setBiometricNotice('Could not verify biometric setup right now. Please use your PIN.');
+      });
+
+    return () => { cancelled = true; };
+  }, [isOpen]);
 
   const handleVerify = async (e) => {
     e.preventDefault();
@@ -49,9 +94,10 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
 
     setLoading(true);
     try {
-      await api.post('/auth/verify-pin', { pin });
+      const { data } = await api.post('/auth/verify-pin', { pin });
+      if (!data?.step_up_token) throw new Error('Step-up token missing from verification response');
       toast.success(t('auth.pin_verified'));
-      onSuccess();
+      onSuccess(data.step_up_token);
       handleClose();
     } catch (err) {
       const newAttempts = attempts + 1;
@@ -75,9 +121,7 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
     const ok = await verifyWebAuthn();
     setBioLoading(false);
     if (ok) {
-      toast.success('Biometric verified');
-      onSuccess();
-      handleClose();
+      setError('Biometric confirmation is not available for transactions yet. Please use your PIN.');
     } else {
       setError('Biometric verification failed. Please use your PIN.');
       setUseBiometric(false);
@@ -89,12 +133,14 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
     setError('');
     setAttempts(0);
     setUseBiometric(false);
+    setBiometricServerVerified(null);
+    setBiometricNotice('');
     onClose();
   };
 
   if (!isOpen) return null;
 
-  const biometricAvailable = !useBiometric && hasWebAuthn();
+  const biometricAvailable = !useBiometric && biometricServerVerified === true;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-75 z-50 flex items-center justify-center p-4">
@@ -122,7 +168,9 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
               {recipient && (
                 <div className="flex justify-between items-center">
                   <span className="text-gray-400 text-sm">{t('send.confirm_to')}</span>
-                  <span className="text-gray-300 text-xs font-mono">{recipient.slice(0, 16)}...</span>
+                  <span className="text-gray-300 text-xs font-mono">
+                    {recipient.length > 16 ? `${recipient.slice(0, 16)}…` : recipient}
+                  </span>
                 </div>
               )}
             </div>
@@ -225,6 +273,12 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
                     Use fingerprint / Face ID instead
                   </button>
                 </div>
+              )}
+
+              {biometricNotice && (
+                <p className="text-center text-amber-400 text-xs mt-4" role="status" aria-live="polite">
+                  {biometricNotice}
+                </p>
               )}
             </form>
           )}

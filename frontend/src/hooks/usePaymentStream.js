@@ -1,11 +1,24 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as StellarSdk from '@stellar/stellar-sdk';
-
-const HORIZON_URL =
-  process.env.REACT_APP_STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
+// FE-129: Use the shared network config so the Horizon URL is always derived
+// from REACT_APP_STELLAR_NETWORK rather than hard-coding a testnet fallback.
+import { HORIZON_URL } from '../config/network';
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_DELAY_MS = 1000;
 const MAX_DELAY_MS = 30_000;
+
+/**
+ * Unified connection state enum.
+ * UI consumers should prefer this over combining the individual boolean flags.
+ *   'connected'    — stream is live and receiving messages
+ *   'reconnecting' — stream dropped, exponential backoff in progress
+ *   'disconnected' — not connected and not attempting to reconnect
+ */
+export const CONNECTION_STATE = {
+  CONNECTED: 'connected',
+  RECONNECTING: 'reconnecting',
+  DISCONNECTED: 'disconnected',
+};
 
 /**
  * Hook to stream real-time payment notifications from Stellar Horizon.
@@ -13,7 +26,14 @@ const MAX_DELAY_MS = 30_000;
  *
  * @param {string} publicKey - The account public key to monitor
  * @param {Function} onPayment - Callback when a new payment is detected
- * @returns {{ isConnected: boolean, isReconnecting: boolean, error: string|null, reconnect: Function, disconnect: Function }}
+ * @returns {{
+ *   connectionState: 'connected'|'reconnecting'|'disconnected',
+ *   isConnected: boolean,
+ *   isReconnecting: boolean,
+ *   error: string|null,
+ *   reconnect: Function,
+ *   disconnect: Function
+ * }}
  */
 export function usePaymentStream(publicKey, onPayment) {
   const [isConnected, setIsConnected] = useState(false);
@@ -77,7 +97,7 @@ export function usePaymentStream(publicKey, onPayment) {
           },
           onerror: (err) => {
             if (!mountedRef.current) return;
-            // eslint-disable-next-line no-console
+            // eslint-disable-next-line no-console -- surface stream errors in dev tools
             console.warn('Payment stream disconnected:', err?.message || err);
             setIsConnected(false);
             const attempt = reconnectAttemptsRef.current;
@@ -100,12 +120,12 @@ export function usePaymentStream(publicKey, onPayment) {
         });
     } catch (err) {
       if (!mountedRef.current) return;
-      // eslint-disable-next-line no-console
+      // eslint-disable-next-line no-console -- surface stream errors in dev tools
       console.error('Failed to open payment stream:', err);
       setIsConnected(false);
       setError(err.message || 'Failed to connect');
     }
-  }, [publicKey, closeStream]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [publicKey, closeStream]); // eslint-disable-line react-hooks/exhaustive-deps -- reopen the stream only when the account changes
 
   const disconnect = useCallback(() => {
     clearReconnectTimer();
@@ -147,7 +167,13 @@ export function usePaymentStream(publicKey, onPayment) {
     };
   }, [publicKey, isConnected, reconnect]);
 
-  return { isConnected, isReconnecting, error, reconnect, disconnect };
+  return { isConnected, isReconnecting, error, reconnect, disconnect,
+    connectionState: isConnected
+      ? CONNECTION_STATE.CONNECTED
+      : isReconnecting
+      ? CONNECTION_STATE.RECONNECTING
+      : CONNECTION_STATE.DISCONNECTED,
+  };
 }
 
 export default usePaymentStream;

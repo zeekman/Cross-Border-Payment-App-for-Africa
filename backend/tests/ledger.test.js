@@ -1,5 +1,5 @@
 const request = require('supertest');
-const { app } = require('../src/index');
+const app = require('../src/app');
 
 // Mock DB and Stellar SDK
 jest.mock('../src/db', () => ({

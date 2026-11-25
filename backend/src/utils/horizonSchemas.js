@@ -101,6 +101,25 @@ const TransactionPageSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Operation record (operations().forTransaction().call())
+// ---------------------------------------------------------------------------
+
+const OperationRecordSchema = z
+  .object({
+    type: z.string().min(1),
+    to: z.string().optional(),
+    amount: NumericStringSchema.optional(),
+    asset_type: z.enum(['native', 'credit_alphanum4', 'credit_alphanum12']).optional(),
+    asset_code: z.string().optional(),
+    asset_issuer: z.string().optional(),
+  })
+  .passthrough();
+
+const OperationPageSchema = z.object({
+  records: z.array(OperationRecordSchema),
+});
+
+// ---------------------------------------------------------------------------
 // Path payment path entry
 // ---------------------------------------------------------------------------
 
@@ -165,6 +184,8 @@ module.exports = {
   TransactionSubmitResponseSchema,
   TransactionRecordSchema,
   TransactionPageSchema,
+  OperationRecordSchema,
+  OperationPageSchema,
   PathRecordSchema,
   PathPageSchema,
   validateHorizonResponse,

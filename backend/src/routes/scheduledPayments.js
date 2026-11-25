@@ -1,6 +1,8 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const auth = require('../middleware/auth');
+const { requireStepUp } = require('../middleware/requireStepUp');
+const StellarSdk = require('@stellar/stellar-sdk');
 const { create, list, update, delete: delete_ } = require('../controllers/scheduledPaymentController');
 
 const router = express.Router();
@@ -56,6 +58,20 @@ router.post(
   '/',
   auth,
   [
+    body('recipient_wallet')
+      .notEmpty().withMessage('recipient_wallet is required')
+      .custom((value) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
+          throw new Error('Invalid Stellar wallet address');
+        }
+        return true;
+      }),
+    body('amount')
+      .notEmpty().withMessage('amount is required')
+      .isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
+    body('frequency')
+      .notEmpty().withMessage('frequency is required')
+      .isIn(['daily', 'weekly', 'monthly']).withMessage('Frequency must be daily, weekly, or monthly'),
     body('execute_at')
       .notEmpty().withMessage('execute_at is required')
       .isISO8601().withMessage('execute_at must be a valid ISO 8601 timestamp')
@@ -72,11 +88,33 @@ router.post(
       }),
   ],
   validate,
+  requireStepUp,
   create,
 );
 
 router.get('/', auth, list);
-router.put('/:id', auth, update);
+router.put(
+  '/:id',
+  auth,
+  [
+    body('amount')
+      .optional()
+      .isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
+    body('frequency')
+      .optional()
+      .isIn(['daily', 'weekly', 'monthly']).withMessage('Frequency must be daily, weekly, or monthly'),
+    body('recipient_wallet')
+      .optional()
+      .custom((value) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
+          throw new Error('Invalid Stellar wallet address');
+        }
+        return true;
+      }),
+  ],
+  validate,
+  update,
+);
 router.delete('/:id', auth, delete_);
 
 module.exports = router;

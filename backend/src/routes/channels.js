@@ -1,10 +1,12 @@
 const router = require('express').Router();
 const { body, param, validationResult } = require('express-validator');
 const authMiddleware = require('../middleware/auth');
+const { readLimiter } = require('../middleware/rateLimiter');
 const { openChannel, transact, closeChannel } = require('../services/paymentChannel');
 const db = require('../db');
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -21,13 +23,13 @@ router.post('/open',
   async (req, res, next) => {
     try {
       const { rows: [wallet] } = await db.query(
-        'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
-        [req.user.id]
+        'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
+        [req.user.userId]
       );
       if (!wallet) return res.status(400).json({ error: 'Wallet not found' });
 
       const channel = await openChannel({
-        userId: req.user.id,
+        userId: req.user.userId,
         senderPublicKey: wallet.public_key,
         encryptedSecretKey: wallet.encrypted_secret_key,
         recipientPublicKey: req.body.recipientPublicKey,
@@ -50,7 +52,7 @@ router.post('/transact',
     try {
       const channel = await transact({
         channelId: req.body.channelId,
-        userId: req.user.id,
+        userId: req.user.userId,
         amount: req.body.amount,
       });
       res.json(channel);
@@ -67,14 +69,14 @@ router.post('/close',
   async (req, res, next) => {
     try {
       const { rows: [wallet] } = await db.query(
-        'SELECT encrypted_secret_key FROM wallets WHERE user_id = $1',
-        [req.user.id]
+        'SELECT encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
+        [req.user.userId]
       );
       if (!wallet) return res.status(400).json({ error: 'Wallet not found' });
 
       const channel = await closeChannel({
         channelId: req.body.channelId,
-        userId: req.user.id,
+        userId: req.user.userId,
         encryptedSecretKey: wallet.encrypted_secret_key,
       });
       res.json(channel);
@@ -91,7 +93,7 @@ router.get('/', async (req, res, next) => {
       `SELECT id, recipient_public_key, asset, funding_amount,
               sender_balance, recipient_balance, status, created_at
        FROM payment_channels WHERE user_id = $1 ORDER BY created_at DESC`,
-      [req.user.id]
+      [req.user.userId]
     );
     res.json(rows);
   } catch (err) {

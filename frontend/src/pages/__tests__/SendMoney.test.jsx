@@ -473,7 +473,8 @@ test('Verify address link points to mainnet Stellar Expert URL when network is m
 
 // ── Recipient address validation ───────────────────────────────────────────
 
-const VALID_KEY   = 'GBOB0000000000000000000000000000000000000000000000000001'; // 56 chars, starts G
+const VALID_KEY   =
+'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'; // checksum-valid zero account
 const INVALID_KEY = 'GBOB000'; // too short
 const FED_ADDRESS = 'alice*stellar.org';
 

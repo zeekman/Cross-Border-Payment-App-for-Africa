@@ -1,13 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, Edit2, List, Calendar } from 'lucide-react';
-import api from '../utils/api';
+import { ArrowLeft, Plus, Trash2, List, Calendar } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import api from '../utils/api';
+import useStepUp from '../hooks/useStepUp';
+import { useConfirm } from '../context/ConfirmContext';
 import { CURRENCIES } from '../utils/currency';
 import ScheduledPaymentsCalendar from '../components/ScheduledPaymentsCalendar';
+import { validateStellarAddress } from '../utils/validation';
 
 export default function ScheduledPayments() {
+  const { requestStepUp, stepUpModal } = useStepUp();
+  const confirm = useConfirm();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const [payments, setPayments] = useState([]);
@@ -24,7 +29,7 @@ export default function ScheduledPayments() {
 
   useEffect(() => {
     fetchPayments();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- load once on mount
 
   const fetchPayments = async () => {
     try {
@@ -39,19 +44,44 @@ export default function ScheduledPayments() {
 
   const handleCreate = async (e) => {
     e.preventDefault();
-    if (!form.recipient_wallet || !form.amount) {
-      toast.error(t('scheduled.invalid') || 'Invalid input');
+
+    // Validate Stellar address format
+    const addressError = validateStellarAddress(form.recipient_wallet);
+    if (addressError) {
+      toast.error(addressError);
       return;
     }
 
+    if (!form.amount || parseFloat(form.amount) <= 0) {
+      toast.error(t('scheduled.invalid') || 'Please enter a valid amount');
+      return;
+    }
+
+    // Check balance before scheduling
+    try {
+      const balanceRes = await api.get('/wallet/balance');
+      const balances = balanceRes.data?.balances || [];
+      const assetBalance = balances.find(b => b.asset === form.asset)?.balance || 0;
+
+      if (parseFloat(form.amount) > parseFloat(assetBalance)) {
+        toast.error(`Insufficient ${form.asset} balance`);
+        return;
+      }
+    } catch {
+      // If balance check fails, proceed — backend will validate anyway
+    }
+
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     try {
       await api.post('/scheduled-payments', {
-        recipient_wallet: form.recipient_wallet,
+        execute_at: new Date(Date.now() + 3600000).toISOString(),
+        recipient_wallet: form.recipient_wallet.trim(),
         amount: parseFloat(form.amount),
         asset: form.asset,
         frequency: form.frequency,
         memo: form.memo || undefined
-      });
+      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success(t('scheduled.created') || 'Scheduled payment created');
       setForm({ recipient_wallet: '', amount: '', asset: 'XLM', frequency: 'monthly', memo: '' });
       setShowForm(false);
@@ -62,7 +92,7 @@ export default function ScheduledPayments() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm(t('scheduled.confirm_delete') || 'Delete this scheduled payment?')) return;
+    if (!(await confirm(t('scheduled.confirm_delete', 'Delete this scheduled payment? It will no longer run.'), { title: t('confirm.delete_scheduled_title', 'Delete scheduled payment'), confirmLabel: t('confirm.delete', 'Delete') }))) return;
     try {
       await api.delete(`/scheduled-payments/${id}`);
       toast.success(t('scheduled.deleted') || 'Deleted');
@@ -214,6 +244,7 @@ export default function ScheduledPayments() {
           ))}
         </div>
       )}
+      {stepUpModal}
     </div>
   );
 }

@@ -1,17 +1,43 @@
 const crypto = require('crypto');
 const db = require('../db');
 const { validatePublicUrl } = require('../utils/ssrfValidator');
+const { validateOutboundUrl } = require('../utils/ssrf');
 const { encryptSecret, decryptSecret } = require('../utils/symmetricEncryption');
+const { retryDelivery } = require('../services/webhook');
 
-const VALID_EVENTS = ['payment.sent', 'payment.received', 'payment.failed'];
+const { WEBHOOK_EVENTS: VALID_EVENTS, WEBHOOK_EVENT_DESCRIPTIONS } = require('../services/webhookEvents');
+
+// Shared URL validation for create/update: HTTPS-only + SSRF check.
+async function validateWebhookUrl(url) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return { status: 400, body: { error: 'Invalid URL format' } };
+  }
+  if (parsedUrl.protocol !== 'https:') {
+    return { status: 400, body: { error: 'Webhook URL must use HTTPS' } };
+  }
+  const ssrfCheck = await validateOutboundUrl(url);
+  if (!ssrfCheck.valid) {
+    return {
+      status: 400,
+      body: {
+        error: 'SSRF_BLOCKED',
+        message: 'The provided URL resolves to a restricted network range.',
+      },
+    };
+  }
+  return null;
+}
 
 async function create(req, res, next) {
   try {
     const { url, events } = req.body;
 
-    if (!await validatePublicUrl(url)) {
-      return res.status(400).json({ error: 'Webhook URL must point to a public HTTPS endpoint' });
-    }
+    // Webhook endpoints must be HTTPS to protect the HMAC secret in transit
+    const urlError = await validateWebhookUrl(url);
+    if (urlError) return res.status(urlError.status).json(urlError.body);
 
     const invalidEvents = (events || []).filter((e) => !VALID_EVENTS.includes(e));
     if (invalidEvents.length) {
@@ -38,7 +64,9 @@ async function create(req, res, next) {
 async function list(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, url, events, active, created_at, secret FROM webhooks WHERE user_id = $1 ORDER BY created_at DESC`,
+      `SELECT id, url, events, active, created_at, secret,
+              consecutive_failures, disabled_at, disabled_reason
+       FROM webhooks WHERE user_id = $1 ORDER BY created_at DESC`,
       [req.user.userId]
     );
 
@@ -86,6 +114,45 @@ async function listDeliveries(req, res, next) {
   }
 }
 
+const ROTATION_OVERLAP_HOURS = parseInt(process.env.WEBHOOK_SECRET_ROTATION_OVERLAP_HOURS || '24', 10);
+
+/**
+ * POST /api/webhooks/:id/rotate-secret
+ * Issues a new signing secret while keeping the old one valid for a grace
+ * window, so in-flight deliveries and not-yet-updated verifiers don't break.
+ */
+async function rotateSecret(req, res, next) {
+  try {
+    const { id } = req.params;
+
+    const { rows } = await db.query(
+      `SELECT id, secret FROM webhooks WHERE id = $1 AND user_id = $2`,
+      [id, req.user.userId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Webhook not found' });
+    }
+
+    const newPlainSecret = crypto.randomBytes(32).toString('hex');
+    const newEncryptedSecret = encryptSecret(newPlainSecret);
+
+    const { rows: updated } = await db.query(
+      `UPDATE webhooks
+          SET secret = $1,
+              previous_secret = $2,
+              previous_secret_expires_at = NOW() + ($3 || ' hours')::interval
+        WHERE id = $4
+        RETURNING id, url, events, active, created_at, previous_secret_expires_at`,
+      [newEncryptedSecret, rows[0].secret, ROTATION_OVERLAP_HOURS, id]
+    );
+
+    // Return the plain secret once — it will not be shown again
+    res.json({ ...updated[0], secret: newPlainSecret, rotation_overlap_hours: ROTATION_OVERLAP_HOURS });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function retry(req, res, next) {
   try {
     const { id } = req.params;
@@ -106,4 +173,53 @@ async function retry(req, res, next) {
   }
 }
 
-module.exports = { create, list, listDeliveries, retry };
+async function update(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { url, events, active } = req.body;
+
+    // Verify ownership
+    const { rows: owned } = await db.query(
+      `SELECT id FROM webhooks WHERE id = $1 AND user_id = $2`,
+      [id, req.user.userId]
+    );
+    if (!owned.length) return res.status(404).json({ error: 'Webhook not found' });
+
+    if (url !== undefined) {
+      const urlError = await validateWebhookUrl(url);
+      if (urlError) return res.status(urlError.status).json(urlError.body);
+    }
+
+    const invalidEvents = (events || []).filter((e) => !VALID_EVENTS.includes(e));
+    if (invalidEvents.length) {
+      return res.status(400).json({ error: `Invalid events: ${invalidEvents.join(', ')}` });
+    }
+
+    const { rows } = await db.query(
+      `UPDATE webhooks
+       SET url = COALESCE($1, url),
+           events = COALESCE($2, events),
+           active = COALESCE($3, active),
+           -- Re-enabling an endpoint (BE-217) starts it with a clean slate, otherwise the
+           -- next single failure would put it straight back over the auto-disable threshold.
+           consecutive_failures = CASE WHEN $3::boolean IS TRUE THEN 0 ELSE consecutive_failures END,
+           disabled_at = CASE WHEN $3::boolean IS TRUE THEN NULL ELSE disabled_at END,
+           disabled_reason = CASE WHEN $3::boolean IS TRUE THEN NULL ELSE disabled_reason END
+       WHERE id = $4 AND user_id = $5
+       RETURNING id, url, events, active, created_at, consecutive_failures, disabled_at, disabled_reason`,
+      [url || null, events || null, active !== undefined ? active : null, id, req.user.userId]
+    );
+
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+function listEvents(req, res) {
+  res.json({
+    events: VALID_EVENTS.map((name) => ({ name, description: WEBHOOK_EVENT_DESCRIPTIONS[name] })),
+  });
+}
+
+module.exports = { listEvents, create, update, list, listDeliveries, retry, rotateSecret };

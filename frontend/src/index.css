@@ -63,3 +63,8 @@ body {
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { @apply bg-gray-200 dark:bg-gray-900; }
 ::-webkit-scrollbar-thumb { @apply bg-primary-600 rounded-full; }
+
+/* Prevent iOS Safari auto-zoom on focus (viewport zoom stays enabled) */
+@media (max-width: 767px) {
+  input, select, textarea { font-size: 16px !important; }
+}

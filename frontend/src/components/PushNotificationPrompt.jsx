@@ -18,6 +18,11 @@ export default function PushNotificationPrompt({ onDismiss }) {
     onDismiss();
   };
 
+  const handleDontAskAgain = () => {
+    localStorage.setItem('notifications_dismissed', 'true');
+    onDismiss();
+  };
+
   const handleEnable = async () => {
     const result = await Notification.requestPermission();
     if (result === 'granted' && 'serviceWorker' in navigator && VAPID_PUBLIC_KEY) {
@@ -72,6 +77,13 @@ export default function PushNotificationPrompt({ onDismiss }) {
                   Not now
                 </button>
               </div>
+              <button
+                type="button"
+                onClick={handleDontAskAgain}
+                className="mt-3 w-full text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                Don&apos;t ask again
+              </button>
             </>
           )}
         </div>

@@ -3,20 +3,14 @@ const { withFallback } = require('./stellar');
 const logger = require('../utils/logger');
 const cache = require('../utils/cache');
 
-const SDEX_CACHE_TTL_MS = 60_000;        // XLM/USD refreshes every 60 s
-const SDEX_REDIS_KEY = 'sdex:xlm_price';
-const SDEX_REDIS_TTL_S = 60;
-const FIAT_CACHE_TTL_MS = 60 * 60_000;  // USD→fiat refreshes every 60 min
+const PRICE_CACHE_TTL_SECS = parseInt(process.env.PRICE_CACHE_TTL_SECS || '60', 10);
+// Retain stale keys for 10× the TTL so fallback reads can still find them
+const STALE_RETAIN_SECS = PRICE_CACHE_TTL_SECS * 10;
 
-// Fallback multipliers used when the exchange-rate API is unreachable
-const FALLBACK_USD_TO_FIAT = {
-  NGN: 1600,
-  GHS: 15.5,
-  KES: 129,
-};
+const FALLBACK_USD_TO_FIAT = { NGN: 1600, GHS: 15.5, KES: 129 };
 
-let sdexCache = { price: null, fetchedAt: 0 };
-let fiatCache = { rates: null, fetchedAt: 0 };
+// In-memory fallback used only when Redis is unavailable
+let memCache = { rates: null, fetchedAt: 0 };
 
 // ---------------------------------------------------------------------------
 // XLM/USD — Stellar SDEX order book
@@ -28,7 +22,7 @@ async function fetchSdexPrice() {
 
   const xlm = StellarSdk.Asset.native();
   const usdc = new StellarSdk.Asset('USDC', usdcIssuer);
-  const book = await withFallback(s => s.orderbook(xlm, usdc).call());
+  const book = await withFallback((s) => s.orderbook(xlm, usdc).call());
 
   const bestBid = parseFloat(book.bids?.[0]?.price ?? '0');
   const bestAsk = parseFloat(book.asks?.[0]?.price ?? '0');
@@ -38,30 +32,8 @@ async function fetchSdexPrice() {
   return bestBid || bestAsk;
 }
 
-async function getXlmPrice() {
-  // Redis is the primary cache — shared across all instances, reduces Horizon load
-  const redisPrice = await cache.get(SDEX_REDIS_KEY);
-  if (redisPrice !== null) return redisPrice;
-
-  const now = Date.now();
-  if (sdexCache.price !== null && now - sdexCache.fetchedAt < SDEX_CACHE_TTL_MS) {
-    return sdexCache.price;
-  }
-  try {
-    const price = await fetchSdexPrice();
-    sdexCache = { price, fetchedAt: now };
-    await cache.set(SDEX_REDIS_KEY, price, SDEX_REDIS_TTL_S);
-    return price;
-  } catch (err) {
-    logger.warn('SDEX price fetch failed, using last known price', { error: err.message });
-    if (sdexCache.price !== null) return sdexCache.price;
-    throw err;
-  }
-}
-
 // ---------------------------------------------------------------------------
-// USD → fiat — open.er-api.com (free, no key required)
-// Set EXCHANGE_RATE_API_KEY for the authenticated tier (higher rate limits).
+// USD → fiat — open.er-api.com
 // ---------------------------------------------------------------------------
 
 async function fetchFiatRates() {
@@ -84,20 +56,24 @@ async function fetchFiatRates() {
   };
 }
 
-async function getUsdToFiat() {
-  const now = Date.now();
-  if (fiatCache.rates !== null && now - fiatCache.fetchedAt < FIAT_CACHE_TTL_MS) {
-    return fiatCache.rates;
-  }
-  try {
-    const rates = await fetchFiatRates();
-    fiatCache = { rates, fetchedAt: now };
-    logger.info('Fiat rates refreshed', { NGN: rates.NGN, GHS: rates.GHS, KES: rates.KES });
-    return rates;
-  } catch (err) {
-    logger.warn('Fiat rate fetch failed, using fallback', { error: err.message });
-    return fiatCache.rates ?? FALLBACK_USD_TO_FIAT;
-  }
+// ---------------------------------------------------------------------------
+// Redis-backed cache helpers
+// ---------------------------------------------------------------------------
+
+async function getCachedRates() {
+  const cached = await cache.get('price:XLM:rates');
+  return cached; // { usd, fiat: {NGN,GHS,KES}, cachedAt } or null
+}
+
+async function setCachedRates(usd, fiat) {
+  const payload = { usd, fiat, cachedAt: new Date().toISOString() };
+  // Write with normal TTL for live cache
+  await cache.set('price:XLM:rates', payload, PRICE_CACHE_TTL_SECS);
+  // Write a stale-fallback key that lives much longer
+  await cache.set('price:XLM:rates:stale', payload, STALE_RETAIN_SECS);
+  // Update in-memory fallback too
+  memCache = { rates: payload, fetchedAt: Date.now() };
+  return payload;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,17 +81,90 @@ async function getUsdToFiat() {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns XLM price in USD, NGN, GHS, KES.
- * XLM/USD comes from the SDEX; USD→fiat comes from open.er-api.com.
+ * Returns XLM prices in USD, NGN, GHS, KES with cache metadata.
+ *
+ * Response shape:
+ *   { USD, NGN, GHS, KES, rate_source: 'live'|'cached', cached_at, stale? }
  */
 async function getXlmRates() {
-  const [usd, fiat] = await Promise.all([getXlmPrice(), getUsdToFiat()]);
-  return {
-    USD: parseFloat(usd.toFixed(6)),
-    NGN: parseFloat((usd * fiat.NGN).toFixed(4)),
-    GHS: parseFloat((usd * fiat.GHS).toFixed(4)),
-    KES: parseFloat((usd * fiat.KES).toFixed(4)),
-  };
+  // 1. Try live cache (within TTL)
+  const cached = await getCachedRates();
+  if (cached) {
+    return {
+      USD: parseFloat(cached.usd.toFixed(6)),
+      NGN: parseFloat((cached.usd * cached.fiat.NGN).toFixed(4)),
+      GHS: parseFloat((cached.usd * cached.fiat.GHS).toFixed(4)),
+      KES: parseFloat((cached.usd * cached.fiat.KES).toFixed(4)),
+      rate_source: 'cached',
+      cached_at: cached.cachedAt,
+    };
+  }
+
+  // 2. Fetch live data
+  try {
+    const [usd, fiat] = await Promise.all([fetchSdexPrice(), fetchFiatRates()]);
+    const payload = await setCachedRates(usd, fiat);
+    logger.info('Price oracle refreshed', { USD: usd, ...fiat });
+    return {
+      USD: parseFloat(usd.toFixed(6)),
+      NGN: parseFloat((usd * fiat.NGN).toFixed(4)),
+      GHS: parseFloat((usd * fiat.GHS).toFixed(4)),
+      KES: parseFloat((usd * fiat.KES).toFixed(4)),
+      rate_source: 'live',
+      cached_at: payload.cachedAt,
+    };
+  } catch (liveErr) {
+    logger.warn('Price oracle live fetch failed', { error: liveErr.message });
+
+    // 3. Stale fallback
+    const stale = await cache.get('price:XLM:rates:stale') ?? memCache.rates;
+    if (stale) {
+      logger.warn('Serving stale exchange rate', { cachedAt: stale.cachedAt });
+      return {
+        USD: parseFloat(stale.usd.toFixed(6)),
+        NGN: parseFloat((stale.usd * stale.fiat.NGN).toFixed(4)),
+        GHS: parseFloat((stale.usd * stale.fiat.GHS).toFixed(4)),
+        KES: parseFloat((stale.usd * stale.fiat.KES).toFixed(4)),
+        rate_source: 'cached',
+        cached_at: stale.cachedAt,
+        stale: true,
+      };
+    }
+
+    // 4. Nothing available
+    const err = new Error('PRICE_UNAVAILABLE');
+    err.status = 503;
+    err.body = { error: 'PRICE_UNAVAILABLE', message: 'Exchange rate temporarily unavailable.' };
+    throw err;
+  }
 }
 
-module.exports = { getXlmRates };
+// ---------------------------------------------------------------------------
+// Background pre-warm job — runs every (TTL - 5) seconds
+// ---------------------------------------------------------------------------
+
+let _refreshTimer = null;
+
+function startPriceRefreshJob() {
+  if (_refreshTimer) return;
+  const intervalMs = Math.max((PRICE_CACHE_TTL_SECS - 5) * 1000, 5_000);
+  _refreshTimer = setInterval(async () => {
+    try {
+      const [usd, fiat] = await Promise.all([fetchSdexPrice(), fetchFiatRates()]);
+      await setCachedRates(usd, fiat);
+      logger.debug('Price cache pre-warmed');
+    } catch (err) {
+      logger.warn('Price pre-warm failed', { error: err.message });
+    }
+  }, intervalMs);
+  _refreshTimer.unref();
+}
+
+function stopPriceRefreshJob() {
+  if (_refreshTimer) {
+    clearInterval(_refreshTimer);
+    _refreshTimer = null;
+  }
+}
+
+module.exports = { getXlmRates, startPriceRefreshJob, stopPriceRefreshJob };

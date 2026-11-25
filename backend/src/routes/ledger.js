@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
+const { readLimiter } = require('../middleware/rateLimiter');
 const idempotency = require('../middleware/idempotency');
 const { buildTransaction, submitSigned } = require('../controllers/ledgerController');
 
@@ -14,6 +15,7 @@ const validate = (req, res, next) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger

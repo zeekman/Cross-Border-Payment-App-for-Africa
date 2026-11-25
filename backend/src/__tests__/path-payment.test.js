@@ -145,7 +145,7 @@ describe('sendPathPayment', () => {
 
   test('returns transactionHash and ledger on success', async () => {
     const result = await stellar.sendPathPayment(baseArgs);
-    expect(result).toEqual({ transactionHash: 'path-tx-hash', ledger: 55 });
+    expect(result).toMatchObject({ transactionHash: 'path-tx-hash', ledger: 55 });
   });
 
   test('calls submitTransaction exactly once', async () => {

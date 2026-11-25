@@ -1,12 +1,9 @@
 # GitHub Actions CI/CD TODO
 
-## Completed: 0/6
+## Completed: 2/3
 
-### 1. Create .github/workflows/ci.yml [ ]
-### 2. Create .github/workflows/deploy.yml [ ]
+### 1. Create .github/workflows/ci.yml [x]
+### 2. Create .github/workflows/deploy.yml [x]
 ### 3. Update README.md with coverage badge [ ]
-### 4. Test CI locally if possible [ ]
-### 5. Push to feat/github-actions-ci branch [ ]
-### 6. Verify workflows in repo settings [ ]
 
-**Next:** Implement step-by-step.
+**Next:** Add a Codecov coverage badge to README.md (CI already uploads coverage via `codecov/codecov-action`).

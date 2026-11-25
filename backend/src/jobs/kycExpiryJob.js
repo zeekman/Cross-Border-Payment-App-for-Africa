@@ -1,5 +1,7 @@
 const db = require('../db');
 const { sendKycExpiryReminderEmail } = require('../services/email');
+const { revokeKyc, getAdminPublicKey } = require('../services/kycAttestation');
+const { notifyOps } = require('../utils/alerting');
 const logger = require('../utils/logger');
 
 const REMINDER_DAYS = [30, 14, 7];
@@ -17,6 +19,33 @@ async function checkKycDocumentExpiry() {
 
   if (expired.length > 0) {
     logger.info('KYC documents marked expired', { count: expired.length });
+  }
+
+  // Revoke the on-chain attestation for each newly-expired user so
+  // is_kyc_verified() on the escrow contract can no longer pass for them.
+  // A failure here leaves the system in a permissive, inconsistent state
+  // (DB says expired, chain still says verified) so it's alerted, not just logged.
+  for (const user of expired) {
+    try {
+      const { rows: wallets } = await db.query(
+        `SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1`,
+        [user.id],
+      );
+      if (!wallets[0]) continue; // no wallet on file — nothing to revoke on-chain
+
+      const adminPublicKey = getAdminPublicKey();
+      await revokeKyc(adminPublicKey, wallets[0].public_key);
+      logger.info('On-chain KYC attestation revoked after expiry', { userId: user.id });
+    } catch (err) {
+      logger.error('Failed to revoke on-chain KYC attestation after expiry', {
+        userId: user.id,
+        error: err.message,
+      });
+      await notifyOps('KYC on-chain revocation failed after off-chain expiry', {
+        userId: user.id,
+        error: err.message,
+      });
+    }
   }
 
   // Send reminder emails for documents expiring in exactly 30, 14, and 7 days.

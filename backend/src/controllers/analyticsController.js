@@ -1,6 +1,25 @@
+/**
+ * Analytics Controller
+ *
+ * `volume` reads from the daily_payment_aggregates materialized view for
+ * ranges longer than 7 days (see 026_analytics_materialized_view.js); that
+ * view refreshes hourly by default (CRON_ANALYTICS_REFRESH, see
+ * backend/src/scheduler.js) or on demand via POST /api/analytics/refresh.
+ * Every response includes `refreshed_at` so callers know exactly how stale
+ * the data is — see backend/src/services/analyticsRefresh.js for details.
+ * `summary` and `fees` always query the live transactions table, so their
+ * `refreshed_at` is just the request time.
+ *
+ * SC-196: the fee-distributor's `deposit_fee` event carries a caller-supplied
+ * `source` field that is NOT authenticated (only `depositor` is). It must not
+ * be treated as fee provenance. The `fees` endpoint therefore aggregates fees
+ * by asset only and never attributes fees to a source address.
+ */
 const db = require('../db');
+const { refreshDailyAggregates, getLastRefreshedAt } = require('../services/analyticsRefresh');
+const { validateDateRange } = require('../utils/historyQuery');
 
-exports.summary = async (req, res) => {
+exports.summary = async (req, res, next) => {
   try {
     const walletResult = await db.query(
       'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
@@ -21,6 +40,11 @@ exports.summary = async (req, res) => {
     }
     if (from > to) {
       return res.status(400).json({ error: 'from must be before or equal to to' });
+    }
+
+    const rangeError = validateDateRange(from, to);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const walletCondition = '(sender_wallet = $1 OR recipient_wallet = $1)';
@@ -70,13 +94,14 @@ exports.summary = async (req, res) => {
       top_recipients: topRecipients.rows,
       asset_breakdown: assetBreakdown.rows,
       transaction_frequency: frequency.rows,
+      refreshed_at: new Date().toISOString(), // live query — always current
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-exports.volume = async (req, res) => {
+exports.volume = async (req, res, next) => {
   try {
     const now = new Date();
     const defaultFrom = new Date(now);
@@ -92,9 +117,15 @@ exports.volume = async (req, res) => {
       return res.status(400).json({ error: 'from must be before or equal to to' });
     }
 
+    const rangeError = validateDateRange(from, to);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
+    }
+
     const rangeDays = Math.ceil((to - from) / (1000 * 60 * 60 * 24));
 
     let rows;
+    let refreshedAt;
 
     if (rangeDays > 7) {
       // Use the pre-aggregated materialized view for longer ranges to avoid full table scans
@@ -121,6 +152,7 @@ exports.volume = async (req, res) => {
         [from, to],
       );
       rows = result.rows;
+      refreshedAt = (await getLastRefreshedAt()) || null;
     } else {
       // Live query for short ranges (≤ 7 days); generate_series fills zero-count days
       const result = await db.query(
@@ -155,19 +187,21 @@ exports.volume = async (req, res) => {
         [from, to],
       );
       rows = result.rows;
+      refreshedAt = new Date().toISOString(); // live query — always current
     }
 
     res.json({
       period: { from: from.toISOString(), to: to.toISOString() },
       range_days: rangeDays,
       volume: rows,
+      refreshed_at: refreshedAt,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-exports.fees = async (req, res) => {
+exports.fees = async (req, res, next) => {
   try {
     const now = new Date();
     const defaultFrom = new Date(now);
@@ -183,6 +217,14 @@ exports.fees = async (req, res) => {
       return res.status(400).json({ error: 'from must be before or equal to to' });
     }
 
+    const rangeError = validateDateRange(from, to);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
+    }
+
+    // SC-196: fees are aggregated by asset only. The fee-distributor's
+    // `source` field is caller-supplied and unauthenticated, so it is never
+    // used to attribute fees to an address here.
     const [totals, byAsset] = await Promise.all([
       db.query(
         `SELECT COALESCE(SUM(fee_amount), 0) AS total_fees,
@@ -209,7 +251,27 @@ exports.fees = async (req, res) => {
       total_fees: totals.rows[0].total_fees,
       transaction_count: totals.rows[0].transaction_count,
       by_asset: byAsset.rows,
+      // Note: no per-source fee attribution is provided. The on-chain
+      // `source` field is unauthenticated (SC-196) and must not be used as
+      // fee provenance.
+      refreshed_at: new Date().toISOString(), // live query — always current
     });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/analytics/refresh
+ * Admin-only: triggers an immediate REFRESH MATERIALIZED VIEW CONCURRENTLY
+ * for daily_payment_aggregates, ahead of the scheduled cadence. Useful right
+ * after a data correction (e.g. reversing a fraudulent transaction) where an
+ * admin doesn't want to wait for the next scheduled refresh.
+ */
+exports.refresh = async (req, res) => {
+  try {
+    const refreshedAt = await refreshDailyAggregates();
+    res.json({ message: 'daily_payment_aggregates refreshed', refreshed_at: refreshedAt });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

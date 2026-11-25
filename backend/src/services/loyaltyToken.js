@@ -12,37 +12,15 @@
  */
 
 const StellarSdk = require("@stellar/stellar-sdk");
-const crypto = require("crypto");
 
-const ALGORITHM = "aes-256-cbc";
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
-const isTestnet = process.env.STELLAR_NETWORK !== "mainnet";
-const networkPassphrase = isTestnet
-  ? StellarSdk.Networks.TESTNET
-  : StellarSdk.Networks.PUBLIC;
-
-const rpcUrl =
-  process.env.SOROBAN_RPC_URL ||
-  (isTestnet
-    ? "https://soroban-testnet.stellar.org"
-    : "https://mainnet.soroban.stellar.org");
+const { networkPassphrase, getRpc, waitForSorobanTx } = require("../config/soroban");
 
 const CONTRACT_ID = process.env.LOYALTY_TOKEN_CONTRACT_ID;
 
-function getRpc() {
-  return new StellarSdk.SorobanRpc.Server(rpcUrl);
-}
-
 function decryptSecret(encryptedKey) {
-  const [ivHex, encrypted] = encryptedKey.split(":");
-  const iv = Buffer.from(ivHex, "hex");
-  const decipher = crypto.createDecipheriv(
-    ALGORITHM,
-    Buffer.from(ENCRYPTION_KEY),
-    iv
-  );
-  return decipher.update(encrypted, "hex", "utf8") + decipher.final("utf8");
+  return decryptAesCbc(encryptedKey);
 }
 
 function requireContractId() {
@@ -78,11 +56,7 @@ async function sendAndConfirm(keypair, method, args) {
     );
   }
 
-  let response = result;
-  while (response.status === "PENDING" || response.status === "NOT_FOUND") {
-    await new Promise((r) => setTimeout(r, 1000));
-    response = await rpc.getTransaction(result.hash);
-  }
+  const response = await waitForSorobanTx(rpc, result);
 
   if (response.status !== "SUCCESS") {
     throw Object.assign(
@@ -122,27 +96,72 @@ async function mintPoints({ recipientWallet, points }) {
   return { txHash: hash };
 }
 
+const MAX_TIERS = 5;
+
 /**
- * Redeem 100 loyalty points for a 50 % fee discount.
- *
- * The caller's encrypted secret key is used to authorise the on-chain
- * `redeem` call. Returns `{ redeemed: true, txHash }` if successful,
- * or `{ redeemed: false }` if the user has fewer than 100 points.
+ * Read a redemption tier (`DataKey::Tier(i)`) straight from contract storage.
+ * Returns `{ index, threshold, discount_bps }` or null if not configured.
  */
-async function redeemPoints({ encryptedSecretKey, walletAddress }) {
+async function getTier(index) {
   requireContractId();
+  const key = StellarSdk.xdr.ScVal.scvVec([
+    StellarSdk.xdr.ScVal.scvSymbol("Tier"),
+    StellarSdk.nativeToScVal(index, { type: "u32" }),
+  ]);
+  try {
+    const entry = await getRpc().getContractData(
+      CONTRACT_ID,
+      key,
+      StellarSdk.SorobanRpc.Durability.Persistent
+    );
+    const tier = StellarSdk.scValToNative(entry.val.contractData().val());
+    return { index, threshold: Number(tier.threshold), discount_bps: Number(tier.discount_bps) };
+  } catch {
+    return null;
+  }
+}
+
+/** All configured redemption tiers (indexes 0..MAX_TIERS-1). */
+async function getTiers() {
+  const tiers = await Promise.all([...Array(MAX_TIERS).keys()].map(getTier));
+  return tiers.filter(Boolean);
+}
+
+/**
+ * Redeem a loyalty tier: burns the tier's threshold of points on-chain.
+ *
+ * The contract's `redeem(user, tier_index)` returns nothing and panics with
+ * "insufficient points for tier" when the balance is too low, which is mapped
+ * to a 400. Returns `{ txHash, tier }` on success.
+ */
+async function redeemPoints({ encryptedSecretKey, walletAddress, tierIndex }) {
+  requireContractId();
+
+  const tier = await getTier(tierIndex);
+  if (!tier) {
+    throw Object.assign(new Error(`Loyalty tier ${tierIndex} is not configured`), { status: 400 });
+  }
 
   const secretKey = decryptSecret(encryptedSecretKey);
   const keypair = StellarSdk.Keypair.fromSecret(secretKey);
 
   const args = [
     StellarSdk.nativeToScVal(walletAddress, { type: "address" }),
+    StellarSdk.nativeToScVal(tierIndex, { type: "u32" }),
   ];
 
-  const { hash, returnValue } = await sendAndConfirm(keypair, "redeem", args);
-  const redeemed = StellarSdk.scValToNative(returnValue);
-
-  return { redeemed: Boolean(redeemed), txHash: hash };
+  try {
+    const { hash } = await sendAndConfirm(keypair, "redeem", args);
+    return { txHash: hash, tier };
+  } catch (err) {
+    if (/insufficient points/i.test(err.message || "")) {
+      throw Object.assign(
+        new Error(`Insufficient loyalty points. Tier ${tierIndex} requires at least ${tier.threshold} points.`),
+        { status: 400, threshold: tier.threshold }
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -150,7 +169,8 @@ async function redeemPoints({ encryptedSecretKey, walletAddress }) {
  * Returns the point balance as a number.
  */
 async function getBalance({ walletAddress }) {
-  requireContractId();
+  // Return 0 if loyalty contract is not configured (non-fatal)
+  if (!CONTRACT_ID) return 0;
 
   const rpc = getRpc();
   const contract = new StellarSdk.Contract(CONTRACT_ID);
@@ -184,4 +204,4 @@ async function getBalance({ walletAddress }) {
   return val ? Number(StellarSdk.scValToNative(val)) : 0;
 }
 
-module.exports = { mintPoints, redeemPoints, getBalance };
+module.exports = { mintPoints, redeemPoints, getBalance, getTier, getTiers, MAX_TIERS };

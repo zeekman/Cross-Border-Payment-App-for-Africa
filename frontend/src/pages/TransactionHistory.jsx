@@ -1,13 +1,17 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ChevronDown, Send, Download, ExternalLink, Filter, Search, Flag, X, WifiOff, Loader2 } from 'lucide-react';
-import api from '../utils/api';
-import { truncateAddress } from '../utils/currency';
-import { TransactionCardSkeleton } from '../components/Skeleton';
-import { useOnlineStatus } from '../hooks/useOnlineStatus';
-import { setCacheEntry, getCacheEntry } from '../utils/offlineDB';
+import { ArrowLeft, ChevronDown, Send, Download, ExternalLink, Filter, Search, Flag, X, WifiOff, Loader2, Copy, CheckCheck } from 'lucide-react';
+import { FixedSizeList } from 'react-window';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
+import api from '../utils/api';
+import { useWallet } from '../context/WalletContext';
+import { explorerTxUrl } from '../config/network';
+import { truncateAddress } from '../utils/currency';
+import { TransactionCardSkeleton } from '../components/Skeleton';
+import ConfirmModal from '../components/ConfirmModal';
+import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { setCacheEntry, getCacheEntry } from '../utils/offlineDB';
 
 const STATUS_COLORS = {
   completed: 'text-primary-400 bg-primary-500/10',
@@ -40,18 +44,21 @@ const DATE_PRESETS = [
   { label: 'Last 30 days', getFrom: () => getDateDaysAgo(30), getTo: () => new Date().toISOString().split('T')[0] },
 ];
 
-function buildHistoryParams(cursor, dateFrom, dateTo, asset, statuses) {
+function buildHistoryParams(cursor, dateFrom, dateTo, asset, statuses, direction, walletId) {
   const params = { limit: 20 };
+  if (walletId) params.wallet_id = walletId;
   if (cursor) params.cursor = cursor;
   if (dateFrom) params.from = dateFrom;
   if (dateTo) params.to = dateTo;
   if (asset) params.asset = asset;
   if (statuses && statuses.length > 0) params.status = statuses.join(',');
+  if (direction && direction !== 'all') params.direction = direction;
   return params;
 }
 
 export default function TransactionHistory() {
   const navigate = useNavigate();
+  const { activeWalletId } = useWallet();
   const [searchParams, setSearchParams] = useSearchParams();
   const { t } = useTranslation();
   const { isOnline } = useOnlineStatus();
@@ -139,9 +146,16 @@ export default function TransactionHistory() {
   const [reportType, setReportType] = useState('other');
   const [reportDesc, setReportDesc] = useState('');
   const [reportLoading, setReportLoading] = useState(false);
+  const [confirmReport, setConfirmReport] = useState(false); // ConfirmModal open state for report submission
   const [selectedTx, setSelectedTx] = useState(null); // tx detail modal
   const [copiedHash, setCopiedHash] = useState(false);
   const sentinelRef = useRef(null);
+  const txParam = searchParams.get('tx');
+  useEffect(() => {
+    if (!txParam) return;
+    const match = transactions.find((t) => t.tx_hash === txParam);
+    if (match) setSelectedTx(match);
+  }, [txParam, transactions]);
   const SCROLL_KEY = 'txhistory_scroll';
 
   const fetchInitial = useCallback(async () => {
@@ -172,7 +186,7 @@ export default function TransactionHistory() {
 
     // Online — fetch fresh and persist
     try {
-      const params = buildHistoryParams(null, dateFrom, dateTo, asset, selectedStatuses);
+      const params = buildHistoryParams(null, dateFrom, dateTo, asset, selectedStatuses, filter, activeWalletId);
       const r = await api.get('/payments/history', { params });
       const txList = r.data.transactions;
       setTransactions(txList);
@@ -181,7 +195,7 @@ export default function TransactionHistory() {
       setFromCache(false);
 
       // Only cache the unfiltered first page
-      if (!dateFrom && !dateTo && !asset && selectedStatuses.length === 0) {
+      if (!dateFrom && !dateTo && !asset && selectedStatuses.length === 0 && filter === 'all') {
         await setCacheEntry('history', txList);
       }
     } catch {
@@ -205,7 +219,7 @@ export default function TransactionHistory() {
     } finally {
       setLoading(false);
     }
-  }, [dateFrom, dateTo, asset, selectedStatuses, t]);
+  }, [dateFrom, dateTo, asset, selectedStatuses, filter, t]);
 
   useEffect(() => {
     fetchInitial();
@@ -223,7 +237,7 @@ export default function TransactionHistory() {
   const loadMore = useCallback(() => {
     if (nextCursor && !loadingMore) {
       setLoadingMore(true);
-      const params = buildHistoryParams(nextCursor, dateFrom, dateTo, asset);
+      const params = buildHistoryParams(nextCursor, dateFrom, dateTo, asset, selectedStatuses, filter, activeWalletId);
       api
         .get('/payments/history', { params })
         .then((r) => {
@@ -234,7 +248,7 @@ export default function TransactionHistory() {
         .catch(() => {})
         .finally(() => setLoadingMore(false));
     }
-  }, [nextCursor, loadingMore, dateFrom, dateTo, asset]);
+  }, [nextCursor, loadingMore, dateFrom, dateTo, asset, selectedStatuses, filter]);
 
   // IntersectionObserver: load next page when sentinel scrolls into view
   useEffect(() => {
@@ -247,31 +261,13 @@ export default function TransactionHistory() {
       },
       { rootMargin: '200px' }
     );
-  }, [currentPage, setSearchParams]);
-
-  const loadMore = () => {
-    if (!nextCursor) return;
-    setLoadingMore(true);
-    const nextPage = currentPage + 1;
-    const params = buildHistoryParams(nextCursor, dateFrom, dateTo, asset, selectedStatuses);
-    api
-      .get('/payments/history', { params })
-      .then((r) => {
-        setTransactions((prev) => [...prev, ...r.data.transactions]);
-        setHasMore(r.data.has_more);
-        setNextCursor(r.data.next_cursor || null);
-        setCurrentPage(nextPage);
-      })
-      .catch(() => {})
-      .finally(() => setLoadingMore(false));
-  };
+    observer.observe(sentinelRef.current);
+    return () => observer.disconnect();
+  }, [hasMore, loadingMore, loadMore]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return transactions.filter((tx) => {
-      if (filter === 'sent' && tx.direction !== 'sent') return false;
-      if (filter === 'received' && tx.direction !== 'received') return false;
-      if (selectedStatuses.length > 0 && !selectedStatuses.includes(tx.status)) return false;
       if (!q) return true;
       const memo = (tx.memo || '').toLowerCase();
       const sender = (tx.sender_wallet || '').toLowerCase();
@@ -284,26 +280,34 @@ export default function TransactionHistory() {
         amountStr.includes(q)
       );
     });
-  }, [transactions, filter, search, selectedStatuses]);
+  }, [transactions, search]);
 
   async function handleExportCSV() {
     if (exporting) return;
     setExporting(true);
     try {
-      const params = { format: 'csv' };
+      const params = {};
       if (dateFrom) params.from = dateFrom;
       if (dateTo) params.to = dateTo;
       if (asset) params.asset = asset;
       if (filter !== 'all') params.direction = filter;
-      const res = await api.get('/payments/history', { params, responseType: 'blob' });
+      const res = await api.get('/payments/export', { params, responseType: 'blob' });
       const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `transactions_${new Date().toISOString().split('T')[0]}.csv`;
+      const cd = res.headers?.['content-disposition'] || '';
+      const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+      a.download = m ? decodeURIComponent(m[1]) : `transactions_${new Date().toISOString().split('T')[0]}.csv`;
       a.click();
       URL.revokeObjectURL(url);
-    } catch {
-      alert('Export failed. Please try again.');
+    } catch (err) {
+      let msg = 'Export failed. Please try again.';
+      try {
+        const data = err.response?.data;
+        const text = data instanceof Blob ? await data.text() : null;
+        msg = (text && JSON.parse(text).error) || msg;
+      } catch { /* keep default message */ }
+      toast.error(msg);
     } finally {
       setExporting(false);
     }
@@ -311,6 +315,10 @@ export default function TransactionHistory() {
 
   async function handleSubmitReport(e) {
     e.preventDefault();
+    setConfirmReport(true);
+  }
+
+  async function doSubmitReport() {
     setReportLoading(true);
     try {
       await api.post('/support/tickets', {
@@ -318,13 +326,13 @@ export default function TransactionHistory() {
         type: reportType,
         description: reportDesc,
       });
+      setConfirmReport(false);
       setReportTx(null);
       setReportDesc('');
       setReportType('other');
-      // toast is imported via react-hot-toast in other pages; use alert as fallback
-      alert('Issue reported. Our team will review it shortly.');
+      toast.success('Issue reported. Our team will review it shortly.');
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to submit report');
+      toast.error(err.response?.data?.error || 'Failed to submit report');
     } finally {
       setReportLoading(false);
     }
@@ -570,7 +578,7 @@ export default function TransactionHistory() {
           aria-live="polite"
           className="flex items-center justify-between text-xs text-gray-500 mb-3 px-1"
         >
-          <span>Page {currentPage}</span>
+          <span>{transactions.length} loaded</span>
           <span>
             {activeFilterCount > 0
               ? `Showing ${filtered.length} transaction${filtered.length !== 1 ? 's' : ''}`
@@ -604,112 +612,122 @@ export default function TransactionHistory() {
         </div>
       ) : (
         <>
-          <div className="space-y-3">
-            {filtered.map((tx) => (
-              <button
-                key={tx.id}
-                onClick={() => setSelectedTx(tx)}
-                className="w-full bg-gray-900 rounded-xl p-4 hover:bg-gray-800 transition-colors text-left"
-              >
-                <div className="flex items-start gap-3">
-                  <div
-                    className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-                      tx.direction === 'sent'
-                        ? 'bg-red-500/10 text-red-400'
-                        : 'bg-primary-500/10 text-primary-400'
-                    }`}
+          <FixedSizeList
+            height={Math.min(filtered.length * 100, 600)}
+            itemCount={filtered.length}
+            itemSize={100}
+            width="100%"
+            overscanCount={5}
+          >
+            {({ index, style }) => {
+              const tx = filtered[index];
+              return (
+                <div style={style} key={tx.id} className="pb-3">
+                  <button
+                    onClick={() => setSelectedTx(tx)}
+                    className="w-full bg-gray-900 rounded-xl p-4 hover:bg-gray-800 transition-colors text-left"
                   >
-                    {tx.direction === 'sent' ? <Send size={16} /> : <Download size={16} />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm font-medium text-white capitalize">{tx.direction}</p>
-                      <span
-                        className={`text-sm font-bold ${
-                          tx.direction === 'sent' ? 'text-red-400' : 'text-primary-400'
+                    <div className="flex items-start gap-3">
+                      <div
+                        className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
+                          tx.direction === 'sent'
+                            ? 'bg-red-500/10 text-red-400'
+                            : 'bg-primary-500/10 text-primary-400'
                         }`}
                       >
-                        {tx.direction === 'sent' ? '-' : '+'}
-                        {tx.amount} {tx.asset}
-                      </span>
-                    </div>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      {tx.direction === 'sent'
-                        ? `${t('history.to')} ${truncateAddress(tx.recipient_wallet)}`
-                        : `${t('history.from')} ${truncateAddress(tx.sender_wallet)}`}
-                    </p>
-                    {tx.memo && <p className="text-xs text-gray-600 mt-0.5">&quot;{tx.memo}&quot;</p>}
-                    <div className="flex items-center justify-between mt-2">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`text-xs px-2 py-0.5 rounded-full ${
-                            STATUS_COLORS[tx.status] || STATUS_COLORS.pending
-                          }`}
-                        >
-                          {tx.status === 'confirming' ? (
-                            <span className="flex items-center gap-1">
-                              <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse inline-block" />
-                              Confirming...
-                            </span>
-                          ) : tx.status}
-                        </span>
-                        {tx.type === 'claimable_balance' && tx.status === 'pending' && (() => {
-                          const daysLeft = getDaysUntilExpiry(tx.created_at);
-                          if (daysLeft > 0 && daysLeft <= 7) {
-                            return (
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400">
-                                ⏰ Expires in {daysLeft}d
-                              </span>
-                            );
-                          }
-                          return null;
-                        })()}
+                        {tx.direction === 'sent' ? <Send size={16} /> : <Download size={16} />}
                       </div>
-                      <div className="flex items-center gap-2">
-                        <div className="text-right">
-                          <span className="text-xs text-gray-500 block">
-                            {new Date(tx.ledger_close_time || tx.created_at).toLocaleDateString('en-GB', {
-                              day: 'numeric',
-                              month: 'short',
-                              year: 'numeric',
-                            })}
-                          </span>
-                          {tx.ledger_close_time && tx.created_at && (
-                            <span className="text-xs text-gray-700 block" title={`Submitted: ${new Date(tx.created_at).toLocaleString()}`}>
-                              Ledger: {new Date(tx.ledger_close_time).toLocaleTimeString()}
-                            </span>
-                          )}
-                        </div>
-                        {tx.tx_hash && (
-                          <a
-                            href={`https://stellar.expert/explorer/${process.env.REACT_APP_STELLAR_NETWORK || 'testnet'}/tx/${tx.tx_hash}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-gray-500 hover:text-primary-400 transition-colors"
-                            onClick={(e) => e.stopPropagation()}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-medium text-white capitalize">{tx.direction}</p>
+                          <span
+                            className={`text-sm font-bold ${
+                              tx.direction === 'sent' ? 'text-red-400' : 'text-primary-400'
+                            }`}
                           >
-                            <ExternalLink size={12} aria-hidden="true" />
-                          </a>
-                        )}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setReportTx(tx);
-                          }}
-                          className="text-gray-500 hover:text-yellow-400 transition-colors"
-                          aria-label="Report issue with this transaction"
-                          title="Report Issue"
-                        >
-                          <Flag size={12} />
-                        </button>
+                            {tx.direction === 'sent' ? '-' : '+'}
+                            {tx.amount} {tx.asset}
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          {tx.direction === 'sent'
+                            ? `${t('history.to')} ${truncateAddress(tx.recipient_wallet)}`
+                            : `${t('history.from')} ${truncateAddress(tx.sender_wallet)}`}
+                        </p>
+                        {tx.memo && <p className="text-xs text-gray-600 mt-0.5">&quot;{tx.memo}&quot;</p>}
+                        <div className="flex items-center justify-between mt-2">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full ${
+                                STATUS_COLORS[tx.status] || STATUS_COLORS.pending
+                              }`}
+                            >
+                              {tx.status === 'confirming' ? (
+                                <span className="flex items-center gap-1">
+                                  <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse inline-block" />
+                                  Confirming...
+                                </span>
+                              ) : tx.status}
+                            </span>
+                            {tx.type === 'claimable_balance' && tx.status === 'pending' && (() => {
+                              const daysLeft = getDaysUntilExpiry(tx.created_at);
+                              if (daysLeft > 0 && daysLeft <= 7) {
+                                return (
+                                  <span className="text-xs px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400">
+                                    ⏰ Expires in {daysLeft}d
+                                  </span>
+                                );
+                              }
+                              return null;
+                            })()}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-right">
+                              <span className="text-xs text-gray-500 block">
+                                {new Date(tx.ledger_close_time || tx.created_at).toLocaleDateString('en-GB', {
+                                  day: 'numeric',
+                                  month: 'short',
+                                  year: 'numeric',
+                                })}
+                              </span>
+                              {tx.ledger_close_time && tx.created_at && (
+                                <span className="text-xs text-gray-700 block" title={`Submitted: ${new Date(tx.created_at).toLocaleString()}`}>
+                                  Ledger: {new Date(tx.ledger_close_time).toLocaleTimeString()}
+                                </span>
+                              )}
+                            </div>
+                            {tx.tx_hash && (
+                              <a
+                                href={explorerTxUrl(tx.tx_hash)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-gray-500 hover:text-primary-400 transition-colors"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <ExternalLink size={12} aria-hidden="true" />
+                              </a>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setReportTx(tx);
+                              }}
+                              className="text-gray-500 hover:text-yellow-400 transition-colors"
+                              aria-label="Report issue with this transaction"
+                              title="Report Issue"
+                            >
+                              <Flag size={12} />
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  </button>
                 </div>
-              </button>
-            ))}
-          </div>
+              );
+            }}
+          </FixedSizeList>
           {hasMore && (
             <div ref={sentinelRef} className="flex justify-center py-4" aria-live="polite" aria-label="Loading more transactions">
               {loadingMore && <Loader2 size={20} className="animate-spin text-primary-400" />}
@@ -807,7 +825,7 @@ export default function TransactionHistory() {
               {/* Stellar Explorer Link */}
               {selectedTx.tx_hash && (
                 <a
-                  href={`https://stellar.expert/explorer/testnet/tx/${selectedTx.tx_hash}`}
+                  href={explorerTxUrl(selectedTx.tx_hash)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="w-full flex items-center justify-center gap-2 bg-primary-500 hover:bg-primary-600 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors"
@@ -871,6 +889,18 @@ export default function TransactionHistory() {
           </div>
         </div>
       )}
+
+      {/* Confirm Report Submission Modal */}
+      <ConfirmModal
+        isOpen={confirmReport}
+        onClose={() => setConfirmReport(false)}
+        onConfirm={doSubmitReport}
+        title="Submit Report"
+        message={`Submit a report for this transaction? Our team will review the issue and follow up with you.`}
+        confirmLabel="Submit Report"
+        confirmVariant="primary"
+        loading={reportLoading}
+      />
     </div>
   );
 }

@@ -205,8 +205,8 @@ describe('TransactionHistory', () => {
       expect(link).toBeInTheDocument();
     });
 
-    it('builds the URL using REACT_APP_STELLAR_NETWORK', async () => {
-      const network = process.env.REACT_APP_STELLAR_NETWORK || 'testnet';
+    it('builds the URL using the configured network label', async () => {
+      const network = process.env.REACT_APP_STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
       mockWithTx(txWithHash);
       renderComponent();
       const link = await screen.findByRole('link', { name: /view transaction on stellar explorer/i });

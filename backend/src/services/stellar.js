@@ -4,19 +4,32 @@ const logger = require('../utils/logger');
 const { withRetry, retryWithBackoff } = require('../utils/retry');
 const { withTimeout } = require('../utils/withTimeout');
 const { enqueue } = require('../utils/txQueue');
+const { checkMemoRequired } = require('./memoRequired');
+const { getRpc: getSorobanRpc, waitForSorobanTx } = require('../config/soroban');
 const {
   AccountResponseSchema,
   TransactionSubmitResponseSchema,
   TransactionPageSchema,
+  TransactionRecordSchema,
+  OperationPageSchema,
   PathPageSchema,
   validateHorizonResponse,
 } = require('../utils/horizonSchemas');
-const { horizonRequestDuration } = require('../utils/metrics');
+const {
+  horizonRequestDuration,
+  horizonFallbackActive,
+  horizonFallbackDurationSeconds,
+  horizonFallbackAlertsTotal,
+} = require('../utils/metrics');
 
 const isTestnet = process.env.STELLAR_NETWORK !== 'mainnet';
 const networkPassphrase = isTestnet
   ? StellarSdk.Networks.TESTNET
   : StellarSdk.Networks.PUBLIC;
+const CLAIMABLE_BALANCE_EXPIRY_DAYS = Math.max(
+  1,
+  parseInt(process.env.CLAIMABLE_BALANCE_EXPIRY_DAYS || '30', 10) || 30,
+);
 
 /**
  * Validate that a transaction's network passphrase matches the configured network.
@@ -63,17 +76,119 @@ function isNetworkError(err) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// BE-036: Alert when Horizon fallback has been active for longer than expected.
+//
+// `fallbackActivatedAt` tracks when we most recently *started* a continuous
+// run of successful fallback-node usage. It is cleared as soon as a request
+// succeeds on the primary again, so "duration on fallback" reflects the
+// current continuous activation, not lifetime fallback usage. A periodic
+// checker compares that duration against a configurable threshold and logs
+// an alert (rate-limited) when it's exceeded — this is what lets operators
+// notice "we've been degraded for 20 minutes" rather than discovering it via
+// a harder-to-diagnose downstream incident.
+// ---------------------------------------------------------------------------
+let fallbackActivatedAt = null;
+let lastFallbackAlertAt = null;
+
+const FALLBACK_ALERT_THRESHOLD_MS =
+  parseInt(process.env.HORIZON_FALLBACK_ALERT_THRESHOLD_MS || '', 10) || 15 * 60 * 1000; // 15 min default
+const FALLBACK_ALERT_REPEAT_MS =
+  parseInt(process.env.HORIZON_FALLBACK_ALERT_REPEAT_MS || '', 10) || 15 * 60 * 1000; // don't spam more than every 15 min
+
+function markFallbackActive() {
+  if (!fallbackActivatedAt) fallbackActivatedAt = Date.now();
+  horizonFallbackActive.set(1);
+}
+
+function markPrimaryHealthy() {
+  fallbackActivatedAt = null;
+  lastFallbackAlertAt = null;
+  horizonFallbackActive.set(0);
+  horizonFallbackDurationSeconds.set(0);
+}
+
+/**
+ * Current continuous fallback-activation duration in ms, or 0 if on primary.
+ */
+function getFallbackDurationMs() {
+  return fallbackActivatedAt ? Date.now() - fallbackActivatedAt : 0;
+}
+
+/**
+ * Returns the current Horizon endpoint status for health checks / dashboards.
+ */
+function getHorizonEndpointStatus() {
+  const durationMs = getFallbackDurationMs();
+  return {
+    node: fallbackActivatedAt ? 'fallback' : 'primary',
+    fallbackConfigured: Boolean(fallbackServer),
+    fallbackActiveDurationMs: durationMs,
+    fallbackActivatedAt: fallbackActivatedAt ? new Date(fallbackActivatedAt).toISOString() : null,
+    alertThresholdMs: FALLBACK_ALERT_THRESHOLD_MS,
+    alertExceeded: durationMs > FALLBACK_ALERT_THRESHOLD_MS,
+  };
+}
+
+/**
+ * Periodic check (intended to be called on an interval, e.g. every minute)
+ * that alerts when fallback has been continuously active longer than the
+ * configured threshold. Re-alerts at most once per FALLBACK_ALERT_REPEAT_MS
+ * to avoid log/alert spam while the condition persists.
+ */
+function checkFallbackDuration() {
+  horizonFallbackDurationSeconds.set(getFallbackDurationMs() / 1000);
+
+  if (!fallbackActivatedAt) return false;
+
+  const durationMs = getFallbackDurationMs();
+  if (durationMs <= FALLBACK_ALERT_THRESHOLD_MS) return false;
+
+  const now = Date.now();
+  if (lastFallbackAlertAt && now - lastFallbackAlertAt < FALLBACK_ALERT_REPEAT_MS) return false;
+
+  lastFallbackAlertAt = now;
+  horizonFallbackAlertsTotal.inc();
+  logger.error('ALERT: Horizon fallback node has been active longer than expected', {
+    fallbackUrl,
+    activeDurationMs: durationMs,
+    thresholdMs: FALLBACK_ALERT_THRESHOLD_MS,
+  });
+  return true;
+}
+
+let fallbackDurationCheckTimer = null;
+
+/**
+ * Start the periodic fallback-duration checker. Safe to call multiple times
+ * (no-op if already started). Exported so app startup can wire it in.
+ */
+function startFallbackDurationMonitor(intervalMs = 60 * 1000) {
+  if (fallbackDurationCheckTimer) return fallbackDurationCheckTimer;
+  fallbackDurationCheckTimer = setInterval(checkFallbackDuration, intervalMs);
+  if (typeof fallbackDurationCheckTimer.unref === 'function') fallbackDurationCheckTimer.unref();
+  return fallbackDurationCheckTimer;
+}
+
+function stopFallbackDurationMonitor() {
+  if (fallbackDurationCheckTimer) {
+    clearInterval(fallbackDurationCheckTimer);
+    fallbackDurationCheckTimer = null;
+  }
+}
+
 /**
  * Execute fn(server) with automatic failover to the fallback node on network errors only.
- * Records Horizon call duration via Prometheus.
+ * Records Horizon call duration via Prometheus, and tracks fallback activation
+ * duration for BE-036 alerting.
  */
-async function withFallback(fn, logger = require('../utils/logger')) {
 async function withFallback(fn, operation = 'unknown') {
   const end = horizonRequestDuration.startTimer({ operation });
   try {
     const result = await fn(server);
     end({ success: 'true' });
     logger.debug('Horizon request succeeded', { node: 'primary', url: primaryUrl });
+    markPrimaryHealthy();
     return result;
   } catch (primaryErr) {
     if (!isNetworkError(primaryErr) || !fallbackServer) {
@@ -89,6 +204,8 @@ async function withFallback(fn, operation = 'unknown') {
       const result = await fn(fallbackServer);
       end({ success: 'true' });
       logger.info('Horizon request succeeded on fallback node', { url: fallbackUrl });
+      markFallbackActive();
+      checkFallbackDuration();
       return result;
     } catch (fallbackErr) {
       end({ success: 'false' });
@@ -159,18 +276,31 @@ async function getBalance(publicKey) {
 
     return {
       account_exists: true,
+      num_subentries: numSubentries,
       balances: account.balances.map(b => {
         if (b.asset_type === 'native') {
           const total = parseFloat(b.balance);
           const available = Math.max(0, total - minBalance);
           return {
+            asset_type: 'native',
+            asset_code: 'XLM',
+            asset_issuer: null,
             asset: 'XLM',
             balance: b.balance,
             available_balance: available.toFixed(7),
             min_balance: minBalance.toFixed(7),
+            minimum_balance_reserve: minBalance.toFixed(7),
           };
         }
-        return { asset: b.asset_code, balance: b.balance };
+        return {
+          asset_type: b.asset_type,
+          asset_code: b.asset_code,
+          asset_issuer: b.asset_issuer || null,
+          asset: b.asset_code,
+          balance: b.balance,
+          limit: b.limit || null,
+          is_authorized: b.is_authorized ?? true,
+        };
       }),
     };
   } catch (e) {
@@ -232,6 +362,18 @@ function resolveAsset(asset) {
   return new StellarSdk.Asset(asset, issuer);
 }
 
+/**
+ * Get the Stellar Asset Contract (SAC) address for a given asset.
+ * This derives the contract address from the asset code and issuer.
+ * 
+ * @param {string} asset - Asset code (e.g., 'USDC', 'XLM')
+ * @returns {string} SAC contract address
+ */
+function getAssetContractAddress(asset) {
+  const assetObj = resolveAsset(asset);
+  return assetObj.contractId(networkPassphrase);
+}
+
 async function checkTrustline(recipientPublicKey, assetObj) {
   let recipientAccount;
   try {
@@ -277,8 +419,19 @@ function buildStellarMemo(memo, memoType = 'text') {
   const type = (memoType || 'text').toLowerCase();
 
   switch (type) {
-    case 'text':
-      return StellarSdk.Memo.text(memo.slice(0, 28));
+    case 'text': {
+      // Issue #1163: Stellar text memos are limited to 28 bytes (not characters).
+      // Reject memos that exceed this limit instead of silently truncating them,
+      // which corrupts exchange deposit memos and makes encrypt_memo unusable.
+      const memoBytes = Buffer.byteLength(memo, 'utf8');
+      if (memoBytes > 28) {
+        throw memoValidationError(
+          `Text memo exceeds 28 bytes (${memoBytes} bytes). ` +
+          `Use memo_type=hash for longer memos like encrypted data.`
+        );
+      }
+      return StellarSdk.Memo.text(memo);
+    }
     case 'id': {
       if (!/^\d+$/.test(memo)) throw memoValidationError('Memo ID must be a numeric string');
       try {
@@ -327,6 +480,69 @@ async function resolveFederationAddress(address) {
 // Claimable balance (fallback for non-existent recipient accounts)
 // ---------------------------------------------------------------------------
 
+async function getEffectsForTransaction(transactionHash) {
+  return withRetry(
+    () => withFallback(
+      (horizon) => horizon.effects().forTransaction(transactionHash).limit(200).call(),
+      'claimableBalanceEffects',
+    ),
+    { maxAttempts: 3, label: 'claimableBalanceEffects' },
+  );
+}
+
+async function getClaimableBalanceIdForTransaction(transactionHash) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const effects = await getEffectsForTransaction(transactionHash);
+    const createdEffect = effects.records?.find(
+      (effect) => effect.type === 'claimable_balance_created' && effect.balance_id,
+    );
+    if (createdEffect) return createdEffect.balance_id;
+    if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 200 * (2 ** attempt)));
+  }
+
+  const error = new Error(`Horizon did not return a claimable balance ID for transaction ${transactionHash}`);
+  error.status = 502;
+  throw error;
+}
+
+function getClaimableBalanceExpiry(balance) {
+  const visitPredicate = (predicate) => {
+    if (!predicate || typeof predicate !== 'object') return null;
+    if (predicate.abs_before) {
+      const expiresAt = new Date(predicate.abs_before);
+      return Number.isNaN(expiresAt.getTime()) ? null : expiresAt;
+    }
+    for (const key of ['not', 'and', 'or']) {
+      const children = Array.isArray(predicate[key]) ? predicate[key] : [predicate[key]];
+      for (const child of children) {
+        const expiresAt = visitPredicate(child);
+        if (expiresAt) return expiresAt;
+      }
+    }
+    return null;
+  };
+
+  for (const claimant of balance.claimants || []) {
+    let predicate = claimant.predicate;
+    if (typeof predicate === 'string') {
+      try { predicate = JSON.parse(predicate); } catch { continue; }
+    }
+    const expiresAt = visitPredicate(predicate);
+    if (expiresAt) return expiresAt;
+  }
+  return null;
+}
+
+async function getClaimableBalanceRecord(balanceId) {
+  return withRetry(
+    () => withFallback(
+      (horizon) => horizon.claimableBalances().claimableBalance(balanceId).call(),
+      'claimableBalanceRecord',
+    ),
+    { maxAttempts: 2, label: 'claimableBalanceRecord' },
+  );
+}
+
 async function createClaimableBalance({
   senderPublicKey,
   encryptedSecretKey,
@@ -340,6 +556,12 @@ async function createClaimableBalance({
   const assetObj = resolveAsset(asset);
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const expiresAt = new Date(
+    Math.floor((Date.now() + CLAIMABLE_BALANCE_EXPIRY_DAYS * 24 * 60 * 60 * 1000) / 1000) * 1000,
+  );
+  const expiryPredicate = StellarSdk.Claimant.predicateBeforeAbsoluteTime(
+    String(Math.floor(expiresAt.getTime() / 1000)),
+  );
   const rawAccount = await withRetry(() => withFallback(s => s.loadAccount(senderPublicKey), logger), { label: 'loadAccount(sender)' });
   const senderAccount = validateHorizonResponse(AccountResponseSchema, rawAccount, 'loadAccount(sender)');
 
@@ -351,7 +573,8 @@ async function createClaimableBalance({
       asset: assetObj,
       amount: String(amount),
       claimants: [
-        new StellarSdk.Claimant(recipientPublicKey, StellarSdk.Claimant.predicateUnconditional())
+        new StellarSdk.Claimant(recipientPublicKey, expiryPredicate),
+        new StellarSdk.Claimant(senderPublicKey, StellarSdk.Claimant.predicateNot(expiryPredicate)),
       ]
     }))
     .setTimeout(30);
@@ -364,7 +587,14 @@ async function createClaimableBalance({
 
   const rawResult = await withRetry(() => withFallback(s => s.submitTransaction(transaction), logger), { label: 'submitTransaction' });
   const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(claimableBalance)');
-  return { transactionHash: result.hash, ledger: result.ledger };
+  const claimableBalanceId = await getClaimableBalanceIdForTransaction(result.hash);
+  return {
+    transactionHash: result.hash,
+    ledger: result.ledger,
+    claimableBalanceId,
+    expiresAt,
+    claimableAmount: String(amount),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +671,15 @@ async function _sendPaymentOnce({
   // Guard against testnet/mainnet mixup
   validateNetworkPassphrase(networkPassphrase);
 
+  // Enforce memo requirement for known exchange destinations
+  const memoRequired = await checkMemoRequired(recipientPublicKey);
+  if (memoRequired && !memo) {
+    const err = new Error('The destination account requires a transaction memo. Please add a memo and retry.');
+    err.status = 400;
+    err.code = 'MEMO_REQUIRED';
+    throw err;
+  }
+
   const assetObj = resolveAsset(asset);
 
   if (asset !== 'XLM') {
@@ -481,7 +720,13 @@ async function _sendPaymentOnce({
         { label: 'submitTransaction(payment)' }
       );
       const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(payment)');
-      return { transactionHash: result.hash, ledger: result.ledger, type: 'payment' };
+      return {
+        transactionHash: result.hash,
+        ledger: result.ledger,
+        type: 'payment',
+        successful: result.successful,
+        maxTime: transaction.timeBounds?.maxTime,
+      };
     } catch (err) {
       if (isBadSeq(err) && attempt < MAX_SEQ_RETRIES - 1) {
         logger.warn('tx_bad_seq detected, retrying with fresh sequence number', {
@@ -671,6 +916,62 @@ async function getTransactions(publicKey, limit = 20) {
   }
 }
 
+/**
+ * Verify that a given transaction hash corresponds to a successful Stellar
+ * transaction that pays at least `minAmount` of `asset` to `destination`.
+ * Used to confirm claimed payment requests before trusting a caller-supplied
+ * txHash (issue #878).
+ *
+ * @returns {Promise<{verified: boolean, reason?: string}>}
+ */
+async function verifyIncomingPayment({ txHash, destination, asset, minAmount }) {
+  if (typeof txHash !== 'string' || !/^[0-9a-f]{64}$/i.test(txHash)) {
+    return { verified: false, reason: 'txHash must be a 64-character hex transaction hash' };
+  }
+  const normalizedHash = txHash.toLowerCase();
+
+  let txRecord;
+  try {
+    const raw = await withFallback(s => s.transactions().transaction(normalizedHash).call());
+    txRecord = validateHorizonResponse(TransactionRecordSchema, raw, 'transactions.transaction');
+  } catch (e) {
+    if (e.response?.status === 404) {
+      return { verified: false, reason: 'Transaction not found' };
+    }
+    throw e;
+  }
+
+  if (!txRecord.successful) {
+    return { verified: false, reason: 'Transaction was not successful' };
+  }
+
+  const raw = await withFallback(s => s.operations().forTransaction(normalizedHash).call());
+  const opsPage = validateHorizonResponse(OperationPageSchema, raw, 'operations.forTransaction');
+
+  const assetObj = resolveAsset(asset);
+  const minAmountNum = parseFloat(minAmount);
+
+  const matched = opsPage.records.some(op => {
+    if (!['payment', 'path_payment_strict_receive', 'path_payment_strict_send'].includes(op.type)) {
+      return false;
+    }
+    if (op.to !== destination) return false;
+
+    const assetMatches = assetObj.isNative()
+      ? op.asset_type === 'native'
+      : op.asset_code === assetObj.getCode() && op.asset_issuer === assetObj.getIssuer();
+    if (!assetMatches) return false;
+
+    return parseFloat(op.amount) >= minAmountNum;
+  });
+
+  if (!matched) {
+    return { verified: false, reason: `No payment of at least ${minAmount} ${asset} to ${destination} found on this transaction` };
+  }
+
+  return { verified: true };
+}
+
 // Issue AFRI asset to a recipient
 async function issueAsset(recipientPublicKey, amount) {
   const issuerSecret = decryptPrivateKey(process.env.AFRI_ISSUER_SECRET);
@@ -847,7 +1148,12 @@ async function sendPathPayment({
       () => withFallback(s => s.submitTransaction(transaction), 'submitTransaction'),
       { label: 'submitTransaction(pathPayment)' }
     );
-    return { transactionHash: result.hash, ledger: result.ledger };
+    return {
+      transactionHash: result.hash,
+      ledger: result.ledger,
+      successful: result.successful,
+      maxTime: transaction.timeBounds?.maxTime,
+    };
   }, senderPublicKey, senderKeypair);
 }
 
@@ -904,7 +1210,12 @@ async function sendStrictReceivePathPayment({
 
   const rawResult = await withFallback(s => s.submitTransaction(transaction));
   const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(strictReceive)');
-  return { transactionHash: result.hash, ledger: result.ledger };
+  return {
+    transactionHash: result.hash,
+    ledger: result.ledger,
+    successful: result.successful,
+    maxTime: transaction.timeBounds?.maxTime,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,13 +1312,10 @@ async function addAccountSigner({ ownerPublicKey, encryptedSecretKey, signerPubl
     .setTimeout(30)
     .build();
 
-  transaction.sign(distributionKeypair);
-
-  const result = await server.submitTransaction(transaction);
-  return {
-    transactionHash: result.hash,
-    ledger: result.ledger
-  };
+  tx.sign(ownerKeypair);
+  const rawResult = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addSigner)' });
+  const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(addSigner)');
+  return { transactionHash: result.hash };
 }
 
 // Get AFRI asset information
@@ -1064,13 +1372,6 @@ async function getStellarStats() {
     logger.error('Error fetching Stellar stats', { error: err.message });
     throw err;
   }
-}
-
-
-  tx.sign(ownerKeypair);
-  const rawResult = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addSigner)' });
-  const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(addSigner)');
-  return { transactionHash: result.hash };
 }
 
 /**
@@ -1356,9 +1657,6 @@ async function getAssetMetadataByCodeAndIssuer(code, issuer) {
 // ---------------------------------------------------------------------------
 
 const MULTISIG_APPROVAL_CONTRACT_ID = process.env.MULTISIG_APPROVAL_CONTRACT_ID;
-const sorobanRpcUrl = process.env.SOROBAN_RPC_URL || (isTestnet
-  ? 'https://soroban-testnet.stellar.org'
-  : 'https://mainnet.soroban.stellar.org');
 const SOROBAN_CONFIRMATION_TIMEOUT_MS = parseInt(process.env.SOROBAN_CONFIRMATION_TIMEOUT_MS || '30000', 10);
 
 async function initMultisigApproval({ publicKey, encryptedSecretKey }) {
@@ -1370,7 +1668,7 @@ async function initMultisigApproval({ publicKey, encryptedSecretKey }) {
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const keypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const rpc = new StellarSdk.SorobanRpc.Server(sorobanRpcUrl);
+  const rpc = getSorobanRpc();
   const account = await rpc.getAccount(publicKey);
   const contract = new StellarSdk.Contract(MULTISIG_APPROVAL_CONTRACT_ID);
 
@@ -1399,17 +1697,7 @@ async function initMultisigApproval({ publicKey, encryptedSecretKey }) {
     throw Object.assign(new Error(`register_business failed: ${result.errorResult}`), { status: 400 });
   }
 
-  const maxIterations = Math.ceil(SOROBAN_CONFIRMATION_TIMEOUT_MS / 1000);
-  let response = result;
-  let iterations = 0;
-  while (response.status === 'PENDING' || response.status === 'NOT_FOUND') {
-    if (iterations >= maxIterations) {
-      throw Object.assign(new Error('Multisig approval confirmation timeout'), { status: 504 });
-    }
-    await new Promise((r) => setTimeout(r, 1000));
-    response = await rpc.getTransaction(result.hash);
-    iterations++;
-  }
+  const response = await waitForSorobanTx(rpc, result, { timeoutMs: SOROBAN_CONFIRMATION_TIMEOUT_MS });
 
   if (response.status !== 'SUCCESS') {
     throw Object.assign(new Error(`Multisig approval transaction failed: ${response.status}`), { status: 400 });
@@ -1431,17 +1719,26 @@ module.exports = {
   sendPayment,
   sendBatchPayment,
   getTransactions,
+  verifyIncomingPayment,
   encryptPrivateKey,
   decryptPrivateKey,
   fetchFee,
   fetchFeeStats,
   feeForPriority,
   checkHorizonHealth,
+  getHorizonEndpointStatus,
+  checkFallbackDuration,
+  startFallbackDurationMonitor,
+  stopFallbackDurationMonitor,
   findPaymentPath,
   sendPathPayment,
   validateBatchRecipient,
   resolveFederationAddress,
   createClaimableBalance,
+  getClaimableBalanceIdForTransaction,
+  getEffectsForTransaction,
+    getClaimableBalanceExpiry,
+  getClaimableBalanceRecord,
   addTrustline,
   removeTrustline,
   getTrustlines,
@@ -1457,10 +1754,12 @@ module.exports = {
   setAccountFlags,
   findReceivePath,
   sendStrictReceivePathPayment,
+  withFallback,
   isBadSeq,
   recoverSequence,
   withSequenceRecovery,
   validateNetworkPassphrase,
   getAssetMetadataByCodeAndIssuer,
+  getAssetContractAddress,
   initMultisigApproval,
 };

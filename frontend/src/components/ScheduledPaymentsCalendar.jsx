@@ -1,11 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const MONTHS = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-];
+// Locale-aware names; 2023-01-01 was a Sunday.
+const weekdayNames = (locale) => {
+  const fmt = new Intl.DateTimeFormat(locale, { weekday: 'short' });
+  return Array.from({ length: 7 }, (_, i) => fmt.format(new Date(2023, 0, 1 + i)));
+};
+const monthNames = (locale) => {
+  const fmt = new Intl.DateTimeFormat(locale, { month: 'long' });
+  return Array.from({ length: 12 }, (_, i) => fmt.format(new Date(2023, i, 1)));
+};
 
 // Local-date key (avoids UTC off-by-one from toISOString()).
 const dayKey = (date) =>
@@ -86,6 +91,9 @@ function DayDots({ count }) {
 }
 
 export default function ScheduledPaymentsCalendar({ payments }) {
+  const { t, i18n } = useTranslation();
+  const WEEKDAYS = useMemo(() => weekdayNames(i18n.language), [i18n.language]);
+  const MONTHS = useMemo(() => monthNames(i18n.language), [i18n.language]);
   const today = useMemo(() => startOfDay(new Date()), []);
   const [viewDate, setViewDate] = useState(today); // anchor for month (desktop)
   const [weekAnchor, setWeekAnchor] = useState(today); // anchor for week strip (mobile)
@@ -146,24 +154,24 @@ export default function ScheduledPaymentsCalendar({ payments }) {
     <div className="bg-gray-900 rounded-xl p-3 sm:p-4">
       {/* ── Desktop: month navigation ── */}
       <div className="hidden sm:flex items-center justify-between mb-3">
-        <button type="button" onClick={() => goMonth(-1)} className="p-1.5 rounded-lg hover:bg-gray-800 text-gray-400" aria-label="Previous month">
+        <button type="button" onClick={() => goMonth(-1)} className="p-1.5 rounded-lg hover:bg-gray-800 text-gray-400" aria-label={t('shared.prevMonth', 'Previous month')}>
           <ChevronLeft size={18} />
         </button>
         <h3 className="text-white font-semibold">{MONTHS[month]} {year}</h3>
-        <button type="button" onClick={() => goMonth(1)} className="p-1.5 rounded-lg hover:bg-gray-800 text-gray-400" aria-label="Next month">
+        <button type="button" onClick={() => goMonth(1)} className="p-1.5 rounded-lg hover:bg-gray-800 text-gray-400" aria-label={t('shared.nextMonth', 'Next month')}>
           <ChevronRight size={18} />
         </button>
       </div>
 
       {/* ── Mobile: week navigation ── */}
       <div className="flex sm:hidden items-center justify-between mb-3">
-        <button type="button" onClick={() => goWeek(-1)} className="p-1.5 rounded-lg hover:bg-gray-800 text-gray-400" aria-label="Previous week">
+        <button type="button" onClick={() => goWeek(-1)} className="p-1.5 rounded-lg hover:bg-gray-800 text-gray-400" aria-label={t('shared.prevWeek', 'Previous week')}>
           <ChevronLeft size={18} />
         </button>
         <h3 className="text-white font-semibold text-sm">
           {MONTHS[weekCells[0].getMonth()]} {weekCells[0].getDate()} – {weekCells[6].getDate()}
         </h3>
-        <button type="button" onClick={() => goWeek(1)} className="p-1.5 rounded-lg hover:bg-gray-800 text-gray-400" aria-label="Next week">
+        <button type="button" onClick={() => goWeek(1)} className="p-1.5 rounded-lg hover:bg-gray-800 text-gray-400" aria-label={t('shared.nextWeek', 'Next week')}>
           <ChevronRight size={18} />
         </button>
       </div>
@@ -194,11 +202,11 @@ export default function ScheduledPaymentsCalendar({ payments }) {
         <div className="mt-3 border border-gray-700 rounded-xl bg-gray-800 p-3">
           <div className="flex items-center justify-between mb-2">
             <p className="text-sm font-semibold text-white">
-              {new Date(`${selectedKey}T00:00:00`).toLocaleDateString(undefined, {
+              {new Date(`${selectedKey}T00:00:00`).toLocaleDateString(i18n.language, {
                 weekday: 'long', month: 'long', day: 'numeric',
               })}
             </p>
-            <button type="button" onClick={() => setSelectedKey(null)} className="text-gray-400 hover:text-white" aria-label="Close">
+            <button type="button" onClick={() => setSelectedKey(null)} className="text-gray-400 hover:text-white" aria-label={t('shared.close', 'Close')}>
               <X size={16} />
             </button>
           </div>

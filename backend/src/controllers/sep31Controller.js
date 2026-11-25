@@ -1,7 +1,9 @@
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const db = require('../db');
 const cache = require('../utils/cache');
 const logger = require('../utils/logger');
+const { validateCallbackUrl, deliverCallback } = require('../services/sep31CallbackService');
 
 const ANCHOR_INFO_TTL = 5 * 60; // 5 minutes in seconds
 const anchorUrl = process.env.ANCHOR_URL || 'https://testanchor.stellar.org';
@@ -134,9 +136,21 @@ async function createTransaction(req, res, next) {
       receiver_account,
       fields = {},
       sender_name,
-      sender_email
+      sender_email,
+      callback_url,
     } = req.body;
     const userId = req.user.userId;
+
+    if (!amount || !receiver_account) {
+      return res.status(400).json({ error: 'amount and receiver_account required' });
+    }
+
+    // SSRF-hardened: resolve-then-validate against the shared allow-list
+    // (see BE-015). Re-validated again immediately before every callback
+    // delivery attempt, not just here.
+    if (callback_url && !(await validateCallbackUrl(callback_url))) {
+      return res.status(400).json({ error: 'callback_url must be a public HTTPS endpoint' });
+    }
 
     // Validate fields against anchor /info schema
     let requiredFields = [];
@@ -160,12 +174,29 @@ async function createTransaction(req, res, next) {
     const kycVerified = user.rows[0]?.kyc_status === 'verified';
 
     const txId = uuidv4();
+    const sharedSecret = callback_url ? crypto.randomBytes(32).toString('hex') : null;
+
+    // A transaction with a callback_url must never be persisted without a shared_secret —
+    // deliverCallback() would otherwise sign the outbound webhook with an empty-string key (#951).
+    if (callback_url && !sharedSecret) {
+      logger.error('Refusing to create SEP-31 transaction ready for callback delivery without a shared_secret', {
+        userId,
+        callback_url,
+      });
+      return res.status(500).json({ error: 'Failed to configure callback delivery for this transaction' });
+    }
+
     await db.query(
       `INSERT INTO sep31_transactions
-         (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
-      [txId, userId, receiver_account, amount, asset_code, kycVerified]
+         (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status, callback_url, shared_secret)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)`,
+      [txId, userId, receiver_account, amount, asset_code, kycVerified, callback_url || null, sharedSecret]
     );
+
+    if (callback_url) {
+      // Fire-and-forget: delivery failures are logged, never block the response.
+      deliverCallback({ id: txId, callback_url, shared_secret: sharedSecret, status: 'pending' }).catch(() => {});
+    }
 
     logger.info('SEP-31 transaction created', {
       txId,
@@ -182,6 +213,7 @@ async function createTransaction(req, res, next) {
       asset_code,
       receiver_account,
       kyc_verified: kycVerified,
+      ...(sharedSecret && { shared_secret: sharedSecret }),
       sender_name: sender_name || null,
       sender_email: sender_email || null
     });
@@ -202,7 +234,8 @@ async function getTransaction(req, res, next) {
     const userId = req.user.userId;
 
     const result = await db.query(
-      `SELECT id, status, amount, asset_code, receiver_account, kyc_verified, created_at, updated_at
+      `SELECT id, status, status_message, stellar_transaction_id, refunded, amount, asset_code,
+              receiver_account, kyc_verified, callback_url, created_at, updated_at
        FROM sep31_transactions
        WHERE id = $1 AND sender_id = $2`,
       [id, userId]
@@ -212,6 +245,42 @@ async function getTransaction(req, res, next) {
       return res.status(404).json({ error: 'Transaction not found' });
     }
 
+    const callbacks = await db.query(
+      `SELECT url, http_status, response_time_ms, attempt_number, created_at
+       FROM sep31_callbacks WHERE transaction_id = $1 ORDER BY created_at ASC`,
+      [id]
+    );
+
+    res.json({ ...result.rows[0], callback_attempts: callbacks.rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateTransactionStatus(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { status, status_message, stellar_transaction_id, refunded } = req.body;
+    const userId = req.user.userId;
+
+    const VALID_STATUSES = ['pending', 'completed', 'error', 'refunded'];
+    if (!VALID_STATUSES.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const result = await db.query(
+      `UPDATE sep31_transactions
+       SET status = $1, status_message = $2, stellar_transaction_id = $3, refunded = $4, updated_at = NOW()
+       WHERE id = $5 AND sender_id = $6
+       RETURNING *`,
+      [status, status_message || null, stellar_transaction_id || null, refunded || false, id, userId]
+    );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+
+    deliverCallback(result.rows[0]);
     res.json(result.rows[0]);
   } catch (err) {
     next(err);
@@ -222,6 +291,7 @@ module.exports = {
   getInfo,
   createTransaction,
   getTransaction,
+  updateTransactionStatus,
   fetchAnchorInfo,
   getRequiredFields,
 };

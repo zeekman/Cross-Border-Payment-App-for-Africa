@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, PiggyBank, Clock, Unlock, RefreshCw } from 'lucide-react';
-import api from '../utils/api';
+import { ArrowLeft, PiggyBank, Clock, Unlock } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import api from '../utils/api';
+import useStepUp from '../hooks/useStepUp';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
 
 /** Calculate remaining seconds from now until unlockTimestamp (unix seconds). */
 function secondsUntil(unlockTimestamp) {
@@ -27,18 +29,16 @@ function formatCountdown(secs) {
 
 /**
  * Per-vault countdown component.
- * Ticks every second; cleans up on unmount.
+ * Ticks every second while the tab is visible; each tick recomputes from the unlock
+ * time, so it shows the right value as soon as the tab is visible again.
  */
 function VaultCountdown({ unlockTimestamp, balance }) {
   const [secs, setSecs] = useState(() => secondsUntil(unlockTimestamp));
 
-  useEffect(() => {
-    if (secs <= 0) return;
-    const id = setInterval(() => {
-      setSecs(secondsUntil(unlockTimestamp));
-    }, 1000);
-    return () => clearInterval(id);
-  }, [unlockTimestamp]); // eslint-disable-line react-hooks/exhaustive-deps
+  useVisibleInterval(() => setSecs(secondsUntil(unlockTimestamp)), 1000, {
+    enabled: secs > 0,
+    resetKey: unlockTimestamp,
+  });
 
   const unlocked = secs <= 0;
   const penalty = (parseFloat(balance) * 0.1).toFixed(7);
@@ -85,31 +85,30 @@ function VaultCountdown({ unlockTimestamp, balance }) {
   );
 }
 
-/** Demo vault list – replace with real API data once the Soroban contract is live. */
-const DEMO_VAULTS = [
-  {
-    id: 1,
-    label: 'Emergency Fund',
-    balance: '100.0000000',
-    unlockTimestamp: Math.floor(Date.now() / 1000) + 14 * 86400 + 6 * 3600 + 32 * 60 + 18,
-  },
-  {
-    id: 2,
-    label: 'Holiday Savings',
-    balance: '250.0000000',
-    unlockTimestamp: Math.floor(Date.now() / 1000) - 60, // already unlocked
-  },
-];
-
 export default function SaveMoney() {
+  const { requestStepUp, stepUpModal } = useStepUp();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const [form, setForm] = useState({ amount: '', lock_period_days: '30' });
   const [loading, setLoading] = useState(false);
   const [wallet, setWallet] = useState(null);
+  const [vaults, setVaults] = useState([]);
+  const [vaultsLoading, setVaultsLoading] = useState(true);
+
+  const fetchVaults = async () => {
+    try {
+      const res = await api.get('/savings');
+      setVaults(res.data.vaults || []);
+    } catch {
+      // vaults remain empty on error
+    } finally {
+      setVaultsLoading(false);
+    }
+  };
 
   useEffect(() => {
     api.get('/wallet/balance').then(r => setWallet(r.data)).catch(() => {});
+    fetchVaults();
   }, []);
 
   const handleSubmit = async (e) => {
@@ -127,15 +126,20 @@ export default function SaveMoney() {
       return;
     }
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     setLoading(true);
     try {
-      const lockPeriodSeconds = parseInt(form.lock_period_days) * 24 * 60 * 60;
-      const unlockTime = Math.floor(Date.now() / 1000) + lockPeriodSeconds;
-      // TODO: Integrate with Soroban savings-vault contract
-      toast.success(`Savings vault feature coming soon! Amount: ${form.amount} XLM, Unlock in ${form.lock_period_days} days`);
-      navigate('/dashboard');
+      await api.post('/savings', {
+        amount: amountXLM,
+        asset: 'XLM',
+        lock_period_days: parseInt(form.lock_period_days, 10),
+      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
+      toast.success(`Savings vault created! ${form.amount} XLM locked for ${form.lock_period_days} days`);
+      setForm({ amount: '', lock_period_days: '30' });
+      fetchVaults();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to save funds');
+      toast.error(err.response?.data?.error || 'Failed to create savings vault');
     } finally {
       setLoading(false);
     }
@@ -171,29 +175,36 @@ export default function SaveMoney() {
         </div>
 
         {/* Active Vaults */}
-        {DEMO_VAULTS.length > 0 && (
+        {!vaultsLoading && vaults.length > 0 && (
           <section aria-label="Active savings vaults">
             <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Your Vaults</h2>
             <div className="space-y-3">
-              {DEMO_VAULTS.map(vault => (
+              {vaults.map(vault => (
                 <div
                   key={vault.id}
                   className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 space-y-2"
                 >
                   <div className="flex items-center justify-between">
-                    <span className="font-medium text-gray-900 dark:text-white text-sm">{vault.label}</span>
+                    <span className="font-medium text-gray-900 dark:text-white text-sm">
+                      {vault.lock_period_days}-day Vault
+                    </span>
                     <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">
-                      {parseFloat(vault.balance).toFixed(2)} XLM
+                      {parseFloat(vault.amount).toFixed(2)} {vault.asset}
                     </span>
                   </div>
                   <VaultCountdown
-                    unlockTimestamp={vault.unlockTimestamp}
-                    balance={vault.balance}
+                    unlockTimestamp={typeof vault.unlock_timestamp === 'string' ? parseInt(vault.unlock_timestamp) : vault.unlock_timestamp}
+                    balance={vault.amount}
                   />
                 </div>
               ))}
             </div>
           </section>
+        )}
+        {!vaultsLoading && vaults.length === 0 && (
+          <div className="text-center py-4 text-gray-500 dark:text-gray-400 text-sm">
+            No active savings vaults. Create one below!
+          </div>
         )}
 
         {/* New Vault Form */}
@@ -263,6 +274,7 @@ export default function SaveMoney() {
           </button>
         </form>
       </div>
+      {stepUpModal}
     </div>
   );
 }

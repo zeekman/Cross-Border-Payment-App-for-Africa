@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const { body, param, validationResult } = require('express-validator');
-const { getInfo, createTransaction, getTransaction } = require('../controllers/sep31Controller');
+const { getInfo, createTransaction, getTransaction, updateTransactionStatus } = require('../controllers/sep31Controller');
 const authMiddleware = require('../middleware/auth');
 
 /** Runs express-validator results and short-circuits with 400 on failure. */
@@ -262,6 +262,16 @@ router.get(
   ],
   validate,
   getTransaction
+);
+
+router.patch('/transactions/:id/status',
+  authMiddleware,
+  [
+    param('id').isUUID().withMessage('Invalid transaction ID'),
+    body('status').isIn(['pending', 'completed', 'error', 'refunded']).withMessage('Invalid status'),
+  ],
+  validate,
+  updateTransactionStatus
 );
 
 module.exports = router;

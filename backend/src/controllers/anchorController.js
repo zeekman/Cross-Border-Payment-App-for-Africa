@@ -43,8 +43,11 @@ function extractSep10Jwt(req) {
   const dedicated = req.headers['x-sep10-token'];
   if (dedicated) return dedicated;
 
+  // In production, never fall back to the app-level Bearer token
+  if (process.env.NODE_ENV === 'production') return null;
+
   // Fallback: reuse the app JWT so the anchor at least gets *something*.
-  // In production the frontend should complete SEP-10 and send the real token.
+  // Only active outside production (development / testing).
   const auth = req.headers.authorization || '';
   if (auth.startsWith('Bearer ')) return auth.slice(7);
 
@@ -118,7 +121,7 @@ async function deposit(req, res, next) {
     const userId = req.user.userId;
 
     const walletResult = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1',
+      'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
       [userId]
     );
     if (!walletResult.rows[0]) {
@@ -127,6 +130,9 @@ async function deposit(req, res, next) {
 
     const publicKey = walletResult.rows[0].public_key;
     const sep10Jwt = extractSep10Jwt(req);
+    if (!sep10Jwt) {
+      return res.status(400).json({ error: 'X-Sep10-Token header is required' });
+    }
 
     // Build optional extra fields
     const extra = {};
@@ -183,7 +189,7 @@ async function withdraw(req, res, next) {
     const userId = req.user.userId;
 
     const walletResult = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1',
+      'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
       [userId]
     );
     if (!walletResult.rows[0]) {
@@ -192,6 +198,9 @@ async function withdraw(req, res, next) {
 
     const publicKey = walletResult.rows[0].public_key;
     const sep10Jwt = extractSep10Jwt(req);
+    if (!sep10Jwt) {
+      return res.status(400).json({ error: 'X-Sep10-Token header is required' });
+    }
 
     const extra = {};
     if (amount) extra.amount = String(amount);
@@ -266,6 +275,9 @@ async function status(req, res, next) {
     }
 
     const sep10Jwt = extractSep10Jwt(req);
+    if (!sep10Jwt) {
+      return res.status(400).json({ error: 'X-Sep10-Token header is required' });
+    }
     const txStatus = await getTransactionStatus(id, sep10Jwt);
 
     // Sync status back to our DB if we have a record

@@ -1,8 +1,10 @@
 const router = require("express").Router();
-﻿const router = require("express").Router();
 const { body, query, validationResult } = require("express-validator");
+const rateLimit = require("express-rate-limit");
 const StellarSdk = require("@stellar/stellar-sdk");
 const authMiddleware = require("../middleware/auth");
+const { requireStepUp } = require("../middleware/requireStepUp");
+const { readLimiter, paymentLimiter } = require("../middleware/rateLimiter");
 const idempotency = require("../middleware/idempotency");
 const paymentSendValidators = require("../validators/paymentSendValidators");
 const paymentBatchValidators = require("../validators/paymentBatchValidators");
@@ -13,12 +15,15 @@ const {
   history,
   exportCSV,
   estimateFee,
+  estimateFees,
   getFeeStats,
   getFeeRate,
   findPath,
   sendPath,
   findReceivePathHandler,
   sendStrictReceivePath,
+  getPaymentById,
+  cancelPendingEscrow,
 } = require("../controllers/paymentController");
 const { buildTransaction, submitSigned } = require("../controllers/ledgerController");
 const { resolveFederationAddress } = require("../services/stellar");
@@ -50,23 +55,63 @@ const validate = (req, res, next) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
+
+const estimateFeesLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => req.user?.userId || req.ip,
+  message: { error: "Too many fee estimation requests. Limit: 60 per minute." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 router.get("/estimate-fee", estimateFee);
+router.get("/estimate-fees", estimateFeesLimiter, estimateFees);
 router.get("/fee-stats", getFeeStats);
 router.get("/fee-rate", getFeeRate);
 
 /**
- * POST /api/payments/send
- * @protected @idempotent
- * Idempotency-Key header prevents duplicate payments on client retry.
+ * @openapi
+ * /api/payments/send:
+ *   post:
+ *     summary: Send a payment
+ *     description: >
+ *       Request schema is generated from the same express-validator chains
+ *       enforced at runtime (see validators/paymentSendValidators.js), so
+ *       these docs cannot drift from actual validation behavior.
+ *     tags: [Payments]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         schema:
+ *           type: string
+ *         description: Prevents duplicate payments on client retry.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/PaymentSendRequest'
+ *     responses:
+ *       200:
+ *         description: Payment submitted
+ *       400:
+ *         description: Validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
-router.post("/send", paymentSendValidators, validate, idempotency, send);
+router.post("/send", paymentLimiter, paymentSendValidators, validate, idempotency, requireStepUp, send);
 
 /**
  * POST /api/payments/batch
  * @protected @idempotent
  */
-router.post("/batch", paymentBatchValidators, validate, idempotency, sendBatch);
+router.post("/batch", paymentBatchValidators, validate, idempotency, requireStepUp, sendBatch);
 
 // Federation address resolution
 router.get(
@@ -97,26 +142,6 @@ router.get(
     }
   },
 );
-
-/**
- * POST /api/payments/send
- * @protected @idempotent
- * Idempotency-Key header prevents duplicate payments on client retry.
- * Closes #492
- */
-router.post(
-  "/send",
-  paymentSendValidators,
-  validate,
-  idempotency,
-  send,
-);
-
-/**
- * POST /api/payments/batch
- * @protected @idempotent
- */
-router.post("/batch", paymentBatchValidators, validate, idempotency, sendBatch);
 
 /**
  * @swagger
@@ -152,6 +177,11 @@ router.post("/batch", paymentBatchValidators, validate, idempotency, sendBatch);
  *           type: string
  *           enum: [XLM, USDC, NGN, GHS, KES]
  *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *         description: Comma-separated status filter (pending, confirming, completed, failed, pending_claim, cancelled). Unknown values return 400.
+ *       - in: query
  *         name: limit
  *         schema:
  *           type: integer
@@ -161,8 +191,14 @@ router.post("/batch", paymentBatchValidators, validate, idempotency, sendBatch);
  *       - in: query
  *         name: cursor
  *         schema:
- *           type: integer
- *         description: Pagination cursor (last transaction id)
+ *           type: string
+ *         description: Opaque cursor returned by the previous page
+ *       - in: query
+ *         name: wallet_id
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: Wallet to query; must belong to the authenticated user
  *     responses:
  *       200:
  *         description: List of transactions
@@ -181,6 +217,7 @@ router.get(
       .trim()
       .isIn(ALLOWED_HISTORY_ASSETS)
       .withMessage(`asset must be one of: ${ALLOWED_HISTORY_ASSETS.join(", ")}`),
+    query("wallet_id").optional().isUUID().withMessage("wallet_id must be a valid UUID"),
     query("direction")
       .optional({ values: "falsy" })
       .isIn(["sent", "received", "all"])
@@ -233,6 +270,7 @@ router.post(
   ],
   validate,
   idempotency,
+  requireStepUp,
   sendPath,
 );
 
@@ -274,6 +312,7 @@ router.post(
   ],
   validate,
   idempotency,
+  requireStepUp,
   sendStrictReceivePath,
 );
 
@@ -298,11 +337,37 @@ router.post(
   [body("xdr").notEmpty().withMessage("Signed XDR is required")],
   validate,
   idempotency,
+  requireStepUp,
   submitSigned,
 );
 
 // User-specific analytics (accessible to all authenticated users)
 const { summary: userAnalyticsSummary } = require("../controllers/analyticsController");
 router.get("/analytics", userAnalyticsSummary);
+
+/**
+ * POST /api/payments/:id/cancel
+ * Cancel a pending escrow payment and refund the sender on-chain.
+ * The 48-hour lock must have elapsed before cancellation is allowed.
+ */
+router.post(
+  "/:id/cancel",
+  [
+    require("express-validator").param("id").isUUID().withMessage("id must be a valid UUID"),
+    validate,
+    requireStepUp,
+  ],
+  cancelPendingEscrow,
+);
+
+/**
+ * GET /api/payments/:id
+ * Returns a single payment with fee_breakdown.
+ * Must be after all named GET routes.
+ */
+router.get("/:id", [
+  require("express-validator").param("id").isUUID().withMessage("id must be a valid UUID"),
+  validate,
+], getPaymentById);
 
 module.exports = router;

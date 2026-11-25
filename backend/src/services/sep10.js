@@ -1,3 +1,16 @@
+/**
+ * SEP-10 web-auth challenge/response.
+ *
+ * home_domain matching rule (see BE-014):
+ * The challenge transaction's manage_data operation name MUST be exactly
+ * `${HOME_DOMAIN} auth` — an EXACT, CASE-SENSITIVE string comparison against
+ * the server's configured home domain. No substring, prefix, or suffix match
+ * is permitted, and the domain is never normalized (no case-folding, no
+ * trailing-dot stripping) before comparison, because doing so would let a
+ * client authenticate a transaction whose operation name reads e.g.
+ * `afripay.app.attacker.com auth`, `AfriPay.App auth`, or `afripay.app. auth`
+ * as if it were `afripay.app auth`. Any deviation is rejected.
+ */
 'use strict';
 
 const StellarSDK = require('@stellar/stellar-sdk');
@@ -6,8 +19,21 @@ const db = require('../db');
 const cache = require('../utils/cache');
 const logger = require('../utils/logger');
 
-const SERVER_KEYPAIR = StellarSDK.Keypair.random();
+const SEP10_SIGNING_SECRET = process.env.SEP10_SIGNING_SECRET;
+let SERVER_KEYPAIR;
+
+if (SEP10_SIGNING_SECRET) {
+  SERVER_KEYPAIR = StellarSDK.Keypair.fromSecret(SEP10_SIGNING_SECRET);
+} else if (process.env.NODE_ENV === 'production') {
+  throw new Error(
+    'SEP10_SIGNING_SECRET must be set in production. ' +
+    'Set it to a Stellar secret key (starting with S) to enable deterministic SEP-10 signing.'
+  );
+} else {
+  SERVER_KEYPAIR = StellarSDK.Keypair.random();
+}
 const CHALLENGE_TIMEOUT = 15 * 60 * 1000; // 15 minutes
+const HOME_DOMAIN = process.env.SEP10_HOME_DOMAIN || 'afripay.app';
 const EXPIRY_BUFFER_SECONDS = 60; // refresh if token expires within 60s
 const SEP10_TOKEN_TTL = 24 * 60 * 60; // 24h default anchor token lifetime
 
@@ -25,42 +51,46 @@ function networkPassphrase() {
 // ---------------------------------------------------------------------------
 
 function generateChallenge(clientPublicKey) {
-  const server = StellarSDK.Keypair.fromPublicKey(SERVER_KEYPAIR.publicKey());
-
   const transaction = new StellarSDK.TransactionBuilder(
-    new StellarSDK.Account(server.publicKey(), '0'),
+    new StellarSDK.Account(SERVER_KEYPAIR.publicKey(), '0'),
     { fee: StellarSDK.BASE_FEE, networkPassphrase: networkPassphrase() }
   )
     .addOperation(
       StellarSDK.Operation.manageData({
-        name: 'challenge',
+        name: `${HOME_DOMAIN} auth`,
         value: crypto.randomBytes(32).toString('hex'),
       })
     )
     .setTimeout(CHALLENGE_TIMEOUT / 1000)
     .build();
 
-  transaction.sign(server);
+  transaction.sign(SERVER_KEYPAIR);
   return transaction.toEnvelope().toXDR('base64');
 }
 
 function verifyChallenge(clientPublicKey, signedXDR) {
   try {
-    const transaction = StellarSDK.TransactionEnvelope.fromXDR(signedXDR, networkPassphrase());
-    const tx = transaction.transaction();
+    const transaction = StellarSDK.TransactionBuilder.fromXDR(signedXDR, networkPassphrase());
 
+    // Exact, case-sensitive match on the manage_data operation name against
+    // the configured home domain. Reject anything that merely contains,
+    // starts with, or ends with the expected value (sub-domain spoofing,
+    // trailing-dot spoofing, case-mismatch spoofing).
+    const expectedName = `${HOME_DOMAIN} auth`;
+    const manageDataOp = (transaction.operations || []).find(op => op.type === 'manageData');
+    if (!manageDataOp || manageDataOp.name !== expectedName) return false;
+
+    // Verify server signed it
     const serverSigned = transaction.signatures.some(sig => {
       try {
-        StellarSDK.Keypair.fromPublicKey(SERVER_KEYPAIR.publicKey()).verify(tx.hash(), sig.signature());
-        return true;
+        return StellarSDK.Keypair.fromPublicKey(SERVER_KEYPAIR.publicKey()).verify(transaction.hash(), sig.signature());
       } catch { return false; }
     });
     if (!serverSigned) return false;
 
     const clientSigned = transaction.signatures.some(sig => {
       try {
-        StellarSDK.Keypair.fromPublicKey(clientPublicKey).verify(tx.hash(), sig.signature());
-        return true;
+        return StellarSDK.Keypair.fromPublicKey(clientPublicKey).verify(transaction.hash(), sig.signature());
       } catch { return false; }
     });
     return clientSigned;
@@ -159,6 +189,7 @@ function _withLock(key, fn) {
 module.exports = {
   generateChallenge,
   verifyChallenge,
+  HOME_DOMAIN,
   storeSession,
   getSession,
   deleteSession,

@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Cross-Border Payment App Backend",
   "main": "src/index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
@@ -11,11 +14,15 @@
     "lint:fix": "eslint . --ext .js --fix",
     "format": "prettier --write '**/*.{js,json,md}'",
     "format:check": "prettier --check '**/*.{js,json,md}'",
-    "migrate": "node-pg-migrate -m ../database/migrations up",
-    "migrate:rollback": "node-pg-migrate -m ../database/migrations down 1"
+    "migrate": "node-pg-migrate -m ../database/migrations --ignore-pattern \"\\\\.md$\" up",
+    "migrate:rollback": "node-pg-migrate -m ../database/migrations --ignore-pattern \"\\\\.md$\" down 1",
+    "depcheck": "depcheck --ignores='swagger-jsdoc,swagger-ui-express,nodemon' --ignore-dirs='__mocks__,coverage'"
   },
   "dependencies": {
+    "@sentry/node": "^8.0.0",
+    "@simplewebauthn/server": "^13.3.3",
     "@stellar/stellar-sdk": "^12.0.0",
+    "bullmq": "^5.0.0",
     "bcryptjs": "^2.4.3",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
@@ -26,8 +33,6 @@
     "express": "^4.18.2",
     "express-rate-limit": "^7.1.5",
     "express-validator": "^7.0.1",
-    "helmet": "^8.0.0",
-    "jsonwebtoken": "^9.0.2",
     "geoip-lite": "^2.0.1",
     "helmet": "^8.0.0",
     "ioredis": "^5.10.1",
@@ -47,6 +52,7 @@
     "zod": "3.23.8"
   },
   "devDependencies": {
+    "depcheck": "^1.4.7",
     "jest": "^30.3.0",
     "nodemon": "^3.0.2",
     "supertest": "^7.2.2",

@@ -2,6 +2,8 @@ const jwt = require('jsonwebtoken');
 const { generateChallenge, verifyChallenge } = require('../services/sep10');
 const { networkPassphrase } = require('../services/stellar');
 const db = require('../db');
+const { signAccessToken } = require('../utils/tokens');
+const { recordSession } = require('./sessionController');
 
 async function getChallenge(req, res, next) {
   try {
@@ -44,24 +46,30 @@ async function postChallenge(req, res, next) {
     }
 
     // Find or create user by Stellar account
-    let user = await db.query('SELECT id, email FROM users WHERE stellar_account = $1', [account]);
-    
+    let user = await db.query('SELECT id, email, role FROM users WHERE stellar_account = $1', [account]);
+
     if (!user.rows[0]) {
-      // Create a new user linked to this Stellar account
+      // Create a new user linked to this Stellar account.
+      // SEP-10 wallet-auth users skip email verification by design — the
+      // Stellar signature proves ownership of the wallet keypair, which is
+      // the security primitive for this authentication flow.
       const { v4: uuidv4 } = require('uuid');
       const userId = uuidv4();
+      const syntheticEmail = `${account.slice(0, 10)}@stellar.local`;
       await db.query(
         'INSERT INTO users (id, email, stellar_account, email_verified) VALUES ($1, $2, $3, TRUE)',
-        [userId, `${account.slice(0, 10)}@stellar.local`, account]
+        [userId, syntheticEmail, account]
       );
-      user = { rows: [{ id: userId, email: `${account.slice(0, 10)}@stellar.local` }] };
+      user = { rows: [{ id: userId, email: syntheticEmail, role: 'user' }] };
     }
 
-    const token = jwt.sign(
-      { userId: user.rows[0].id, email: user.rows[0].email, role: 'user' },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-    );
+    // Use the shared signAccessToken() utility which includes a jti claim
+    // so that token revocation (logout, session invalidation) works correctly.
+    const token = signAccessToken({ userId: user.rows[0].id, email: user.rows[0].email, role: user.rows[0].role || 'user' });
+
+    // Record the session so SEP-10 logins appear in the sessions API
+    // and are subject to SESSION_CAP enforcement.
+    await recordSession(user.rows[0].id, token, req).catch(() => {});
 
     res.json({ token });
   } catch (err) {
