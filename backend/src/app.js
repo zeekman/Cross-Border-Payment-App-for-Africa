@@ -85,6 +85,11 @@ app.use('/api', limiter);
 app.use('/api/auth', authLimiter);
 
 app.use('/api/auth', authRoutes);
+// Local avatar storage (dev only; use AVATAR_STORAGE=s3 in production). Files are
+// re-encoded without metadata and use random names, so only avatars are exposed.
+if ((process.env.AVATAR_STORAGE || 'local') === 'local') {
+  app.use('/uploads/avatars', express.static(require('path').join(__dirname, '../uploads/avatars'), { dotfiles: 'deny', index: false }));
+}
 app.use('/api/wallet', walletRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/payment-requests', paymentRequestRoutes);

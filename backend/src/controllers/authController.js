@@ -5,7 +5,8 @@ const db = require('../db');
 const { createWallet, encryptPrivateKey, addTrustline } = require('../services/stellar');
 const audit = require('../services/audit');
 const logger = require('../utils/logger');
-const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
+const { hashPIN, comparePIN, validatePIN, checkPINStrength } = require('../services/pin');
+const { issueStepUpToken } = require('../utils/stepUp');
 const { sendVerificationEmail } = require('../services/email');
 const logger = require('../utils/logger');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
@@ -575,6 +576,18 @@ async function setPIN(req, res, next) {
       return res.status(400).json({ error: 'PIN must be 4-6 digits' });
     }
 
+    let dateOfBirth = null;
+    try {
+      const kyc = await db.query('SELECT date_of_birth FROM users WHERE id = $1', [userId]);
+      dateOfBirth = kyc.rows[0]?.date_of_birth || null;
+    } catch {
+      // KYC date of birth not available in this schema
+    }
+    const weakReason = checkPINStrength(pin, { dateOfBirth });
+    if (weakReason) {
+      return res.status(400).json({ error: 'PIN is too easy to guess', code: 'WEAK_PIN', reason: weakReason });
+    }
+
     const pinHash = await hashPIN(pin);
     await db.query(
       `UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`,
@@ -614,7 +627,8 @@ async function verifyPIN(req, res, next) {
     const isPINValid = await comparePIN(pin, pin_hash);
     if (!isPINValid) return res.status(401).json({ error: 'Invalid PIN' });
 
-    res.json({ message: 'PIN verified successfully' });
+    audit.log(userId, 'step_up_pin', req.ip, req.headers['user-agent']);
+    res.json({ message: 'PIN verified successfully', step_up_token: issueStepUpToken(userId, 'pin') });
   } catch (err) {
     next(err);
   }
