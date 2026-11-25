@@ -205,14 +205,9 @@ export default function Swap() {
     setSubmitting(true);
     setResult(null);
     try {
-      const res = await postWithIdempotency('/dex/swap', {
-        sell_asset: sellAsset,
-        sell_amount: sellAmount.trim(),
-        buy_asset: buyAsset,
-        // Backend honours slippage_pct; min_received kept for BE-139 forward-compat.
-        slippage_pct: slippage,
-        min_received: minReceived || undefined,
-      }, idemRef.current.get());
+      const res = await postWithIdempotency('/dex/swap', body, idemRef.current.get(), {
+  headers: { 'X-Step-Up-Token': stepUpToken },
+});, idemRef.current.get());
       idemRef.current.reset();
       }, { headers: { 'X-Step-Up-Token': stepUpToken } });
       setResult(res.data);
