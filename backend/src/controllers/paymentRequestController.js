@@ -47,22 +47,47 @@ async function create(req, res, next) {
   }
 }
 
+/**
+ * Public display name: first name + last initial, never the full legal name
+ * or email (BE-224).
+ */
+function toDisplayName(fullName) {
+  const parts = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'AfriPay user';
+  return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.` : parts[0];
+}
+
 async function getById(req, res, next) {
   try {
     const { id } = req.params;
 
     const result = await db.query(
-      `SELECT id, requester_wallet, amount, asset, memo, expires_at, claimed, claimed_tx_hash
-       FROM payment_requests
-       WHERE id = $1 AND expires_at > NOW()`,
+      `SELECT pr.id, pr.requester_wallet, pr.amount, pr.asset, pr.memo, pr.expires_at,
+              pr.claimed, pr.claimed_tx_hash,
+              u.full_name, u.avatar_url, u.kyc_status, u.created_at AS member_since,
+              COALESCE(u.show_profile_on_requests, TRUE) AS show_profile
+       FROM payment_requests pr
+       LEFT JOIN users u ON u.id = pr.requester_id
+       WHERE pr.id = $1 AND pr.expires_at > NOW()`,
       [id]
     );
 
-    if (!result.rows[0]) {
+    // Expired, cancelled and unknown requests all return the same 404 so
+    // signed-out viewers can't enumerate request states.
+    const row = result.rows[0];
+    if (!row) {
       return res.status(404).json({ error: 'Payment request not found or expired' });
     }
 
-    res.json(result.rows[0]);
+    const { full_name, avatar_url, kyc_status, member_since, show_profile, ...request } = row;
+    request.requester = {
+      display_name: show_profile ? toDisplayName(full_name) : 'AfriPay user',
+      avatar_url: show_profile ? avatar_url || null : null,
+      kyc_verified: kyc_status === 'verified',
+      member_since: member_since ? new Date(member_since).toISOString().slice(0, 7) : null,
+    };
+
+    res.json(request);
   } catch (err) {
     next(err);
   }
@@ -116,4 +141,4 @@ async function markClaimed(req, res, next) {
   }
 }
 
-module.exports = { create, getById, markClaimed };
+module.exports = { create, getById, markClaimed, toDisplayName };

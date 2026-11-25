@@ -22,6 +22,7 @@ const {
   sendStrictReceivePath,
   getPaymentById,
   cancelPendingEscrow,
+  getReceipt,
 } = require("../controllers/paymentController");
 const { buildTransaction, submitSigned } = require("../controllers/ledgerController");
 const { resolveFederationAddress } = require("../services/stellar");
@@ -340,6 +341,17 @@ router.post(
   ],
   cancelPendingEscrow,
 );
+
+/**
+ * GET /api/payments/:id/receipt?format=pdf|png|json  (BE-226)
+ * Shareable single-transaction receipt; sender or recipient only.
+ */
+router.get("/:id/receipt", [
+  require("express-validator").param("id").isUUID().withMessage("id must be a valid UUID"),
+  query("format").optional().isIn(["pdf", "png", "json"]).withMessage("format must be pdf, png or json"),
+  query("fiat").optional().isIn(["USD", "NGN", "GHS", "KES"]),
+  validate,
+], getReceipt);
 
 /**
  * GET /api/payments/:id

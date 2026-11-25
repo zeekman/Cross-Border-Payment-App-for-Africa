@@ -45,6 +45,18 @@ exports.summary = async (req, res, next) => {
     const walletCondition = '(sender_wallet = $1 OR recipient_wallet = $1)';
     const baseParams = [public_key, from, to];
 
+    // BE-227: fiat totals use each transaction's send-time FX snapshot, never
+    // today's rate. Rows without a snapshot are counted as unpriced.
+    const fiatCurrency = ['USD', 'NGN', 'GHS', 'KES'].includes(String(req.query.fiat || '').toUpperCase())
+      ? String(req.query.fiat).toUpperCase() : 'USD';
+    const fiatTotalsPromise = db.query(
+      `SELECT COALESCE(SUM(amount * (fx_snapshot->'rates'->>$4)::numeric), 0) AS total,
+              COUNT(*) FILTER (WHERE fx_snapshot->'rates'->>$4 IS NULL) AS unpriced_count
+       FROM transactions
+       WHERE ${walletCondition} AND created_at >= $2 AND created_at <= $3 AND status = 'completed'`,
+      [...baseParams, fiatCurrency],
+    );
+
     const [monthly, topRecipients, assetBreakdown, frequency] = await Promise.all([
       db.query(
         `SELECT DATE_TRUNC('month', created_at) AS month, asset,
@@ -82,9 +94,15 @@ exports.summary = async (req, res, next) => {
         baseParams,
       ),
     ]);
+    const fiatTotals = await fiatTotalsPromise;
 
     res.json({
       period: { from: from.toISOString(), to: to.toISOString() },
+      fiat_volume: {
+        currency: fiatCurrency,
+        total: parseFloat(parseFloat(fiatTotals.rows[0]?.total || 0).toFixed(2)),
+        unpriced_count: parseInt(fiatTotals.rows[0]?.unpriced_count || 0, 10),
+      },
       monthly: monthly.rows,
       top_recipients: topRecipients.rows,
       asset_breakdown: assetBreakdown.rows,
