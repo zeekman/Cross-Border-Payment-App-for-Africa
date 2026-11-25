@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { X, ZoomIn, ZoomOut, Upload } from 'lucide-react';
+import api from '../api';
 
 const CANVAS_SIZE = 300; // crop preview square size in px
 
@@ -9,10 +10,8 @@ const CANVAS_SIZE = 300; // crop preview square size in px
  *   file        — File object from input[type=file]
  *   onSuccess   — called with avatar_url string after successful upload
  *   onClose     — called when modal is dismissed
- *   apiBase     — base URL for the API (e.g. "http://localhost:5000/api")
- *   token       — JWT access token
  */
-export default function AvatarCrop({ file, onSuccess, onClose, apiBase, token }) {
+export default function AvatarCrop({ file, onSuccess, onClose }) {
   const canvasRef = useRef(null);
   const imgRef = useRef(null);
   // Image position/scale state (offset = top-left corner of image in canvas coords)
@@ -22,6 +21,17 @@ export default function AvatarCrop({ file, onSuccess, onClose, apiBase, token })
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState('');
+  const abortRef = useRef(null);
+  const mountedRef = useRef(true);
+
+  // Abort any in-flight upload when the modal unmounts
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
 
   // Load image and set initial scale to fill the canvas
   useEffect(() => {
@@ -132,40 +142,40 @@ export default function AvatarCrop({ file, onSuccess, onClose, apiBase, token })
     setError('');
     setUploading(true);
     const blob = await getCompressedBlob();
+    if (!mountedRef.current) return;
     if (!blob) { setError('Failed to process image'); setUploading(false); return; }
 
     const form = new FormData();
     form.append('avatar', blob, 'avatar.jpg');
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${apiBase}/auth/avatar`);
-    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    const controller = new AbortController();
+    abortRef.current = controller;
 
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) setProgress(Math.round((e.loaded / e.total) * 100));
-    };
-
-    xhr.onload = () => {
+    try {
+      const { data } = await api.post('/auth/avatar', form, {
+        onUploadProgress: (e) => {
+          if (e.total && mountedRef.current) {
+            setProgress(Math.round((e.loaded / e.total) * 100));
+          }
+        },
+        signal: controller.signal,
+      });
+      if (!mountedRef.current) return;
       setUploading(false);
-      if (xhr.status === 200) {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          onSuccess(data.avatar_url);
-        } catch {
-          setError('Unexpected server response');
-        }
-      } else {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          setError(data.error || 'Upload failed');
-        } catch {
-          setError('Upload failed');
-        }
-      }
-    };
+      onSuccess(data.avatar_url);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setUploading(false);
+      if (err.name === 'CanceledError' || err.code === 'ERR_CANCELED') return;
+      setError(err.response?.data?.error || 'Upload failed');
+    } finally {
+      abortRef.current = null;
+    }
+  };
 
-    xhr.onerror = () => { setUploading(false); setError('Network error'); };
-    xhr.send(form);
+  const handleClose = () => {
+    if (abortRef.current) abortRef.current.abort();
+    onClose();
   };
 
   return (
@@ -173,7 +183,7 @@ export default function AvatarCrop({ file, onSuccess, onClose, apiBase, token })
       <div className="bg-gray-900 rounded-2xl w-full max-w-sm overflow-hidden">
         <div className="flex items-center justify-between p-5 border-b border-gray-800">
           <h3 className="font-semibold text-white">Crop Photo</h3>
-          <button type="button" onClick={onClose} className="text-gray-400 hover:text-white" disabled={uploading}>
+          <button type="button" onClick={handleClose} className="text-gray-400 hover:text-white" disabled={uploading}>
             <X size={18} />
           </button>
         </div>
@@ -226,7 +236,7 @@ export default function AvatarCrop({ file, onSuccess, onClose, apiBase, token })
             <div className="space-y-1">
               <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
                 <div
-                  className="bg-primary-500 h-2 rounded-full transition-all duration-200"
+                  className="bg-primary-500 h-full transition-all"
                   style={{ width: `${progress}%` }}
                 />
               </div>
@@ -236,15 +246,25 @@ export default function AvatarCrop({ file, onSuccess, onClose, apiBase, token })
 
           {error && <p className="text-xs text-red-400 text-center">{error}</p>}
 
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={uploading || !imgRef.current}
-            className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
-          >
-            <Upload size={14} />
-            {uploading ? 'Uploading…' : 'Upload Photo'}
-          </button>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={handleClose}
+              className="flex-1 py-2.5 bg-gray-800 text-gray-300 rounded-lg font-medium hover:bg-gray-700"
+              disabled={uploading}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirm}
+              className="flex-1 py-2.5 bg-primary-500 text-white rounded-lg font-medium hover:bg-primary-600 flex items-center justify-center gap-2 disabled:opacity-50"
+              disabled={uploading}
+            >
+              <Upload size={16} />
+              {uploading ? 'Uploading…' : 'Save'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
