@@ -17,8 +17,16 @@
       "id": 1,
       "title": "HTTP Request Rate (req/s)",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum(rate(http_request_duration_seconds_count[1m])) by (method, route)",
@@ -30,8 +38,16 @@
       "id": 2,
       "title": "HTTP Error Rate (5xx/s)",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum(rate(http_request_duration_seconds_count{status_code=~\"5..\"}[1m]))",
@@ -43,8 +59,16 @@
       "id": 3,
       "title": "HTTP P95 Latency (s)",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, route))",
@@ -56,8 +80,16 @@
       "id": 4,
       "title": "Horizon API P95 Latency (s)",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(horizon_request_duration_seconds_bucket[5m])) by (le, operation))",
@@ -69,8 +101,16 @@
       "id": 5,
       "title": "Horizon Error Rate",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum(rate(horizon_request_duration_seconds_count{success=\"false\"}[1m])) by (operation)",
@@ -82,8 +122,16 @@
       "id": 6,
       "title": "DB Query P95 Latency (s)",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket[5m])) by (le))",
@@ -95,8 +143,16 @@
       "id": 7,
       "title": "Active Horizon WebSocket Streams",
       "type": "stat",
-      "gridPos": { "x": 0, "y": 24, "w": 6, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "websocket_active_connections",
@@ -108,8 +164,16 @@
       "id": 8,
       "title": "Node.js Heap Used (MB)",
       "type": "timeseries",
-      "gridPos": { "x": 6, "y": 24, "w": 18, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 6,
+        "y": 24,
+        "w": 18,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "nodejs_heap_size_used_bytes / 1024 / 1024",
@@ -120,8 +184,16 @@
     {
       "title": "Payments Total by Status",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum by (status, asset) (rate(afripay_payments_total[5m]))",
@@ -132,8 +204,16 @@
     {
       "title": "Payment Amount Distribution (USDC)",
       "type": "histogram",
-      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "afripay_payment_amount_usdc_bucket",
@@ -144,8 +224,16 @@
     {
       "title": "Horizon API Latency (p95)",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 34, "w": 12, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(afripay_horizon_request_duration_ms_bucket[5m])))",
@@ -156,8 +244,16 @@
     {
       "title": "Active Users & Email Queue",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 34, "w": 12, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 12,
+        "y": 34,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "afripay_active_users",
@@ -172,8 +268,16 @@
     {
       "title": "AML Screening Coverage (%)",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 40, "w": 12, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "afripay_aml_screening_coverage_ratio * 100",
@@ -184,12 +288,97 @@
     {
       "title": "AML Screening Decisions (by status)",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 40, "w": 12, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
           "expr": "sum by (status) (rate(afripay_aml_screenings_total[5m]))",
           "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Jobs",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 46,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 101,
+      "type": "timeseries",
+      "title": "Job runs by status",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (job,status) (rate(job_runs_total[5m]))",
+          "legendFormat": "{{job}} {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "type": "timeseries",
+      "title": "Job duration p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 47,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (job,le) (rate(job_duration_seconds_bucket[15m])))",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "type": "table",
+      "title": "Seconds since last success",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 55,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "time() - job_last_success_timestamp",
+          "legendFormat": "{{job}}",
+          "instant": true
         }
       ]
     }

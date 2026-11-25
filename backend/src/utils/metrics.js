@@ -162,6 +162,43 @@ const sep31CallbackSkippedTotal = new client.Counter({
   registers: [registry],
 });
 
+// BE-222: background job metrics
+const jobRunsTotal = new client.Counter({
+  name: 'job_runs_total',
+  help: 'Scheduled job runs by outcome (success|error|skipped_locked)',
+  labelNames: ['job', 'status'],
+  registers: [registry],
+});
+
+const jobDurationSeconds = new client.Histogram({
+  name: 'job_duration_seconds',
+  help: 'Scheduled job duration in seconds',
+  labelNames: ['job'],
+  buckets: [0.1, 0.5, 1, 5, 15, 30, 60, 300, 900],
+  registers: [registry],
+});
+
+const jobLastSuccessTimestamp = new client.Gauge({
+  name: 'job_last_success_timestamp',
+  help: 'Unix time (seconds) of the last successful run of each job',
+  labelNames: ['job'],
+  registers: [registry],
+});
+
+const jobIntervalSeconds = new client.Gauge({
+  name: 'job_interval_seconds',
+  help: 'Approximate cron interval of each job in seconds (for staleness alerts)',
+  labelNames: ['job'],
+  registers: [registry],
+});
+
+const jobItemsProcessedTotal = new client.Counter({
+  name: 'job_items_processed_total',
+  help: 'Items processed by scheduled jobs',
+  labelNames: ['job'],
+  registers: [registry],
+});
+
 module.exports = {
   registry,
   httpRequestDuration,
@@ -188,4 +225,9 @@ module.exports = {
   txQueueBackpressure,
   txQueuePendingTasksTotal,
   sep31CallbackSkippedTotal,
+  jobRunsTotal,
+  jobDurationSeconds,
+  jobLastSuccessTimestamp,
+  jobIntervalSeconds,
+  jobItemsProcessedTotal,
 };

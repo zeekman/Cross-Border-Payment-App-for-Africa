@@ -9,3 +9,6 @@ scrape_configs:
       - targets: ['host.docker.internal:5000']
     metrics_path: /metrics
     scheme: http
+
+rule_files:
+  - alerts.yml

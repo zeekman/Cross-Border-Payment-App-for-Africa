@@ -52,6 +52,23 @@ async function acquireLock(lockKey, ttlSeconds, lockValue) {
   }
 }
 
+/**
+ * BE-221: like acquireLock but distinguishes "held by someone else" from
+ * "Redis unavailable" so callers can decide whether to run unlocked.
+ * @returns {Promise<'acquired'|'held'|'unavailable'>}
+ */
+async function tryAcquireLock(lockKey, ttlSeconds, lockValue) {
+  const redis = getClient();
+  if (!redis) return 'unavailable';
+  try {
+    const result = await redis.set(lockKey, lockValue, 'EX', ttlSeconds, 'NX');
+    return result === 'OK' ? 'acquired' : 'held';
+  } catch (err) {
+    logger.warn('Distributed lock unavailable', { lockKey, error: err.message });
+    return 'unavailable';
+  }
+}
+
 async function releaseLock(lockKey, lockValue) {
   const redis = getClient();
   if (!redis) return;
@@ -133,4 +150,4 @@ async function withLock(lockKey, ttlSeconds, fn) {
   return true;
 }
 
-module.exports = { acquireLock, releaseLock, renewLock, withLock };
+module.exports = { acquireLock, tryAcquireLock, releaseLock, renewLock, withLock };

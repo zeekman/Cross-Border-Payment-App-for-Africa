@@ -12,6 +12,7 @@
  */
 
 const StellarSdk = require("@stellar/stellar-sdk");
+const { toApiError } = require("../utils/sorobanErrors");
 
 const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
@@ -63,10 +64,7 @@ async function sendAndConfirm(keypair, method, args) {
 
   const result = await rpc.sendTransaction(prepared);
   if (result.status === "ERROR") {
-    throw Object.assign(
-      new Error(`Contract call failed: ${result.errorResult}`),
-      { status: 400 }
-    );
+    throw toApiError(result, 'loyaltyToken');
   }
 
   let response = result;
@@ -76,10 +74,7 @@ async function sendAndConfirm(keypair, method, args) {
   }
 
   if (response.status !== "SUCCESS") {
-    throw Object.assign(
-      new Error(`Transaction failed: ${response.status}`),
-      { status: 400 }
-    );
+    throw toApiError(response, 'loyaltyToken');
   }
 
   return { hash: result.hash, returnValue: response.returnValue };

@@ -6,6 +6,7 @@ const cookieParser = require('cookie-parser');
 const Sentry = require('@sentry/node');
 
 const requestId = require('./middleware/requestId');
+const { isSorobanError, toApiError } = require('./utils/sorobanErrors');
 const metricsMiddleware = require('./middleware/metricsMiddleware');
 const { registry } = require('./utils/metrics');
 const rateLimiters = require('./middleware/rateLimiter');
@@ -261,6 +262,11 @@ const deepHealthLimiter = rateLimit({
 app.get('/health/deep', deepHealthLimiter, async (req, res) => {
   try {
     const health = await runDeepHealthChecks();
+    // BE-222: per-job details only for operators holding the metrics token
+    const token = process.env.METRICS_TOKEN;
+    if (!token || req.headers.authorization !== `Bearer ${token}`) {
+      if (health.components?.jobs) delete health.components.jobs.details;
+    }
     const httpStatus = health.status === 'unhealthy' ? 503 : 200;
     res.status(httpStatus).json(health);
   } catch {
@@ -286,6 +292,16 @@ app.get('/metrics', async (req, res) => {
 app.use(Sentry.Handlers.errorHandler());
 
 app.use((err, req, res, next) => {
+  // BE-220: translate Soroban contract failures into stable API codes
+  if (err.contractError || (!err.code && isSorobanError(err))) {
+    const apiErr = err.contractError ? err : toApiError(err);
+    req.logger.warn('Soroban contract call failed', {
+      requestId: req.id,
+      code: apiErr.code,
+      diagnostic: apiErr.rawDiagnostic,
+    });
+    return res.status(apiErr.status).json({ error: apiErr.message, code: apiErr.code });
+  }
   req.logger.error(err.message, { stack: err.stack, status: err.status });
   res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
 });

@@ -7,6 +7,7 @@ const router = require('express').Router();
 const { body, param, validationResult } = require('express-validator');
 const { getContractEvents } = require('../jobs/contractEventIndexer');
 const authMiddleware = require('../middleware/auth');
+const { getContractState } = require('../services/contractState');
 const { partialRelease } = require('../controllers/agentEscrowController');
 
 const validate = (req, res, next) => {
@@ -62,6 +63,25 @@ async function getContractEventsHandler(req, res, next) {
 router.get('/:contractId/events', getContractEventsHandler);
 
 /**
+ * GET /api/contracts/:contractId/state
+ * BE-219: contract version, admin, paused flag and pending upgrade read via
+ * Soroban RPC getters (cached), falling back to indexed events.
+ */
+async function getContractStateHandler(req, res, next) {
+  try {
+    const { contractId } = req.params;
+    if (!contractId.match(/^C[A-Z0-9]{55}$/)) {
+      return res.status(400).json({ error: 'Invalid contract ID format' });
+    }
+    res.json(await getContractState(contractId));
+  } catch (err) {
+    next(err);
+  }
+}
+
+router.get('/:contractId/state', getContractStateHandler);
+
+/**
  * POST /api/contracts/escrow/:id/partial-release
  * Releases part of a pending agent escrow to the agent (issue #657).
  */
@@ -77,3 +97,4 @@ router.post(
 );
 
 module.exports = router;
+module.exports.getContractStateHandler = getContractStateHandler;
