@@ -97,7 +97,7 @@ async function buildTransaction(req, res, next) {
  */
 async function submitSigned(req, res, next) {
   try {
-    const { xdr, recipient_address, amount, asset = 'XLM', wallet_id } = req.body;
+    const { xdr, recipient_address, amount, asset, wallet_id } = req.body;
     const userId = req.user.userId;
 
     if (!xdr) return res.status(400).json({ error: 'Signed XDR is required' });
@@ -132,15 +132,39 @@ async function submitSigned(req, res, next) {
       return res.status(400).json({ error: 'Transaction has no signatures' });
     }
 
+    // Extract the actual recipient/amount/asset from the signed transaction itself —
+    // never trust req.body for what gets persisted, since it isn't covered by the signature.
+    const paymentOp = transaction.operations.find((op) => op.type === 'payment');
+    if (!paymentOp) {
+      return res.status(400).json({ error: 'Signed transaction does not contain a payment operation' });
+    }
+
+    const actualRecipient = paymentOp.destination;
+    const actualAmount = paymentOp.amount;
+    const actualAsset = paymentOp.asset.isNative() ? 'XLM' : paymentOp.asset.getCode();
+
+    if (recipient_address && recipient_address !== actualRecipient) {
+      return res.status(400).json({ error: 'recipient_address does not match the signed transaction' });
+    }
+    if (
+      (amount !== undefined && amount !== null && amount !== '') &&
+      Math.abs(parseFloat(amount) - parseFloat(actualAmount)) > 1e-7
+    ) {
+      return res.status(400).json({ error: 'amount does not match the signed transaction' });
+    }
+    if (asset && asset !== actualAsset) {
+      return res.status(400).json({ error: 'asset does not match the signed transaction' });
+    }
+
     // Submit to Horizon
     const result = await horizonServer.submitTransaction(transaction);
 
-    // Record in DB
+    // Record in DB using the values verified from the signed XDR, not req.body
     await db.query(
       `INSERT INTO transactions (id, user_id, sender_wallet, recipient_wallet, amount, asset, status, transaction_hash, signing_method)
        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'completed', $6, 'ledger')
        ON CONFLICT (transaction_hash) DO NOTHING`,
-      [userId, senderPublicKey, recipient_address || 'unknown', amount || '0', asset, result.hash]
+      [userId, senderPublicKey, actualRecipient, actualAmount, actualAsset, result.hash]
     );
 
     logger.info('Ledger-signed transaction submitted', { hash: result.hash, userId });

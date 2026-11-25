@@ -1,0 +1,15 @@
+{
+  "name": "AfriPay",
+  "short_name": "AfriPay",
+  "description": "AfriPay - Fast cross-border payments for Africa",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#0f172a",
+  "background_color": "#0f172a",
+  "icons": [
+    { "src": "/logo192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/logo512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/logo512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -11,6 +11,15 @@ jest.mock('../utils/api', () => ({
   default: { get: jest.fn() },
 }));
 
+jest.mock('../utils/offlineDB', () => ({
+  getCacheEntry: jest.fn().mockResolvedValue(null),
+  setCacheEntry: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('../hooks/useOnlineStatus', () => ({
+  useOnlineStatus: () => ({ isOnline: true, wasOffline: false }),
+}));
+
 import TransactionHistory from './TransactionHistory';
 import api from '../utils/api';
 
@@ -38,20 +47,24 @@ function renderComponent() {
 }
 
 describe('TransactionHistory', () => {
-  afterEach(() => jest.clearAllMocks());
-
-  it('shows loading spinner initially', () => {
-    api.get.mockReturnValue(new Promise(() => {}));
-    renderComponent();
-    expect(document.querySelector('.animate-spin')).toBeInTheDocument();
+  beforeEach(() => {
+    Object.defineProperty(navigator, 'onLine', { value: true, writable: true, configurable: true });
   });
 
-  it('requests history with page and limit on mount', async () => {
+  afterEach(() => jest.clearAllMocks());
+
+  it('shows loading skeletons initially', () => {
+    api.get.mockReturnValue(new Promise(() => {}));
+    renderComponent();
+    expect(document.querySelector('[aria-busy="true"]')).toBeInTheDocument();
+  });
+
+  it('requests history with limit on mount', async () => {
     api.get.mockResolvedValue({ data: emptyHistory });
     renderComponent();
     await waitFor(() => expect(api.get).toHaveBeenCalled());
     expect(api.get).toHaveBeenCalledWith('/payments/history', {
-      params: { page: 1, limit: 20 },
+      params: { limit: 20 },
     });
   });
 
@@ -142,7 +155,6 @@ describe('TransactionHistory', () => {
     const last = api.get.mock.calls[api.get.mock.calls.length - 1];
     expect(last[0]).toBe('/payments/history');
     expect(last[1].params).toMatchObject({
-      page: 1,
       limit: 20,
       from: '2024-01-01',
       to: '2024-01-31',
@@ -159,7 +171,76 @@ describe('TransactionHistory', () => {
 
     await waitFor(() => expect(api.get.mock.calls.length).toBeGreaterThanOrEqual(2));
     const last = api.get.mock.calls[api.get.mock.calls.length - 1];
-    expect(last[1].params).toMatchObject({ page: 1, limit: 20, asset: 'USDC' });
+    expect(last[1].params).toMatchObject({ limit: 20, asset: 'USDC' });
+  });
+
+  describe('Stellar Explorer link', () => {
+    const TX_HASH = 'abc123def456';
+
+    const txWithHash = {
+      id: '10',
+      direction: 'sent',
+      amount: '5',
+      asset: 'XLM',
+      recipient_wallet: 'GAAA',
+      sender_wallet: 'GBBB',
+      status: 'completed',
+      created_at: '2024-01-01T00:00:00Z',
+      tx_hash: TX_HASH,
+      memo: null,
+    };
+
+    const txWithoutHash = { ...txWithHash, id: '11', tx_hash: null };
+
+    function mockWithTx(tx) {
+      api.get.mockResolvedValue({
+        data: { transactions: [tx], has_more: false, next_cursor: null },
+      });
+    }
+
+    it('renders the explorer link when tx_hash is present', async () => {
+      mockWithTx(txWithHash);
+      renderComponent();
+      const link = await screen.findByRole('link', { name: /view transaction on stellar explorer/i });
+      expect(link).toBeInTheDocument();
+    });
+
+    it('builds the URL using the configured network label', async () => {
+      const network = process.env.REACT_APP_STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
+      mockWithTx(txWithHash);
+      renderComponent();
+      const link = await screen.findByRole('link', { name: /view transaction on stellar explorer/i });
+      expect(link).toHaveAttribute(
+        'href',
+        `https://stellar.expert/explorer/${network}/tx/${TX_HASH}`
+      );
+    });
+
+    it('opens in a new tab with rel="noopener noreferrer"', async () => {
+      mockWithTx(txWithHash);
+      renderComponent();
+      const link = await screen.findByRole('link', { name: /view transaction on stellar explorer/i });
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    });
+
+    it('does not render the explorer link when tx_hash is null', async () => {
+      mockWithTx(txWithoutHash);
+      renderComponent();
+      await waitFor(() => expect(screen.getByText('sent')).toBeInTheDocument());
+      expect(
+        screen.queryByRole('link', { name: /view transaction on stellar explorer/i })
+      ).not.toBeInTheDocument();
+    });
+
+    it('does not render the explorer link when tx_hash is empty string', async () => {
+      mockWithTx({ ...txWithHash, tx_hash: '' });
+      renderComponent();
+      await waitFor(() => expect(screen.getByText('sent')).toBeInTheDocument());
+      expect(
+        screen.queryByRole('link', { name: /view transaction on stellar explorer/i })
+      ).not.toBeInTheDocument();
+    });
   });
 
   it('filters loaded rows by search (memo / address / amount) client-side', async () => {

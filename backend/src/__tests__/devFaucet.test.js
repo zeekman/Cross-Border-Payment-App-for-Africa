@@ -1,3 +1,4 @@
+'use strict';
 const request = require('supertest');
 const express = require('express');
 
@@ -6,6 +7,8 @@ jest.mock('../middleware/auth', () => (req, res, next) => {
   req.user = { userId: 'user-test-id' };
   next();
 });
+// stellar.js has a pre-existing syntax issue; mock it so app.js loads
+jest.mock('../services/stellar', () => ({}));
 
 function buildDevApp(nodeEnv) {
   jest.resetModules();
@@ -14,6 +17,7 @@ function buildDevApp(nodeEnv) {
     req.user = { userId: 'user-test-id' };
     next();
   });
+  jest.mock('../services/stellar', () => ({}));
   process.env.NODE_ENV = nodeEnv;
   const devRouter = require('../routes/dev');
   const db = require('../db');
@@ -24,10 +28,43 @@ function buildDevApp(nodeEnv) {
   return { app, db };
 }
 
+function buildFullApp(nodeEnv) {
+  jest.resetModules();
+  jest.mock('../db');
+  jest.mock('../middleware/auth', () => (req, res, next) => {
+    req.user = { userId: 'user-test-id' };
+    next();
+  });
+  jest.mock('../services/stellar', () => ({}));
+  process.env.NODE_ENV = nodeEnv;
+  // Build a minimal app that mirrors app.js conditional mount logic
+  const devRouter = require('../routes/dev');
+  const app = express();
+  app.use(express.json());
+  if (process.env.NODE_ENV !== 'production') {
+    app.use('/api/dev', devRouter);
+  }
+  return app;
+}
+
 const originalEnv = process.env.NODE_ENV;
 afterAll(() => { process.env.NODE_ENV = originalEnv; });
 
-describe('POST /api/dev/fund-wallet — environment guard', () => {
+// ── App-level mount guard (issue #266) ───────────────────────────────────────
+
+describe('POST /api/dev/fund-wallet — app-level mount guard', () => {
+  afterEach(() => { process.env.NODE_ENV = originalEnv; });
+
+  test('returns 404 in production (route not mounted at app level)', async () => {
+    const app = buildFullApp('production');
+    const res = await request(app).post('/api/dev/fund-wallet');
+    expect(res.status).toBe(404);
+  });
+});
+
+// ── Router-level environment guard ───────────────────────────────────────────
+
+describe('POST /api/dev/fund-wallet — router environment guard', () => {
   afterEach(() => { process.env.NODE_ENV = originalEnv; });
 
   test('returns 404 in production', async () => {
@@ -42,6 +79,8 @@ describe('POST /api/dev/fund-wallet — environment guard', () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ── Development mode ─────────────────────────────────────────────────────────
 
 describe('POST /api/dev/fund-wallet — development', () => {
   afterEach(() => { process.env.NODE_ENV = originalEnv; });

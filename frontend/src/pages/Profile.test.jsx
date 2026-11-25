@@ -28,7 +28,7 @@ jest.setTimeout(15000);
 
 // The component fires api.get in this order on mount:
 //   1. /wallet/trustlines  (first useEffect)
-//   2. /wallet/contacts    (second useEffect)
+//   2. /contacts    (second useEffect)
 //   3. /auth/activity      (second useEffect)
 function mockMountCalls({ contacts = [], trustlines = [], activity = [] } = {}) {
   api.get
@@ -72,7 +72,7 @@ describe('Profile Component', () => {
 
     await renderProfile();
 
-    expect(api.get).toHaveBeenCalledWith('/wallet/contacts');
+    expect(api.get).toHaveBeenCalledWith('/contacts');
     await waitFor(() => {
       expect(screen.getByText('Alice')).toBeInTheDocument();
       expect(screen.getByText('Bob')).toBeInTheDocument();
@@ -135,7 +135,7 @@ describe('Profile Component', () => {
     await waitFor(() => {
       expect(screen.queryByText('Alice')).not.toBeInTheDocument();
     });
-    expect(api.delete).toHaveBeenCalledWith('/wallet/contacts/1');
+    expect(api.delete).toHaveBeenCalledWith('/contacts/1');
     expect(toast.success).toHaveBeenCalledWith('Contact deleted');
   });
 

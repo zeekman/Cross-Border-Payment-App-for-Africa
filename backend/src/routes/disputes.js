@@ -2,13 +2,16 @@ const router = require("express").Router();
 const { body, param, validationResult } = require("express-validator");
 const StellarSdk = require("@stellar/stellar-sdk");
 const authMiddleware = require("../middleware/auth");
+const { readLimiter } = require("../middleware/rateLimiter");
 const isAdmin = require("../middleware/isAdmin");
+const { disputeEvidenceMiddleware } = require("../middleware/disputeEvidenceUpload");
 const {
   open,
   submitEvidenceHandler,
   resolve,
   getDispute,
   listDisputes,
+  listEvidence,
 } = require("../controllers/disputeResolutionController");
 
 const validate = (req, res, next) => {
@@ -25,6 +28,7 @@ const isValidAddress = (v) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger
@@ -75,24 +79,69 @@ router.post(
  * @swagger
  * /api/disputes/{id}/evidence:
  *   post:
- *     summary: Submit evidence for a dispute
+ *     summary: Submit evidence for a dispute (file upload or IPFS CID)
  *     tags: [Disputes]
  *     security:
  *       - bearerAuth: []
+ *     requestBody:
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *                 description: Evidence file (JPEG, PNG, GIF, PDF, max 10 MB)
+ *               description:
+ *                 type: string
+ *                 description: Optional description of evidence
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               evidence:
+ *                 type: string
+ *                 description: IPFS CID or SHA-256 hash
+ *               description:
+ *                 type: string
+ *                 description: Optional description of evidence
  */
 router.post(
   "/:id/evidence",
   [
     param("id").isUUID().withMessage("Invalid dispute ID"),
-    body("evidence")
-      .trim()
-      .notEmpty()
-      .withMessage("evidence is required")
-      .isLength({ max: 256 })
-      .withMessage("evidence must be 256 characters or fewer"),
+    body("description").optional().isString().isLength({ max: 500 }),
   ],
   validate,
+  disputeEvidenceMiddleware,
   submitEvidenceHandler
+);
+
+/**
+ * @swagger
+ * /api/disputes/{id}/evidence:
+ *   get:
+ *     summary: List evidence for a dispute
+ *     tags: [Disputes]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: List of evidence files
+ */
+router.get(
+  "/:id/evidence",
+  [param("id").isUUID().withMessage("Invalid dispute ID")],
+  validate,
+  listEvidence
 );
 
 /**

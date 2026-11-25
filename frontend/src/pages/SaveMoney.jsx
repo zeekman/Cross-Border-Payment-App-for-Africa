@@ -1,22 +1,114 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, PiggyBank, Clock } from 'lucide-react';
-import api from '../utils/api';
+import { ArrowLeft, PiggyBank, Clock, Unlock } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import api from '../utils/api';
+import useStepUp from '../hooks/useStepUp';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
+
+/** Calculate remaining seconds from now until unlockTimestamp (unix seconds). */
+function secondsUntil(unlockTimestamp) {
+  return Math.max(0, unlockTimestamp - Math.floor(Date.now() / 1000));
+}
+
+/** Format a seconds value as "14d 6h 32m 18s". */
+function formatCountdown(secs) {
+  if (secs <= 0) return null;
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  const parts = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0 || d > 0) parts.push(`${h}h`);
+  if (m > 0 || h > 0 || d > 0) parts.push(`${m}m`);
+  parts.push(`${s}s`);
+  return parts.join(' ');
+}
+
+/**
+ * Per-vault countdown component.
+ * Ticks every second while the tab is visible; each tick recomputes from the unlock
+ * time, so it shows the right value as soon as the tab is visible again.
+ */
+function VaultCountdown({ unlockTimestamp, balance }) {
+  const [secs, setSecs] = useState(() => secondsUntil(unlockTimestamp));
+
+  useVisibleInterval(() => setSecs(secondsUntil(unlockTimestamp)), 1000, {
+    enabled: secs > 0,
+    resetKey: unlockTimestamp,
+  });
+
+  const unlocked = secs <= 0;
+  const penalty = (parseFloat(balance) * 0.1).toFixed(7);
+  const label = formatCountdown(secs);
+
+  if (unlocked) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 text-xs font-semibold">
+        <Unlock size={11} aria-hidden="true" />
+        Ready to withdraw
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span
+        aria-live="polite"
+        aria-atomic="true"
+        aria-label={`${label} remaining until unlock`}
+        className="inline-flex items-center gap-1 text-xs font-mono text-amber-400"
+      >
+        <Clock size={11} aria-hidden="true" />
+        {label} remaining
+      </span>
+      {/* Withdraw button with early-penalty tooltip */}
+      <div className="relative group inline-block">
+        <button
+          type="button"
+          className="text-xs px-2 py-0.5 rounded border border-gray-600 text-gray-400 cursor-not-allowed"
+          aria-disabled="true"
+          tabIndex={-1}
+        >
+          Withdraw
+        </button>
+        <div
+          role="tooltip"
+          className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 w-52 bg-gray-900 border border-yellow-500/40 text-yellow-300 text-xs rounded-lg px-3 py-2 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10"
+        >
+          Early withdrawal incurs a 10% penalty ({penalty} XLM)
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function SaveMoney() {
+  const { requestStepUp, stepUpModal } = useStepUp();
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const [form, setForm] = useState({
-    amount: '',
-    lock_period_days: '30'
-  });
+  const [form, setForm] = useState({ amount: '', lock_period_days: '30' });
   const [loading, setLoading] = useState(false);
   const [wallet, setWallet] = useState(null);
+  const [vaults, setVaults] = useState([]);
+  const [vaultsLoading, setVaultsLoading] = useState(true);
+
+  const fetchVaults = async () => {
+    try {
+      const res = await api.get('/savings');
+      setVaults(res.data.vaults || []);
+    } catch {
+      // vaults remain empty on error
+    } finally {
+      setVaultsLoading(false);
+    }
+  };
 
   useEffect(() => {
     api.get('/wallet/balance').then(r => setWallet(r.data)).catch(() => {});
+    fetchVaults();
   }, []);
 
   const handleSubmit = async (e) => {
@@ -34,20 +126,20 @@ export default function SaveMoney() {
       return;
     }
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     setLoading(true);
     try {
-      // Calculate unlock time (current time + lock period in seconds)
-      const lockPeriodSeconds = parseInt(form.lock_period_days) * 24 * 60 * 60;
-      const unlockTime = Math.floor(Date.now() / 1000) + lockPeriodSeconds;
-
-      // TODO: Integrate with Soroban contract
-      // For now, just show a placeholder
-      toast.success(`Savings vault feature coming soon! Amount: ${form.amount} XLM, Unlock in ${form.lock_period_days} days`);
-
-      // Navigate back to dashboard
-      navigate('/dashboard');
+      await api.post('/savings', {
+        amount: amountXLM,
+        asset: 'XLM',
+        lock_period_days: parseInt(form.lock_period_days, 10),
+      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
+      toast.success(`Savings vault created! ${form.amount} XLM locked for ${form.lock_period_days} days`);
+      setForm({ amount: '', lock_period_days: '30' });
+      fetchVaults();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to save funds');
+      toast.error(err.response?.data?.error || 'Failed to create savings vault');
     } finally {
       setLoading(false);
     }
@@ -82,9 +174,41 @@ export default function SaveMoney() {
           </div>
         </div>
 
-        {/* Form */}
+        {/* Active Vaults */}
+        {!vaultsLoading && vaults.length > 0 && (
+          <section aria-label="Active savings vaults">
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Your Vaults</h2>
+            <div className="space-y-3">
+              {vaults.map(vault => (
+                <div
+                  key={vault.id}
+                  className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 space-y-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-gray-900 dark:text-white text-sm">
+                      {vault.lock_period_days}-day Vault
+                    </span>
+                    <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                      {parseFloat(vault.amount).toFixed(2)} {vault.asset}
+                    </span>
+                  </div>
+                  <VaultCountdown
+                    unlockTimestamp={typeof vault.unlock_timestamp === 'string' ? parseInt(vault.unlock_timestamp) : vault.unlock_timestamp}
+                    balance={vault.amount}
+                  />
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+        {!vaultsLoading && vaults.length === 0 && (
+          <div className="text-center py-4 text-gray-500 dark:text-gray-400 text-sm">
+            No active savings vaults. Create one below!
+          </div>
+        )}
+
+        {/* New Vault Form */}
         <form onSubmit={handleSubmit} className="space-y-6">
-          {/* Amount */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               Amount to Save (XLM)
@@ -101,7 +225,6 @@ export default function SaveMoney() {
             />
           </div>
 
-          {/* Lock Period */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               Lock Period
@@ -119,7 +242,6 @@ export default function SaveMoney() {
             </select>
           </div>
 
-          {/* Info */}
           <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-xl p-4">
             <div className="flex items-start gap-3">
               <Clock className="text-blue-500 mt-0.5" size={20} />
@@ -133,7 +255,6 @@ export default function SaveMoney() {
             </div>
           </div>
 
-          {/* Submit Button */}
           <button
             type="submit"
             disabled={loading || !form.amount}
@@ -153,6 +274,7 @@ export default function SaveMoney() {
           </button>
         </form>
       </div>
+      {stepUpModal}
     </div>
   );
 }

@@ -91,12 +91,16 @@ The system is transparent, auditable on Stellar Explorer, and modular enough to 
 │   │       └── currency.js             # XLM conversion rates + formatters
 │   ├── .env.example
 │   └── package.json
-├── contracts/
-│   ├── escrow/                         # Soroban smart contract (Rust/WASM)
-│   │   ├── src/
-│   │   │   └── lib.rs                  # Escrow contract implementation
-│   │   ├── Cargo.toml
-│   │   └── README.md                   # Contract ABI & documentation
+├── contracts/                           # Soroban smart contracts (Rust/WASM), one crate per dir
+│   ├── escrow/                         # Three-party (sender/recipient/agent) remittance escrow
+│   ├── agent-escrow/                   # Trustless agent-mediated escrow variant
+│   ├── dispute-resolution/             # On-chain three-party dispute resolution
+│   ├── fee-distributor/                # Platform fee accumulation & withdrawal
+│   ├── kyc-attestation/                # On-chain KYC status (SHA-256 hash, no raw PII)
+│   ├── loyalty-token/                  # SEP-41 fungible loyalty token + tiered redemption
+│   ├── multisig-approval/              # Multisig proposal approval & key rotation
+│   ├── recurring-payments/             # User-authorized recurring transfers (non-custodial)
+│   ├── savings-vault/                  # On-chain savings deposit/withdrawal vault
 │   ├── README.md                       # Contracts directory guide
 │   ├── deploy.sh                       # Deployment script for all contracts
 │   └── .gitignore
@@ -167,7 +171,11 @@ Sender → [approve USDC transfer] → Backend → [sign with keypair]
 
 ---
 
+## Getting Started
 
+### Prerequisites
+
+- Node.js 22 LTS or newer (pinned in `.nvmrc` — run `nvm use`)
 - A Stellar testnet account (auto-created on registration)
 
 ### 1. Database
@@ -258,6 +266,48 @@ node-pg-migrate tracks applied migrations in a `pgmigrations` table that it crea
 | POST   | /api/support/tickets      | Yes  | Create a support/dispute ticket    |
 | GET    | /api/support/tickets      | Yes  | List user's support tickets        |
 | POST   | /api/admin/clawback       | Admin| Clawback asset for compliance      |
+| GET    | /api/admin/health         | Admin| Full service health diagnostics    |
+| POST   | /api/escrow/create        | Yes  | Create agent escrow (approved agents only) |
+| POST   | /api/escrow/:id/confirm   | Yes  | Agent confirms payout              |
+| POST   | /api/escrow/:id/cancel    | Yes  | Sender cancels escrow              |
+
+---
+
+## Agent Registration and Approval
+
+AfriPay uses a registered agent network for fiat distribution. Only **approved** agents may be used as the `agent_wallet` parameter in `POST /api/escrow/create`.
+
+### Agent Lifecycle
+
+```
+1. Agent applies → POST /api/auth/register (creates a user account)
+2. Agent submits their Stellar wallet address for approval
+3. Admin reviews and approves → INSERT INTO agents (wallet_address, status='approved')
+4. Agent is now eligible to receive escrow assignments
+5. Admin may suspend an agent by setting status='suspended'
+```
+
+### agents Table
+
+| Column           | Type        | Description                              |
+|------------------|-------------|------------------------------------------|
+| id               | uuid        | Primary key                              |
+| user_id          | uuid        | FK to users table                        |
+| wallet_address   | text        | Agent's Stellar public key (unique)      |
+| status           | varchar(20) | `pending` / `approved` / `suspended`     |
+| country          | varchar(10) | ISO country code (optional)              |
+| created_at       | timestamptz | Registration timestamp                   |
+| approved_at      | timestamptz | Admin approval timestamp                 |
+
+### Validation
+
+`POST /api/escrow/create` checks the `agents` table before creating any on-chain escrow:
+
+- If `agent_wallet` is not found with `status = 'approved'`, the request is rejected with HTTP 400:
+  ```json
+  { "error": "Agent is not registered in the AfriPay network" }
+  ```
+- Only after a successful agent lookup does the backend proceed to sign and broadcast the Soroban escrow transaction.
 
 ---
 
@@ -282,6 +332,13 @@ STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
 # AES-256 encryption key for private key storage (must be exactly 32 characters)
 ENCRYPTION_KEY=your_32_character_encryption_key_
 
+# Cache Configuration
+# Balance cache TTL in seconds (default: 30)
+# Time-To-Live for cached wallet balance data. Lower values ensure fresher data but increase load on Horizon.
+# Higher values reduce load but may show stale balances after recent transactions.
+# Cache is automatically invalidated after send, sendBatch, and sendPath operations.
+BALANCE_CACHE_TTL_SECONDS=30
+
 # CORS
 FRONTEND_URL=http://localhost:3000
 ```
@@ -299,6 +356,24 @@ FRONTEND_URL=http://localhost:3000
 - Fraud protection: blocks wallets exceeding 5 transactions in 10 minutes
 - Input validation on all endpoints via `express-validator`
 - CORS restricted to configured frontend origin
+
+---
+
+## Performance & Caching
+
+**Balance Caching with Redis**
+
+Wallet balances are cached in Redis to reduce load on the Stellar Horizon API. The cache behavior is configurable:
+
+- **Configurable TTL**: Set `BALANCE_CACHE_TTL_SECONDS` in your environment (default: 30 seconds)
+- **Automatic Invalidation**: Cache is cleared immediately after:
+  - Standard payments (`POST /api/payments`)
+  - Batch payments (`POST /api/payments/batch`)
+  - Path payments (`POST /api/payments/send-path`)
+- **Fallback Behavior**: If Redis is not configured, balances are fetched live from Horizon on every request
+- **Stale Balance Risk**: In production, ensure the TTL is low enough (15-30 seconds recommended) to prevent users from seeing significantly stale balances after receiving payments
+
+To adjust the cache TTL in production, update the `BALANCE_CACHE_TTL_SECONDS` environment variable without restarting (if using a process manager with hot-reload support).
 
 ---
 
@@ -384,3 +459,77 @@ Contributions are welcome. Please ensure:
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-1123 -->
+- #1123: [SC-118] escrow: `expire_escrow` refunds the sender even after the agent has called `confirm_delivery`, and leaves `updated_at` stale
+
+<!-- handsoff-issue-1124 -->
+- #1124: [SC-119] escrow: `deposit` bypasses `MAX_ESCROW_AMOUNT`, is allowed after delivery confirmation, and accepts deposits from any address
+
+<!-- handsoff-issue-1125 -->
+- #1125: [SC-120] No contract supports admin key rotation (except agent-escrow's unauthenticated one) — a lost or compromised admin key is permanent
+<!-- handsoff-issue-1141 -->
+- #1141: [SC-136] multisig-approval: `execute()` only marks proposals `Expired`, and approved proposals never move funds
+
+<!-- handsoff-issue-1142 -->
+- #1142: [SC-137] multisig-approval: the admin can instantly change signer weights to override quorum, and quorum mixes "count" and "weight" units
+
+<!-- handsoff-issue-1143 -->
+- #1143: [SC-138] multisig-approval: `reject_quorum_change` can underflow after a signer is removed, and removed signers' votes and weights persist
+
+<!-- handsoff-issue-1144 -->
+- #1144: [SC-139] recurring-payments: each schedule stores an `asset`, but `execute_payment` always pays in the contract-wide token
+<!-- handsoff-issue-1112 -->
+- #1112: [SC-107] escrow: `batch_create_escrow` is still missing its closing brace — SC-002 (#1034) was closed but the file still does not compile
+
+<!-- handsoff-issue-1113 -->
+- #1113: [SC-108] escrow: `batch_create_escrow` skips the sender/agent KYC checks that `create_escrow` enforces
+<!-- handsoff-issue-1131 -->
+- #1131: [SC-126] dispute-resolution: `resolve_dispute` ignores the resolution deadline and emits no event
+
+<!-- handsoff-issue-1132 -->
+- #1132: [SC-127] agent-escrow: the sender chooses `fee_bps` (including 0), so the platform fee can be bypassed on every escrow
+
+<!-- handsoff-issue-1135 -->
+- #1135: [SC-130] fee-distributor: `update_fee_rate` stores a value nothing can read, and there are no getters for the fee rate or split
+<!-- handsoff-issue-1129 -->
+- #1129: [SC-124] dispute-resolution: disputes in `UnderAppeal` have no deadline — if the super-arbitrator never acts, funds are locked forever
+
+<!-- handsoff-issue-1133 -->
+- #1133: [SC-128] agent-escrow: `insurance_payout` can be called repeatedly for the same cancelled escrow and pays senders who were already refunded
+<!-- handsoff-issue-1127 -->
+- #1127: [SC-122] dispute-resolution: `settle_filing_fee` pays out the *current* filing fee, not the fee actually paid when the dispute was opened
+
+<!-- handsoff-issue-1128 -->
+- #1128: [SC-123] dispute-resolution: `claim_expired` never refunds or settles the filing fee, stranding it in the contract
+
+<!-- handsoff-issue-1130 -->
+- #1130: [SC-125] dispute-resolution: panel quorum is computed against the *current* panel size, so adding/removing arbitrators mid-dispute changes outcomes
+
+<!-- handsoff-issue-1198 -->
+- #1198: [FE-110] Batch payments poll `/payments/batch/:id/status` and call `/payments/batch/:id/retry`, neither of which exist — polling runs forever
+<!-- handsoff-issue-1203 -->
+- #1203: [FE-115] Contract-address (C…) simulation in Send Money calls `/payments/build` and `/contracts/simulate`, which don't exist — and the branch is unreachable
+
+<!-- handsoff-issue-1204 -->
+- #1204: [FE-116] Online payments are sent without an `Idempotency-Key`, so retrying after a timeout can send money twice
+
+<!-- handsoff-issue-1205 -->
+- #1205: [FE-117] Federation addresses (`name*domain`) are resolved only after PIN confirmation — the user never sees the G-address they're paying
+<!-- handsoff-issue-1192 -->
+- #1192: [FE-104] "Back up secret key" in Profile always fails: it sends only the password, but the backend requires a PIN or TOTP
+
+<!-- handsoff-issue-1193 -->
+- #1193: [FE-105] 2FA setup shows backup codes that don't work; the real codes returned by `/2fa/verify` are discarded
+<!-- handsoff-issue-1202 -->
+- #1202: [FE-114] Send Money's trustline pre-check calls a non-existent endpoint and silently hides the "no trustline" warning
+<!-- handsoff-issue-1140 -->
+- #1140: [SC-135] loyalty-token: `redeem` burns points but records no entitlement or event, so the backend cannot verify a discount was paid for
+
+<!-- handsoff-issue-1178 -->
+- #1178: [BE-132] `POST /api/auth/2fa/disable` only requires the password — no TOTP confirmation and no notification
+
+<!-- handsoff-issue-1280 -->
+- #1280: [BE-148] `POST /api/auth/refresh` always returns 500 — malformed SELECT list (`u.role` followed by a duplicated column line without a comma)

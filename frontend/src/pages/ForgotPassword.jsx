@@ -10,15 +10,18 @@ export default function ForgotPassword() {
   const { t } = useTranslation();
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
+    setErrorMsg('');
     try {
       await api.post('/auth/forgot-password', { email });
       toast.success(t('passwordReset.forgot_success_toast'));
     } catch (err) {
       const msg = err.response?.data?.errors?.[0]?.msg || err.response?.data?.error || t('passwordReset.error_generic');
+      setErrorMsg(msg);
       toast.error(msg);
     } finally {
       setLoading(false);
@@ -27,30 +30,39 @@ export default function ForgotPassword() {
 
   return (
     <div className="min-h-screen bg-gray-950 flex flex-col px-6 py-8">
-      <button type="button" onClick={() => navigate('/login')} className="text-gray-400 hover:text-white mb-6 flex items-center gap-1">
-        <ArrowLeft size={18} /> {t('common.back')}
+      <button type="button" onClick={() => navigate('/login')} className="text-gray-400 hover:text-white mb-6 flex items-center gap-1" aria-label={t('common.back')}>
+        <ArrowLeft size={18} aria-hidden="true" /> {t('common.back')}
       </button>
 
       <div className="flex-1 flex flex-col justify-center max-w-sm mx-auto w-full">
-        <div className="w-12 h-12 bg-primary-500 rounded-2xl flex items-center justify-center text-2xl mb-6">🔑</div>
+        <div className="w-12 h-12 bg-primary-500 rounded-2xl flex items-center justify-center text-2xl mb-6" aria-hidden="true">🔑</div>
         <h2 className="text-2xl font-bold text-white mb-1">{t('passwordReset.forgot_title')}</h2>
         <p className="text-gray-400 mb-8">{t('passwordReset.forgot_subtitle')}</p>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4" aria-busy={loading} noValidate>
           <div>
-            <label className="text-sm text-gray-400 mb-1 block">{t('login.email')}</label>
+            <label htmlFor="forgot-password-email" className="text-sm text-gray-400 mb-1 block">{t('login.email')}</label>
             <input
+              id="forgot-password-email"
               type="email"
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              aria-invalid={!!errorMsg}
+              aria-describedby={errorMsg ? 'forgot-password-error' : undefined}
               className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors"
               placeholder="[email]"
             />
           </div>
+          {errorMsg && (
+            <p id="forgot-password-error" role="alert" aria-live="assertive" className="text-sm text-red-500">
+              {errorMsg}
+            </p>
+          )}
           <button
             type="submit"
             disabled={loading}
+            aria-busy={loading}
             className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl transition-colors"
           >
             {loading ? t('passwordReset.forgot_submitting') : t('passwordReset.forgot_submit')}

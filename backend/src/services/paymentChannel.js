@@ -9,6 +9,15 @@
  *
  * Unilateral close: a time-locked "dispute" transaction lets either party
  * close after CHANNEL_TIMEOUT_SECONDS if the counterparty is unresponsive.
+ *
+ * Concurrency safety:
+ *   - transact()     acquires a row-level lock via SELECT ... FOR UPDATE inside
+ *     a serialisable transaction, so two simultaneous payments against the same
+ *     channel are serialised at the DB level.  The sender_balance >= 0 CHECK
+ *     constraint (migration 037) is an additional defence-in-depth layer.
+ *   - closeChannel() acquires the same row-level lock, so two simultaneous
+ *     close requests cannot both observe status = 'open' and proceed to
+ *     settlement; only the first one wins.
  */
 
 const StellarSdk = require('@stellar/stellar-sdk');
@@ -90,102 +99,146 @@ async function openChannel({ userId, senderPublicKey, encryptedSecretKey, recipi
 /**
  * Record an off-chain payment within the channel.
  * Updates balances in DB; no on-chain transaction.
+ *
+ * Uses SELECT ... FOR UPDATE inside a transaction to prevent concurrent
+ * requests from both reading the same stale sender_balance and independently
+ * passing the balance check — which would allow an over-spend.
  */
 async function transact({ channelId, userId, amount }) {
-  const { rows: [channel] } = await db.query(
-    `SELECT * FROM payment_channels WHERE id = $1 AND user_id = $2 AND status = 'open'`,
-    [channelId, userId]
-  );
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  if (!channel) {
-    const err = new Error('Channel not found or not open');
-    err.status = 404;
+    // Lock the row for the duration of this transaction.  Any concurrent
+    // transact() or closeChannel() call for the same channelId will block here
+    // until we COMMIT or ROLLBACK.
+    const { rows: [channel] } = await client.query(
+      `SELECT * FROM payment_channels
+       WHERE id = $1 AND user_id = $2 AND status = 'open'
+       FOR UPDATE`,
+      [channelId, userId]
+    );
+
+    if (!channel) {
+      const err = new Error('Channel not found or not open');
+      err.status = 404;
+      throw err;
+    }
+
+    const amt = parseFloat(amount);
+    if (amt <= 0 || amt > parseFloat(channel.sender_balance)) {
+      const err = new Error('Invalid amount or insufficient channel balance');
+      err.status = 400;
+      throw err;
+    }
+
+    const { rows } = await client.query(
+      `UPDATE payment_channels
+       SET sender_balance    = sender_balance - $1,
+           recipient_balance = recipient_balance + $1,
+           updated_at        = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [amt, channelId]
+    );
+
+    await client.query('COMMIT');
+    logger.info('Channel off-chain payment recorded', { channelId, amount: amt });
+    return rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
     throw err;
+  } finally {
+    client.release();
   }
-
-  const amt = parseFloat(amount);
-  if (amt <= 0 || amt > parseFloat(channel.sender_balance)) {
-    const err = new Error('Invalid amount or insufficient channel balance');
-    err.status = 400;
-    throw err;
-  }
-
-  const { rows } = await db.query(
-    `UPDATE payment_channels
-     SET sender_balance = sender_balance - $1,
-         recipient_balance = recipient_balance + $1,
-         updated_at = NOW()
-     WHERE id = $2
-     RETURNING *`,
-    [amt, channelId]
-  );
-
-  logger.info('Channel off-chain payment recorded', { channelId, amount: amt });
-  return rows[0];
 }
 
 /**
  * Close the channel by submitting the pre-signed closing transaction on-chain.
  * If the channel has off-chain payments, builds a fresh settlement tx instead.
+ *
+ * Uses SELECT ... FOR UPDATE inside a transaction so that two simultaneous
+ * close requests cannot both read status = 'open' and both attempt to submit
+ * a settlement transaction on-chain.  Only the first caller proceeds; the
+ * second will find a row that is already being updated (blocked on the lock)
+ * and, once unblocked after COMMIT, will see status = 'closed' and return a
+ * 404 error rather than submitting a duplicate on-chain transaction.
  */
 async function closeChannel({ channelId, userId, encryptedSecretKey }) {
-  const { rows: [channel] } = await db.query(
-    `SELECT * FROM payment_channels WHERE id = $1 AND user_id = $2 AND status = 'open'`,
-    [channelId, userId]
-  );
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  if (!channel) {
-    const err = new Error('Channel not found or already closed');
-    err.status = 404;
+    // Acquire a row-level lock.  A concurrent closeChannel() for the same
+    // channelId will block here until the first caller commits or rolls back.
+    const { rows: [channel] } = await client.query(
+      `SELECT * FROM payment_channels
+       WHERE id = $1 AND user_id = $2 AND status = 'open'
+       FOR UPDATE`,
+      [channelId, userId]
+    );
+
+    if (!channel) {
+      const err = new Error('Channel not found or already closed');
+      err.status = 404;
+      throw err;
+    }
+
+    const recipientBalance = parseFloat(channel.recipient_balance);
+    let txHash;
+
+    if (recipientBalance > 0) {
+      // Settle: send recipient_balance to recipient, rest stays with sender.
+      // This on-chain call happens while we hold the row lock so that no other
+      // concurrent close request can reach this code path for the same channel.
+      const secretKey = decryptPrivateKey(encryptedSecretKey);
+      const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+      const senderAccount = await withFallback(s => s.loadAccount(channel.sender_public_key));
+      const baseFee = await withFallback(s => s.fetchBaseFee());
+
+      const assetObj = channel.asset === 'XLM'
+        ? StellarSdk.Asset.native()
+        : new StellarSdk.Asset(channel.asset, process.env[`${channel.asset}_ISSUER`]);
+
+      const settleTx = new StellarSdk.TransactionBuilder(senderAccount, {
+        fee: baseFee,
+        networkPassphrase,
+      })
+        .addOperation(StellarSdk.Operation.payment({
+          destination: channel.recipient_public_key,
+          asset: assetObj,
+          amount: String(recipientBalance),
+        }))
+        .setTimeout(30)
+        .build();
+
+      settleTx.sign(senderKeypair);
+      const result = await withFallback(s => s.submitTransaction(settleTx));
+      txHash = result.hash;
+    } else {
+      // No off-chain payments — submit the pre-signed unilateral closing tx.
+      const tx = new StellarSdk.Transaction(channel.closing_tx_xdr, networkPassphrase);
+      const result = await withFallback(s => s.submitTransaction(tx));
+      txHash = result.hash;
+    }
+
+    const { rows } = await client.query(
+      `UPDATE payment_channels
+       SET status = 'closed', settlement_tx_hash = $1, updated_at = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [txHash, channelId]
+    );
+
+    await client.query('COMMIT');
+    logger.info('Payment channel closed', { channelId, txHash });
+    return rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
     throw err;
+  } finally {
+    client.release();
   }
-
-  const recipientBalance = parseFloat(channel.recipient_balance);
-  let txHash;
-
-  if (recipientBalance > 0) {
-    // Settle: send recipient_balance to recipient, rest stays with sender
-    const secretKey = decryptPrivateKey(encryptedSecretKey);
-    const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-    const senderAccount = await withFallback(s => s.loadAccount(channel.sender_public_key));
-    const baseFee = await withFallback(s => s.fetchBaseFee());
-
-    const assetObj = channel.asset === 'XLM'
-      ? StellarSdk.Asset.native()
-      : new StellarSdk.Asset(channel.asset, process.env[`${channel.asset}_ISSUER`]);
-
-    const settleTx = new StellarSdk.TransactionBuilder(senderAccount, {
-      fee: baseFee,
-      networkPassphrase,
-    })
-      .addOperation(StellarSdk.Operation.payment({
-        destination: channel.recipient_public_key,
-        asset: assetObj,
-        amount: String(recipientBalance),
-      }))
-      .setTimeout(30)
-      .build();
-
-    settleTx.sign(senderKeypair);
-    const result = await withFallback(s => s.submitTransaction(settleTx));
-    txHash = result.hash;
-  } else {
-    // No off-chain payments — submit the pre-signed unilateral closing tx
-    const tx = new StellarSdk.Transaction(channel.closing_tx_xdr, networkPassphrase);
-    const result = await withFallback(s => s.submitTransaction(tx));
-    txHash = result.hash;
-  }
-
-  const { rows } = await db.query(
-    `UPDATE payment_channels
-     SET status = 'closed', settlement_tx_hash = $1, updated_at = NOW()
-     WHERE id = $2
-     RETURNING *`,
-    [txHash, channelId]
-  );
-
-  logger.info('Payment channel closed', { channelId, txHash });
-  return rows[0];
 }
 
 module.exports = { openChannel, transact, closeChannel };

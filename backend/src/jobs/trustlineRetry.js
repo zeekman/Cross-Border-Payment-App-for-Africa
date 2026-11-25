@@ -84,8 +84,9 @@ function startTrustlineRetryJob() {
   if (!process.env.USDC_ISSUER) return;
   const run = (name, ttl, fn) => withLock(name, ttl, fn).catch(err =>
     logger.warn(`${name} failed`, { error: err.message }));
-  setInterval(() => run('trustline:retry', POLL_INTERVAL_MS - 5000, processDueRetries), POLL_INTERVAL_MS).unref();
-  setInterval(() => run('trustline:reconcile', RECONCILE_INTERVAL_MS - 60_000, reconcile), RECONCILE_INTERVAL_MS).unref();
+  // withLock(key, ttlSeconds, fn) heartbeats the lock while fn runs
+  setInterval(() => run('lock:trustline:retry', 55, processDueRetries), POLL_INTERVAL_MS).unref();
+  setInterval(() => run('lock:trustline:reconcile', 3600, reconcile), RECONCILE_INTERVAL_MS).unref();
 }
 
 module.exports = { scheduleTrustlineRetry, processDueRetries, reconcile, startTrustlineRetryJob, RETRY_DELAYS_MS };

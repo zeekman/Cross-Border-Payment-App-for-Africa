@@ -6,10 +6,11 @@
  *
  * Routes:
  *   POST /api/disputes                    — open a dispute
- *   POST /api/disputes/:id/evidence       — submit evidence
+ *   POST /api/disputes/:id/evidence       — submit evidence (file upload or IPFS CID)
  *   POST /api/disputes/:id/resolve        — arbitrator resolves (admin only)
  *   GET  /api/disputes/:id                — fetch dispute record
  *   GET  /api/disputes                    — list user's disputes
+ *   GET  /api/disputes/:id/evidence       — list evidence for a dispute
  */
 
 const { v4: uuidv4 } = require("uuid");
@@ -36,7 +37,7 @@ async function open(req, res, next) {
     } = req.body;
 
     const walletResult = await db.query(
-      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -110,12 +111,12 @@ async function open(req, res, next) {
 
 /**
  * POST /api/disputes/:id/evidence
- * Body: { evidence }  — IPFS CID or content hash (max 256 chars)
+ * Accepts multipart/form-data with file field OR JSON with evidence (IPFS CID).
  */
 async function submitEvidenceHandler(req, res, next) {
   try {
     const { id } = req.params;
-    const { evidence } = req.body;
+    const { evidence: ipfsCidOrHash, description } = req.body;
 
     const disputeResult = await db.query(
       "SELECT * FROM disputes WHERE id = $1",
@@ -131,7 +132,7 @@ async function submitEvidenceHandler(req, res, next) {
     }
 
     const walletResult = await db.query(
-      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -149,13 +150,47 @@ async function submitEvidenceHandler(req, res, next) {
         .json({ error: "You are not a party to this dispute" });
     }
 
+    // Check evidence limit (5 files per dispute)
+    const countResult = await db.query(
+      "SELECT COUNT(*) FROM dispute_evidence WHERE dispute_id = $1",
+      [id]
+    );
+    if (parseInt(countResult.rows[0].count, 10) >= 5) {
+      return res.status(400).json({ error: "EVIDENCE_LIMIT_REACHED" });
+    }
+
+    let sha256Hash;
+    let filePath;
+
+    if (req.evidenceFile) {
+      sha256Hash = await req.evidenceFile.sha256Promise;
+      filePath = req.evidenceFile.path;
+    } else if (ipfsCidOrHash) {
+      sha256Hash = ipfsCidOrHash;
+      filePath = null;
+    } else {
+      return res.status(400).json({ error: "evidence file or CID is required" });
+    }
+
+    // Store evidence in DB
+    await db.query(
+      `INSERT INTO dispute_evidence
+         (dispute_id, uploader_id, file_path, sha256_hash, description)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [id, req.user.userId, filePath, sha256Hash, description || null]
+    );
+
     const { txHash } = await submitEvidence({
       encryptedSecretKey: encrypted_secret_key,
       disputeId: dispute.contract_dispute_id,
-      evidence,
+      evidence: sha256Hash,
     });
 
-    res.json({ message: "Evidence submitted", tx_hash: txHash });
+    res.json({
+      message: "Evidence submitted",
+      sha256_hash: sha256Hash,
+      tx_hash: txHash,
+    });
   } catch (err) {
     next(err);
   }
@@ -237,7 +272,77 @@ async function getDispute(req, res, next) {
     if (!result.rows[0]) {
       return res.status(404).json({ error: "Dispute not found" });
     }
-    res.json({ dispute: result.rows[0] });
+    const dispute = result.rows[0];
+
+    if (req.user.role !== "admin") {
+      const walletResult = await db.query(
+        "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
+        [req.user.userId]
+      );
+      const public_key = walletResult.rows[0]?.public_key;
+
+      if (
+        public_key !== dispute.sender_wallet &&
+        public_key !== dispute.recipient_wallet
+      ) {
+        return res
+          .status(403)
+          .json({ error: "You are not a party to this dispute" });
+      }
+    }
+
+    res.json({ dispute });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/disputes/:id/evidence
+ * Lists all evidence files for a dispute.
+ */
+async function listEvidence(req, res, next) {
+  try {
+    const { id } = req.params;
+
+    const disputeResult = await db.query(
+      "SELECT * FROM disputes WHERE id = $1",
+      [id]
+    );
+    if (!disputeResult.rows[0]) {
+      return res.status(404).json({ error: "Dispute not found" });
+    }
+
+    const walletResult = await db.query(
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
+      [req.user.userId]
+    );
+    if (!walletResult.rows[0]) {
+      return res.status(404).json({ error: "Wallet not found" });
+    }
+    const { public_key } = walletResult.rows[0];
+
+    const dispute = disputeResult.rows[0];
+    if (
+      public_key !== dispute.sender_wallet &&
+      public_key !== dispute.recipient_wallet
+    ) {
+      return res
+        .status(403)
+        .json({ error: "You are not a party to this dispute" });
+    }
+
+    const evidenceResult = await db.query(
+      `SELECT de.id, de.sha256_hash, de.file_path, de.description,
+              de.uploaded_at, u.full_name as uploader_name
+       FROM dispute_evidence de
+       JOIN users u ON u.id = de.uploader_id
+       WHERE de.dispute_id = $1
+       ORDER BY de.uploaded_at DESC`,
+      [id]
+    );
+
+    res.json({ evidence: evidenceResult.rows });
   } catch (err) {
     next(err);
   }
@@ -250,7 +355,7 @@ async function getDispute(req, res, next) {
 async function listDisputes(req, res, next) {
   try {
     const walletResult = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -270,4 +375,4 @@ async function listDisputes(req, res, next) {
   }
 }
 
-module.exports = { open, submitEvidenceHandler, resolve, getDispute, listDisputes };
+module.exports = { open, submitEvidenceHandler, resolve, getDispute, listDisputes, listEvidence };

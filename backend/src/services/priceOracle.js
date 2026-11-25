@@ -142,13 +142,13 @@ async function refresh(kind, force = false) {
       const cached = await cache.get(key);
       if (cached && Date.now() - cached.fetchedAt < ttl * 1000) return (mem[kind] = cached);
     }
-    const { acquired, result } = await withLock(`price:${kind}`, Math.max(ttl * 1000 - 5000, 5000), async () => {
-      const entry = { value: await fetcher(), fetchedAt: Date.now() };
+    let result = null;
+    const acquired = await withLock(`lock:price:${kind}`, Math.max(ttl - 5, 5), async () => {
+      result = { value: await fetcher(), fetchedAt: Date.now() };
       // keep in Redis long enough to serve as stale fallback up to the limit
-      await cache.set(key, entry, ttl + PRICE_MAX_STALENESS_SECS);
-      return entry;
+      await cache.set(key, result, ttl + PRICE_MAX_STALENESS_SECS);
     });
-    if (acquired) return (mem[kind] = result);
+    if (acquired && result) return (mem[kind] = result);
     // another replica is refreshing — use whatever is cached
     const cached = await cache.get(key);
     if (cached) return (mem[kind] = cached);

@@ -34,7 +34,9 @@ CREATE TABLE transactions (
   memo             VARCHAR(128),
   memo_type        VARCHAR(10),
   tx_hash          VARCHAR(64) UNIQUE,
-  status           VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending','completed','failed')),
+  status           VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending','confirming','completed','failed','pending_claim')),
+  confirmed_at     TIMESTAMPTZ,
+  confirmation_expires_at TIMESTAMPTZ,
   created_at       TIMESTAMPTZ DEFAULT NOW()
 );
 

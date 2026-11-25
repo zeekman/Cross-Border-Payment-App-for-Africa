@@ -1,8 +1,11 @@
 const router = require("express").Router();
 const authMiddleware = require("../middleware/auth");
-const { balance, redeem, history } = require("../controllers/loyaltyController");
+const { readLimiter } = require("../middleware/rateLimiter");
+const isAdmin = require("../middleware/isAdmin");
+const { balance, tiers, redeem, history, mint } = require("../controllers/loyaltyController");
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger
@@ -29,12 +32,38 @@ router.get("/balance", balance);
 
 /**
  * @swagger
- * /api/loyalty/redeem:
- *   post:
- *     summary: Redeem 100 loyalty points for a 50% fee discount
+ * /api/loyalty/tiers:
+ *   get:
+ *     summary: List loyalty redemption tiers configured on-chain
  *     tags: [Loyalty]
  *     security:
  *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of tiers with threshold and discount_bps
+ */
+router.get("/tiers", tiers);
+
+/**
+ * @swagger
+ * /api/loyalty/redeem:
+ *   post:
+ *     summary: Redeem a loyalty tier for its fee discount
+ *     tags: [Loyalty]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [tier_index]
+ *             properties:
+ *               tier_index:
+ *                 type: integer
+ *                 minimum: 0
+ *                 maximum: 4
  *     responses:
  *       200:
  *         description: Redemption successful
@@ -56,5 +85,35 @@ router.post("/redeem", redeem);
  *         description: List of loyalty events
  */
 router.get("/history", history);
+
+/**
+ * @swagger
+ * /api/loyalty/mint:
+ *   post:
+ *     summary: Mint loyalty tokens to a user (admin/internal only)
+ *     tags: [Loyalty]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [user_id, points]
+ *             properties:
+ *               user_id:
+ *                 type: string
+ *               points:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Tokens minted
+ *       400:
+ *         description: Invalid input
+ *       403:
+ *         description: Admin access required
+ */
+router.post("/mint", isAdmin, mint);
 
 module.exports = router;

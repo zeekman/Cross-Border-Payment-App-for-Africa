@@ -148,6 +148,83 @@ test.describe('Send Payment Flow', () => {
     await expect(page.locator('[data-testid="payment-error"]')).toContainText('Payment failed');
   });
 
+  test('full happy path: login → send → verify in history', async ({ page }) => {
+    const MOCK_TX_HASH = 'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899';
+
+    // Mock the payments/send API to return a successful response
+    await page.route('**/api/payments/send', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: 'Payment sent successfully',
+          transaction: {
+            id: 'tx-happy-path-1',
+            tx_hash: MOCK_TX_HASH,
+            ledger: 12345,
+            amount: '10',
+            asset: 'XLM',
+            recipient: recipientAddress,
+            type: 'payment',
+          },
+        }),
+      });
+    });
+
+    // Mock the payments/history API to return the sent transaction
+    await page.route('**/api/payments/history**', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          transactions: [
+            {
+              id: 'tx-happy-path-1',
+              tx_hash: MOCK_TX_HASH,
+              sender_wallet: 'GCSEQ5XE5YYKPITLT63FZ7LCW2JZNYVP3L2XKMGELRKGPNZXNNBVPOU3',
+              recipient_wallet: recipientAddress,
+              amount: '10',
+              asset: 'XLM',
+              memo: 'Happy path test',
+              status: 'completed',
+              direction: 'sent',
+              created_at: new Date().toISOString(),
+            },
+          ],
+          has_more: false,
+          next_cursor: null,
+        }),
+      });
+    });
+
+    // Step 1: Navigate to send page
+    await page.goto('/send');
+
+    // Step 2: Enter recipient and amount
+    await page.fill('[data-testid="recipient-address-input"]', recipientAddress);
+    await page.fill('[data-testid="amount-input"]', '10');
+    await page.selectOption('[data-testid="asset-select"]', 'XLM');
+    await page.fill('[data-testid="memo-input"]', 'Happy path test');
+
+    // Step 3: Submit and confirm with PIN
+    await page.click('[data-testid="send-payment-button"]');
+    await expect(page.locator('[data-testid="pin-modal"]')).toBeVisible();
+    await page.fill('[data-testid="pin-confirmation-input"]', testUser.pin);
+    await page.click('[data-testid="confirm-pin-button"]');
+
+    // Step 4: Verify success
+    await expect(page.locator('[data-testid="payment-success"]')).toBeVisible();
+    await expect(page.locator('[data-testid="transaction-hash"]')).toBeVisible();
+
+    // Step 5: Navigate to history and verify transaction appears
+    await page.goto('/history');
+    await expect(page.locator('[data-testid="transaction-list"]')).toBeVisible();
+    const firstTx = page.locator('[data-testid="transaction-item"]').first();
+    await expect(firstTx).toBeVisible();
+    await expect(firstTx.locator('[data-testid="transaction-amount"]')).toContainText('10');
+    await expect(firstTx.locator('[data-testid="transaction-type"]')).toContainText('Sent');
+  });
+
   test('should cancel payment during PIN confirmation', async ({ page }) => {
     await page.goto('/send');
     
