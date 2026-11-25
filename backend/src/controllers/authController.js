@@ -18,6 +18,8 @@ const {
   refreshTokenExpiresAt,
   signDeviceToken,
   verifyDeviceToken,
+  signPhoneVerificationToken,
+  PHONE_VERIFICATION_TOKEN_TTL_SECONDS,
 } = require('../utils/tokens');
 const { setCsrfCookie } = require('../middleware/csrf');
 const { issueStepUpToken } = require('../middleware/requireStepUp');
@@ -211,10 +213,17 @@ async function register(req, res, next) {
     if (phone && otpRaw) {
       sendOTP(phone, otpRaw).catch(e => logger.warn('Registration OTP SMS failed', { error: e.message }));
     }
-    res.status(201).json({
+    const body = {
       message: 'Account created. Please verify your email and phone number.',
       trustline_status,
-    });
+    };
+    // BE-197: no session is issued until the email is verified, so hand back a
+    // 15-minute token that is valid only for POST /auth/verify-phone.
+    if (phone) {
+      body.phone_verification_token = signPhoneVerificationToken(userId);
+      body.phone_verification_expires_in = PHONE_VERIFICATION_TOKEN_TTL_SECONDS;
+    }
+    res.status(201).json(body);
   } catch (err) {
     next(err);
   }
@@ -550,7 +559,8 @@ async function verifyPhone(req, res, next) {
     );
 
     const user = result.rows[0];
-    if (!user || user.phone_otp_hash !== hashed) {
+    if (!user || !user.phone_otp_hash || user.phone_otp_hash.length !== hashed.length
+      || !crypto.timingSafeEqual(Buffer.from(user.phone_otp_hash, 'hex'), Buffer.from(hashed, 'hex'))) {
       return res.status(400).json({ error: 'Invalid OTP' });
     }
 

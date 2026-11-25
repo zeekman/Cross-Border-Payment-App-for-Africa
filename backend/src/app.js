@@ -139,7 +139,8 @@ app.use('/api/wallet/contacts', (req, res, next) => {
   res.set('Link', '</api/contacts>; rel="successor-version"');
   next();
 }, contactsRoutes);
-app.use('/api/wallet', walletRoutes);
+// Single geo-gated mount: an earlier ungated mount of the same router ran
+// first and silently bypassed the OFAC geo-restriction for wallet routes.
 app.use('/api/wallet', geoRestriction, walletRoutes);
 app.use('/api/payments', geoRestriction, paymentRoutes);
 app.use('/api/payment-requests', geoRestriction, paymentRequestRoutes);
@@ -180,10 +181,6 @@ if (process.env.NODE_ENV !== 'production') {
 }
 app.use('/', stellarTomlRoutes);
 
-// Sentry v8: register the Express error handler after all routes so thrown
-// route errors are reported. No-op when Sentry was not initialized (no DSN).
-Sentry.setupExpressErrorHandler(app);
-
 // Swagger API Documentation
 const swaggerOptions = {
   definition: {
@@ -215,6 +212,157 @@ const swaggerOptions = {
         Error: {
           type: 'object',
           properties: {
-            error
+            error: {
+              type: 'string'
+            },
+            errors: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  msg: { type: 'string' },
+                  param: { type: 'string' }
+                }
+              }
+            }
+          }
+        },
+        // Derived directly from the express-validator field spec in
+        // validators/paymentSendValidators.js so the docs cannot drift from
+        // what the runtime validators actually accept.
+        PaymentSendRequest: paymentSendValidators.openApiSchema
+      }
+    }
+  },
+  apis: [path.join(__dirname, 'routes/*.js'), path.join(__dirname, 'app.js')]
+};
 
-/* … truncated 587 chars — edit only what you need near the top … */
+const specs = swaggerJsdoc(swaggerOptions);
+
+app.use('/api/docs', (req, res, next) => {
+  res.removeHeader('Content-Security-Policy');
+  next();
+});
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs));
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     summary: Public liveness probe
+ *     description: Returns the overall status and pool utilization. Use /health/deep for full diagnostics.
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   enum: [ok, degraded]
+ *                 pool:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     idle: { type: integer }
+ *                     waiting: { type: integer }
+ *       503:
+ *         description: Service is degraded
+ */
+app.get('/health', async (req, res) => {
+  try {
+    const health = await runHealthChecks();
+    res.status(health.status === 'ok' ? 200 : 503).json({
+      status: health.status,
+      pool: health.pool,
+    });
+  } catch {
+    res.status(503).json({ status: 'degraded' });
+  }
+});
+
+const deepHealthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: 'Too many health check requests.' },
+});
+
+/**
+ * @openapi
+ * /health/deep:
+ *   get:
+ *     summary: Deep readiness check
+ *     description: >
+ *       Checks the database, Redis, every configured Horizon endpoint, the
+ *       ledger listener and the rate limiter. `components.horizon` lists the
+ *       primary and fallback endpoints and which one is active (BE-199).
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Healthy or degraded
+ *       503:
+ *         description: A critical dependency (database or Redis) is unhealthy
+ */
+app.get('/health/deep', deepHealthLimiter, async (req, res) => {
+  try {
+    const health = await runDeepHealthChecks();
+    const httpStatus = health.status === 'unhealthy' ? 503 : 200;
+    res.status(httpStatus).json(health);
+  } catch {
+    res.status(503).json({ status: 'unhealthy' });
+  }
+});
+
+/**
+ * @openapi
+ * /api/health/ledger-listener:
+ *   get:
+ *     summary: Ledger listener status
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Ledger listener health snapshot
+ */
+app.get('/api/health/ledger-listener', (req, res) => {
+  res.json(getLedgerHealth());
+});
+
+/**
+ * @openapi
+ * /metrics:
+ *   get:
+ *     summary: Prometheus metrics
+ *     description: "Requires an `Authorization: Bearer <METRICS_TOKEN>` header when METRICS_TOKEN is set (always in production)."
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Prometheus text exposition format
+ *       401:
+ *         description: Missing or invalid metrics token
+ */
+app.get('/metrics', async (req, res) => {
+  // BE-174: METRICS_TOKEN is required in production (enforced by validateEnv),
+  // so /metrics is never public there.
+  const token = process.env.METRICS_TOKEN;
+  if (token || process.env.NODE_ENV === 'production') {
+    const auth = req.headers.authorization || '';
+    if (!token || auth !== `Bearer ${token}`) {
+      return res.status(401).end();
+    }
+  }
+  res.set('Content-Type', registry.contentType);
+  res.end(await registry.metrics());
+});
+
+// Sentry v8: register the Express error handler after all routes so thrown
+// route errors are reported. No-op when Sentry was not initialized (no DSN).
+Sentry.setupExpressErrorHandler(app);
+
+app.use(errorHandler);
+
+app.swaggerSpec = specs;
+
+module.exports = app;

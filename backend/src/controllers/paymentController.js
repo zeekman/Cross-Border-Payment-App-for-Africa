@@ -63,36 +63,7 @@ function encodeHistoryCursor(createdAt, id) {
   return Buffer.from(JSON.stringify({ created_at: timestamp, id }), "utf8").toString("base64url");
 }
 
-/**
- * Build the structured fee breakdown for a payment.
- * @param {string|number} grossAmount  - Amount the sender sent
- * @param {string}        asset        - e.g. "USDC" or "XLM"
- * @param {string|null}   feeCharged   - Stellar fee_charged in stroops (from Horizon result)
- */
-async function buildFeeBreakdown(grossAmount, asset, feeCharged) {
-  const gross = parseFloat(grossAmount);
-  let feeBps = FALLBACK_PLATFORM_FEE_BPS;
-  try {
-    const cfg = await getActiveConfig('platform', asset);
-    if (cfg) feeBps = cfg.fee_bps;
-  } catch (_) {
-    // fall back to env var if cache/DB is unavailable
-  }
-  const platformFee = parseFloat((gross * feeBps / 10000).toFixed(7));
-  const stellarBaseFeeXlm = feeCharged != null
-    ? parseFloat((parseInt(feeCharged, 10) / 1e7).toFixed(7))
-    : null;
-  const netAmount = parseFloat((gross - platformFee).toFixed(7));
-
-  return {
-    gross_amount_usdc: parseFloat(gross.toFixed(7)),
-    platform_fee_bps: feeBps,
-    platform_fee_usdc: platformFee,
-    stellar_base_fee_xlm: stellarBaseFeeXlm,
-    net_amount_usdc: parseFloat(netAmount.toFixed(7)),
-    asset,
-  };
-}
+// buildFeeBreakdown comes from services/fees (shared with scheduled payments).
 
 // Approximate XLM/USD rate  in production replace with a live price feed
 const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
@@ -509,8 +480,9 @@ async function send(req, res, next) {
       const netAmount = fee_breakdown.net_amount_usdc;
 
       // Broadcast to Stellar - send net amount to recipient
-      const { transactionHash, ledger, type, claimableBalanceId, expiresAt, claimableAmount, feeCharged } = await sendPayment({
-      const { transactionHash, ledger, type, claimableBalanceId, feeCharged, successful, maxTime } = await sendPayment({
+      const {
+        transactionHash, ledger, type, claimableBalanceId, expiresAt, claimableAmount, feeCharged, successful, maxTime,
+      } = await sendPayment({
         senderPublicKey: public_key,
         encryptedSecretKey: encrypted_secret_key,
         recipientPublicKey: recipient_address,
@@ -526,38 +498,33 @@ async function send(req, res, next) {
       // Update fee breakdown with actual stellar fee
       const updated_fee_breakdown = withStellarFee(fee_breakdown, feeCharged);
 
-      // Save to DB
-      const txStatus = type === "claimable_balance" ? "pending_claim" : "confirming";
-      const transactionParams = [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time, JSON.stringify(updated_fee_breakdown)];
+      // Save to DB. A known Horizon result is final; otherwise the row stays
+      // 'confirming' until transactionConfirmationJob reconciles it.
+      let txStatus;
+      if (type === "claimable_balance") txStatus = "pending_claim";
+      else if (successful === true) txStatus = "completed";
+      else if (successful === false) txStatus = "failed";
+      else txStatus = "confirming";
+      const confirmationExpiresAt = maxTime ? new Date(Number(maxTime) * 1000) : null;
+      const confirmedAt = txStatus === "completed" || txStatus === "failed" ? new Date() : null;
+      const transactionParams = [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time, JSON.stringify(updated_fee_breakdown), updated_fee_breakdown.platform_fee_amount, confirmedAt, confirmationExpiresAt];
+      const insertTransactionSql = `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown, fee_amount, confirmed_at, confirmation_expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`;
       if (type === "claimable_balance") {
         await db.query(
           `WITH inserted_transaction AS (
-             INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+             ${insertTransactionSql}
              RETURNING id
            )
            INSERT INTO claimable_balances (balance_id, user_id, asset, amount, claimant_wallet, expires_at)
-           SELECT $16, $17, $5, $18, $3, $19
+           SELECT $19, $20, $5, $21, $3, $22
            FROM inserted_transaction
            ON CONFLICT (balance_id) DO NOTHING`,
           [...transactionParams, claimableBalanceId, req.user.userId, claimableAmount, expiresAt],
         );
       } else {
-        await db.query(
-          `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-          transactionParams,
-        );
+        await db.query(insertTransactionSql, transactionParams);
       }
-      const txStatus = type === "claimable_balance"
-        ? "pending_claim"
-        : successful === false ? "failed" : "completed";
-      const confirmationExpiresAt = maxTime ? new Date(Number(maxTime) * 1000) : null;
-      await db.query(
-        `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown, fee_amount, confirmed_at, confirmation_expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-        [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time, JSON.stringify(updated_fee_breakdown), updated_fee_breakdown.platform_fee_amount, txStatus === "completed" || txStatus === "failed" ? new Date() : null, confirmationExpiresAt],
-      );
 
       txResult = { transactionHash, ledger, type, claimableBalanceId, expiresAt, fee_breakdown: updated_fee_breakdown, txStatus };
     });
@@ -871,10 +838,6 @@ async function history(req, res, next) {
       return res.status(400).json({ error: `Invalid status value. Must be one of: ${HISTORY_STATUSES.join(", ")}` });
     }
 
-    const walletResult = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
-      [req.user.userId],
-    );
     const walletResult = walletId
       ? await db.query("SELECT public_key FROM wallets WHERE user_id = $1 AND id = $2", [req.user.userId, walletId])
       : await db.query(

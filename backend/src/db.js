@@ -63,9 +63,17 @@ pool.on('error', (err) => {
 });
 
 // Periodic pool health snapshot — unref'd so it doesn't prevent process exit.
-setInterval(() => {
-  logger.info('DB pool stats', getPoolStats());
-}, POOL_STATS_INTERVAL_MS).unref();
+// Not started under Jest: a timer firing after a test has mocked the logger
+// used to throw outside any test and crash the whole --runInBand process.
+if (process.env.NODE_ENV !== 'test') {
+  setInterval(() => {
+    try {
+      logger.info('DB pool stats', getPoolStats());
+    } catch (_) {
+      // Logging must never take the process down.
+    }
+  }, POOL_STATS_INTERVAL_MS).unref();
+}
 
 /**
  * Executes a SQL query using a client from the pool.

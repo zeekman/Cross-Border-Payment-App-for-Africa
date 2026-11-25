@@ -4,6 +4,7 @@ const db = require('../db');
 const { isJtiBlacklisted } = require('../controllers/sessionController');
 const logger = require('../utils/logger');
 const audit = require('../services/audit');
+const { isAccessTokenPayload } = require('../utils/tokens');
 
 function maskWalletAddress(address) {
   if (!address || address.length < 8) return address;
@@ -18,7 +19,13 @@ module.exports = async function authMiddleware(req, res, next) {
   const token = authHeader.split(' ')[1];
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    
+
+    // Single-purpose tokens (phone verification, step-up, device trust) share
+    // JWT_SECRET but must never stand in for a session (BE-197).
+    if (!isAccessTokenPayload(payload)) {
+      return res.status(401).json({ error: 'Token is not valid for this endpoint', code: 'TOKEN_SCOPE_INVALID' });
+    }
+
     // Check if JTI is blacklisted (token revoked via session management)
     if (payload.jti) {
       const blacklisted = await isJtiBlacklisted(payload.jti);
