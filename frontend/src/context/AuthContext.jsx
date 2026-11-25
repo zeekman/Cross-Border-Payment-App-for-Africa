@@ -128,8 +128,16 @@ export function AuthProvider({ children }) {
 
   const updateUser = (fields) => setUser((prev) => (prev ? { ...prev, ...fields } : fields));
 
+  // Re-fetch the current account so phone_verified (and other server-side
+  // flags) reflect the latest state after verification (FE-191).
+  const refreshUser = async () => {
+    const res = await api.get('/auth/me');
+    setUser(res.data);
+    return res.data;
+  };
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, updateUser }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, updateUser, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );
