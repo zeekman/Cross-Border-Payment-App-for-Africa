@@ -1,26 +1,67 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Send, ChevronDown, Users, Camera, Code, ArrowRightLeft, Wallet, AlertTriangle } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useMemo, useReducer, useRef, lazy, Suspense } from 'react';
+import { useNavigate, useSearchParams, useBeforeUnload, Link } from 'react-router-dom';
+import { useMemoValidation } from '../hooks/useMemoValidation';
+import {
+  ArrowLeft,
+  Send,
+  ChevronDown,
+  Camera,
+  Code,
+  ArrowRightLeft,
+  Wallet,
+  AlertTriangle,
+  CheckCircle,
+  BookUser,
+} from 'lucide-react';
 import api from '../utils/api';
+import { useWallet } from '../context/WalletContext';
+import { useConfirm } from '../context/ConfirmContext';
+import { validateStellarAddress } from '../utils/validation';
 import { useExchangeRates } from '../hooks/useExchangeRates';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
-import QRScanner from '../components/QRScanner';
+import { Skeleton } from '../components/Skeleton';
 import PINVerificationModal from '../components/PINVerificationModal';
 import XDRInspectorModal from '../components/XDRInspectorModal';
-import LedgerSignModal from '../components/LedgerSignModal';
+import PushNotificationPrompt from '../components/PushNotificationPrompt';
+import { usePushNotifications } from '../hooks/usePushNotifications';
+import { usePaymentStream, CONNECTION_STATE } from '../hooks/usePaymentStream';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
+
+// Lazy-loaded so react-qr-reader and @ledgerhq/* stay out of the main bundle.
+const QRScanner = lazy(() => import('../components/QRScanner'));
+const LedgerSignModal = lazy(() => import('../components/LedgerSignModal'));
+const hasWebUSB = () => typeof navigator !== 'undefined' && 'usb' in navigator;
 
 const SLIPPAGE_OPTIONS = [0.5, 1, 2];
 const DEFAULT_SLIPPAGE = 1;
+
+// Issue #998: quote freshness window. If the user pauses on the Review/Confirm
+// steps longer than this, the quote (path rate / network fee) is re-fetched
+// automatically so they never confirm a stale rate.
+const QUOTE_FRESHNESS_MS = 30000;
 
 const getSavedSlippage = () => {
   const v = parseFloat(localStorage.getItem('afripay_slippage'));
   return SLIPPAGE_OPTIONS.includes(v) ? v : DEFAULT_SLIPPAGE;
 };
 
+const WIZARD_STEPS = ['Recipient', 'Amount', 'Review', 'Confirm'];
+
+function stepReducer(state, action) {
+  switch (action.type) {
+    case 'NEXT': return { step: Math.min(state.step + 1, 4) };
+    case 'BACK': return { step: Math.max(state.step - 1, 1) };
+    case 'GO': return { step: action.step };
+    case 'RESET': return { step: 1 };
+    default: return state;
+  }
+}
+
 export default function SendMoney() {
+  const confirm = useConfirm();
   const navigate = useNavigate();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [searchParams] = useSearchParams();
   const submitButtonRef = React.useRef(null);
   const [form, setForm] = useState({
@@ -40,33 +81,91 @@ export default function SendMoney() {
   const [selectedContactIndex, setSelectedContactIndex] = useState(-1);
   const contactSearchRef = useRef(null);
   const contactListRef = useRef(null);
+  const [selectedContactName, setSelectedContactName] = useState('');
+  const [showSaveContactPrompt, setShowSaveContactPrompt] = useState(null); // address string or null
+  const [saveContactName, setSaveContactName] = useState('');
+  const [saveContactLoading, setSaveContactLoading] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [showPINVerification, setShowPINVerification] = useState(false);
   const [showXDRInspector, setShowXDRInspector] = useState(false);
   const [transactionXDR, setTransactionXDR] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [confirmed, setConfirmed] = useState(false);
+  const [stepLoading, setStepLoading] = useState(false);
+  const [{ step }, dispatchStep] = useReducer(stepReducer, { step: 1 });
   const [feeXLM, setFeeXLM] = useState(null);
+  // Issue #641: pre-submission fee estimation preview
+  const [feeEstimate, setFeeEstimate] = useState(null);
+  const [feeEstimateLoading, setFeeEstimateLoading] = useState(false);
+  const [feeEstimateError, setFeeEstimateError] = useState(false);
   const [contractSimData, setContractSimData] = useState(null);
   const [contractSimLoading, setContractSimLoading] = useState(false);
+  // Issue #998: timestamp of the last successful quote (path/fee) fetch, plus
+  // flags for the auto re-quote indicator on the Review/Confirm screens.
+  const [quoteFetchedAt, setQuoteFetchedAt] = useState(null);
+  const [quoteRefreshed, setQuoteRefreshed] = useState(false);
+  const [quoteRefreshing, setQuoteRefreshing] = useState(false);
   const [requestId] = useState(searchParams.get('request'));
+  const [requestError, setRequestError] = useState(null);
+  const [requestExpiry, setRequestExpiry] = useState(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [showPushPrompt, setShowPushPrompt] = useState(false);
+  const { shouldShowPrompt } = usePushNotifications();
+
+  // Pre-fill form from payment request when only requestId is in the URL
+  useEffect(() => {
+    if (!requestId) return;
+    api
+      .get(`/payment-requests/${requestId}`)
+      .then((r) => {
+        const { requester_wallet, amount, asset, memo, expires_at, claimed } = r.data;
+        setRequestExpiry(expires_at || null);
+        if (claimed) setRequestError(t('send.request_claimed', 'This payment request has already been paid.'));
+        setForm((f) => ({
+          ...f,
+          recipient_address: requester_wallet || f.recipient_address,
+          amount: amount ? String(amount) : f.amount,
+          asset: asset || f.asset,
+          memo: memo || f.memo,
+        }));
+      })
+      .catch((err) => {
+        const status = err.response?.status;
+        setRequestError(
+          status === 410
+            ? t('send.request_expired', 'This payment request has expired.')
+            : status === 404
+              ? t('send.request_not_found', 'Payment request not found.')
+              : t('send.request_load_failed', 'Could not load this payment request.'),
+        );
+      });
+  }, [requestId]); // eslint-disable-line react-hooks/exhaustive-deps -- prefill once per request id; must not overwrite later user edits
   const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
   const [pathResult, setPathResult] = useState(null);
   const [pathLoading, setPathLoading] = useState(false);
   const [memoRequired, setMemoRequired] = useState(false);
+  const [memoError, setMemoError] = useState(false);
+  const { memoError: hashMemoError, validateMemo, getMemoPlaceholder, isMemoValid } = useMemoValidation();
+  const memoRef = useRef(null);
+  const [addressError, setAddressError] = useState(false);
   // 'send' = strict send (sender specifies exact amount), 'receive' = strict receive (recipient gets exact amount)
   const [sendMode, setSendMode] = useState('send');
 
   // Trustline check state
   const [trustlineWarning, setTrustlineWarning] = useState(null); // null | string (asset code)
 
+  // Path payment toggle — when enabled the user can pick a destination asset and
+  // the payment is routed via Stellar DEX path payment instead of a direct transfer.
+  const [usePathPayment, setUsePathPayment] = useState(false);
+
   // Ledger hardware wallet state
   const [showLedgerModal, setShowLedgerModal] = useState(false);
   const [unsignedXDR, setUnsignedXDR] = useState(null);
   const [ledgerNetworkPassphrase, setLedgerNetworkPassphrase] = useState(null);
 
-  const isCrossAsset = form.destination_asset && form.destination_asset !== form.asset;
+  const isCrossAsset = usePathPayment && form.destination_asset && form.destination_asset !== form.asset;
+
+  /** True for a checksum-valid Ed25519 key or a well-formed federation address. */
+  const isValidStellarAddress = (addr) => validateStellarAddress(addr) === null;
 
   // Initial/clean state used for reset and dirty-check
   const cleanForm = {
@@ -84,11 +183,13 @@ export default function SendMoney() {
   /** Clears all user-entered fields back to their URL-seeded defaults. */
   const resetForm = () => {
     setForm(cleanForm);
-    setConfirmed(false);
     setFeeXLM(null);
     setPathResult(null);
     setMemoRequired(false);
+    setMemoError(false);
+    setAddressError(false);
     setContractSimData(null);
+    dispatchStep({ type: 'RESET' });
   };
 
   /** True when the user has entered data beyond the URL-seeded defaults. */
@@ -98,12 +199,18 @@ export default function SendMoney() {
     form.memo !== cleanForm.memo ||
     (form.private_note || '') !== '';
 
+  const { activeWalletId } = useWallet();
   // Multi-wallet state
   const [wallets, setWallets] = useState([]);
-  const [selectedWalletId, setSelectedWalletId] = useState(searchParams.get('wallet_id') || null);
+  const [selectedWalletId, setSelectedWalletId] = useState(searchParams.get('wallet_id') || activeWalletId || null);
   const [showWalletDropdown, setShowWalletDropdown] = useState(false);
 
   const selectedWallet = wallets.find((w) => w.id === selectedWalletId) || wallets[0] || null;
+
+  // Stream real-time payment status updates for the active wallet.
+  // Surfacing connectionState lets step 4 show a reconnecting indicator so the
+  // user isn't looking at a silently-stale status view.
+  const { connectionState } = usePaymentStream(selectedWallet?.public_key ?? null, () => {});
 
   // Available XLM balance for the selected wallet (after minimum reserve)
   const selectedWalletXlmEntry = selectedWallet?.balances?.find((b) => b.asset === 'XLM');
@@ -117,8 +224,60 @@ export default function SendMoney() {
     parseFloat(form.amount) > availableXlm;
 
   useEffect(() => {
-    api.get('/payments/fee-stats').then((r) => setFeeStats(r.data)).catch(() => { });
+    api
+      .get('/payments/fee-stats')
+      .then((r) => setFeeStats(r.data))
+      .catch(() => {});
   }, []);
+
+  // Issue #641: debounced fee estimation preview as the user types an amount.
+  useEffect(() => {
+    const gross = parseFloat(form.amount);
+    if (!form.amount || !Number.isFinite(gross) || gross <= 0) {
+      setFeeEstimate(null);
+      setFeeEstimateError(false);
+      setFeeEstimateLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setFeeEstimateLoading(true);
+    setFeeEstimateError(false);
+
+    const timer = setTimeout(async () => {
+      try {
+        const [rateRes, networkRes] = await Promise.all([
+          api.get('/payments/fee-rate'),
+          api.get('/payments/estimate-fee'),
+        ]);
+        if (cancelled) return;
+        const feeBps = rateRes.data?.fee_bps;
+        if (feeBps == null || Number.isNaN(Number(feeBps))) {
+          throw new Error('Fee rate unavailable');
+        }
+        const platformFee = gross * (Number(feeBps) / 10000);
+        setFeeEstimate({
+          gross,
+          asset: form.asset,
+          feePct: Number(feeBps) / 100,
+          platformFee,
+          networkFeeXLM: networkRes.data?.fee_xlm ?? null,
+          netAmount: gross - platformFee,
+        });
+      } catch {
+        if (cancelled) return;
+        setFeeEstimate(null);
+        setFeeEstimateError(true);
+      } finally {
+        if (!cancelled) setFeeEstimateLoading(false);
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [form.amount, form.asset]);
 
   // Warn the user before closing/refreshing the tab when the form has data
   useBeforeUnload(
@@ -131,29 +290,38 @@ export default function SendMoney() {
   );
 
   useEffect(() => {
-    api.get('/wallet/list').then((r) => {
-      setWallets(r.data.wallets || []);
-      // If no wallet_id in URL, default to the user's default wallet
-      if (!selectedWalletId && r.data.wallets?.length) {
-        const def = r.data.wallets.find((w) => w.is_default) || r.data.wallets[0];
-        setSelectedWalletId(def.id);
-      }
-    }).catch(() => { });
+    api
+      .get('/wallet/list')
+      .then((r) => {
+        setWallets(r.data.wallets || []);
+        // If no wallet_id in URL, default to the user's default wallet
+        if (!selectedWalletId && r.data.wallets?.length) {
+          const def = r.data.wallets.find((w) => w.is_default) || r.data.wallets[0];
+          setSelectedWalletId(def.id);
+        }
+      })
+      .catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    api.get('/wallet/contacts').then(r => setContacts(r.data.contacts || [])).catch(() => { });
+    api
+      .get('/contacts')
+      .then((r) => setContacts(r.data.contacts || []))
+      .catch(() => {});
   }, []);
 
   // Filter contacts based on search term
   const filteredContacts = useMemo(() => {
     if (!contactSearch.trim()) return contacts;
     const searchLower = contactSearch.toLowerCase();
-    return contacts.filter(contact =>
-      contact.name.toLowerCase().includes(searchLower) ||
-      contact.wallet_address.toLowerCase().includes(searchLower)
+    return contacts.filter(
+      (contact) =>
+        contact.name.toLowerCase().includes(searchLower) ||
+        contact.wallet_address.toLowerCase().includes(searchLower)
     );
   }, [contacts, contactSearch]);
+  const [error, setError] = useState('');
+  const fileInputRef = useRef(null);
 
   // Reset selected index when search changes
   useEffect(() => {
@@ -167,6 +335,35 @@ export default function SendMoney() {
     }
   }, [showContacts]);
 
+  // Click-outside + Escape to close contacts dropdown
+  const contactsDropdownRef = useRef(null);
+  useEffect(() => {
+    if (!showContacts) return;
+
+    const onMouseDown = (e) => {
+      if (!contactsDropdownRef.current) return;
+      if (!contactsDropdownRef.current.contains(e.target)) {
+        setShowContacts(false);
+        setContactSearch('');
+      }
+    };
+
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setShowContacts(false);
+        setContactSearch('');
+      }
+    };
+
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [showContacts]);
+
   // Handle keyboard navigation in contacts dropdown
   const handleContactKeyDown = (e) => {
     if (!showContacts) return;
@@ -174,13 +371,11 @@ export default function SendMoney() {
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
-        setSelectedContactIndex(prev =>
-          prev < filteredContacts.length - 1 ? prev + 1 : prev
-        );
+        setSelectedContactIndex((prev) => (prev < filteredContacts.length - 1 ? prev + 1 : prev));
         break;
       case 'ArrowUp':
         e.preventDefault();
-        setSelectedContactIndex(prev => prev > 0 ? prev - 1 : 0);
+        setSelectedContactIndex((prev) => (prev > 0 ? prev - 1 : 0));
         break;
       case 'Enter':
         e.preventDefault();
@@ -220,54 +415,131 @@ export default function SendMoney() {
         const isOpen = window.visualViewport.height < window.innerHeight * 0.75;
         setKeyboardOpen(isOpen);
         if (isOpen && submitButtonRef.current) {
-          setTimeout(() => submitButtonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 100);
+          setTimeout(
+            () => submitButtonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }),
+            100
+          );
         }
       }
     };
     window.visualViewport?.addEventListener('resize', handleResize);
     return () => window.visualViewport?.removeEventListener('resize', handleResize);
   }, []);
+  // Ref to abort any in-flight path request when form values change
+  const pathAbortRef = useRef(null);
+
   // Debounced path finding
   const findPath = useCallback(async () => {
+    // Abort any previous in-flight request
+    pathAbortRef.current?.abort();
+    const controller = new AbortController();
+    pathAbortRef.current = controller;
+
     if (!isCrossAsset || !form.amount || !form.recipient_address) {
       setPathResult(null);
+      setPathLoading(false);
       return;
     }
     setPathLoading(true);
     try {
       if (sendMode === 'receive') {
         // Strict receive: user specifies destination amount, we find source amount
-        const res = await api.post('/payments/find-receive-path', {
-          source_asset: form.asset,
-          destination_asset: form.destination_asset,
-          destination_amount: parseFloat(form.amount),
-          recipient_address: form.recipient_address,
-        });
+        const res = await api.post(
+          '/payments/find-receive-path',
+          {
+            source_asset: form.asset,
+            destination_asset: form.destination_asset,
+            destination_amount: parseFloat(form.amount),
+            recipient_address: form.recipient_address,
+          },
+          { signal: controller.signal }
+        );
         setPathResult(res.data);
+        setQuoteFetchedAt(Date.now());
       } else {
         // Strict send: user specifies source amount, we find destination amount
-        const res = await api.post('/payments/find-path', {
-          source_asset: form.asset,
-          source_amount: parseFloat(form.amount),
-          destination_asset: form.destination_asset,
-          recipient_address: form.recipient_address,
-        });
+        const res = await api.post(
+          '/payments/find-path',
+          {
+            source_asset: form.asset,
+            source_amount: parseFloat(form.amount),
+            destination_asset: form.destination_asset,
+            recipient_address: form.recipient_address,
+          },
+          { signal: controller.signal }
+        );
         setPathResult(res.data);
+        setQuoteFetchedAt(Date.now());
       }
-    } catch {
-      setPathResult(null);
+    } catch (err) {
+      // Ignore abort errors — they are intentional cancellations
+      if (err.name !== 'CanceledError' && err.name !== 'AbortError') {
+        setPathResult(null);
+      }
     } finally {
-      setPathLoading(false);
+      // Only clear loading state if this request was not superseded
+      if (!controller.signal.aborted) {
+        setPathLoading(false);
+      }
     }
-  }, [form.amount, form.asset, form.destination_asset, form.recipient_address, isCrossAsset, sendMode]);
+  }, [
+    form.amount,
+    form.asset,
+    form.destination_asset,
+    form.recipient_address,
+    isCrossAsset,
+    sendMode,
+  ]);
 
   useEffect(() => {
+    // Clear stale result immediately so the UI never shows data for old inputs
+    setPathResult(null);
     const timer = setTimeout(findPath, 600);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      pathAbortRef.current?.abort();
+    };
   }, [findPath]);
 
+  // Issue #998: re-fetch the current quote (network fee + path rate) and flag
+  // the change so the UI can tell the user the numbers were refreshed.
+  const refreshQuote = useCallback(async () => {
+    setQuoteRefreshing(true);
+    try {
+      if (isCrossAsset && form.amount && form.recipient_address) {
+        await findPath();
+      }
+      try {
+        const r = await api.get('/payments/estimate-fee');
+        setFeeXLM(r.data.fee_xlm);
+      } catch {
+        // Keep the previous fee if the estimate call fails — never block confirm.
+      }
+    } finally {
+      setQuoteFetchedAt(Date.now());
+      setQuoteRefreshing(false);
+      setQuoteRefreshed(true);
+    }
+  }, [findPath, isCrossAsset, form.amount, form.recipient_address]);
+
+  // Issue #998: while the user sits on the Review/Confirm screens, watch for a
+  // stale quote and re-quote automatically instead of confirming the original.
+  // Paused while the tab is hidden; returning to it checks straight away.
+  useVisibleInterval(
+    () => {
+      if (Date.now() - quoteFetchedAt > QUOTE_FRESHNESS_MS) {
+        refreshQuote();
+      }
+    },
+    5000,
+    { enabled: step >= 3 && Boolean(quoteFetchedAt) },
+  );
+
   const checkMemoRequired = useCallback(async (address) => {
-    if (!address || address.length < 56) { setMemoRequired(false); return; }
+    if (!address || address.length < 56) {
+      setMemoRequired(false);
+      return;
+    }
     try {
       const res = await api.get('/payments/memo-required', { params: { address } });
       setMemoRequired(res.data.memo_required === true);
@@ -306,69 +578,89 @@ export default function SendMoney() {
     return () => clearTimeout(timer);
   }, [form.recipient_address, form.asset]);
 
-  const estimatedValue = form.amount && form.asset === 'XLM'
-    ? `≈ ${convertFromXLM(form.amount, 'USD')} USD`
-    : '';
+  const estimatedValue =
+    form.amount && form.asset === 'XLM' ? `≈ ${convertFromXLM(form.amount, 'USD')} USD` : '';
 
   // Minimum destination amount after slippage
   const destMin = pathResult
     ? (parseFloat(pathResult.destinationAmount) * (1 - form.slippage / 100)).toFixed(7)
     : null;
   const memoTrimmed = form.memo.trim();
-  const memoMaxLen =
-    form.memo_type === 'id' ? 20 : form.memo_type === 'text' ? 28 : 64;
+  const memoMaxLen = form.memo_type === 'id' ? 20 : form.memo_type === 'text' ? 28 : 64;
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-
-    // First call: show confirmation preview with fresh fee estimate and optional contract simulation.
-    if (!confirmed) {
-      try {
-        const r = await api.get('/payments/estimate-fee');
-        setFeeXLM(r.data.fee_xlm);
-      } catch {
-        setFeeXLM(null);
-      }
-
-      if (form.recipient_address.startsWith('C')) {
-        setContractSimLoading(true);
-        setContractSimData(null);
-        try {
-          const payload = {
-            recipient_address: form.recipient_address,
-            amount: parseFloat(form.amount),
-            asset: form.asset,
-            wallet_id: selectedWallet?.id || undefined,
-            fee_priority: form.fee_priority,
-          };
-          if (form.memo) {
-            payload.memo = form.memo;
-            payload.memo_type = form.memo_type;
-          }
-          const buildRes = await api.post('/payments/build', payload);
-          if (buildRes.data.xdr) {
-            const simRes = await api.post('/contracts/simulate', { transaction: buildRes.data.xdr });
-            setContractSimData(simRes.data);
-          }
-        } catch (simErr) {
-          setContractSimData({ error: simErr.response?.data?.error || simErr.message });
-        } finally {
-          setContractSimLoading(false);
-        }
-      }
-
-      setConfirmed(true);
-      return;
+  // Fetch fee estimate and contract simulation, then advance to Review step
+  const handleAdvanceToReview = async () => {
+    setStepLoading(true);
+    setQuoteRefreshed(false);
+    try {
+      const r = await api.get('/payments/estimate-fee');
+      setFeeXLM(r.data.fee_xlm);
+    } catch {
+      setFeeXLM(null);
     }
 
-    // Second call: user confirmed the preview — open PIN modal to authorise the payment.
-    setShowPINVerification(true);
+    if (form.recipient_address.startsWith('C')) {
+      setContractSimLoading(true);
+      setContractSimData(null);
+      try {
+        const payload = {
+          recipient_address: form.recipient_address,
+          amount: parseFloat(form.amount),
+          asset: form.asset,
+          wallet_id: selectedWallet?.id || undefined,
+          fee_priority: form.fee_priority,
+        };
+        if (form.memo) {
+          payload.memo = form.memo;
+          payload.memo_type = form.memo_type;
+        }
+        const buildRes = await api.post('/payments/build', payload);
+        if (buildRes.data.xdr) {
+          const simRes = await api.post('/contracts/simulate', {
+            transaction: buildRes.data.xdr,
+          });
+          setContractSimData(simRes.data);
+        }
+      } catch (simErr) {
+        setContractSimData({ error: simErr.response?.data?.error || simErr.message });
+      } finally {
+        setContractSimLoading(false);
+      }
+    }
+
+    setStepLoading(false);
+    setQuoteFetchedAt(Date.now());
+    dispatchStep({ type: 'NEXT' });
+  };
+
+  const handleStepSubmit = async (e) => {
+    e.preventDefault();
+    if (step === 1) {
+      dispatchStep({ type: 'NEXT' });
+    } else if (step === 2) {
+      await handleAdvanceToReview();
+    } else if (step === 3) {
+      dispatchStep({ type: 'NEXT' });
+    }
+  };
+
+  // SEP-7 payment requests pre-fill amount/memo/asset; the user still confirms on the review step.
+  const handleQRScan = (address, payment = {}) => {
+    setForm((prev) => ({
+      ...prev,
+      recipient_address: address,
+      ...(payment.amount && { amount: payment.amount }),
+      ...(payment.memo && { memo: payment.memo }),
+      ...(payment.memo && payment.memo_type && { memo_type: payment.memo_type }),
+      ...(payment.asset_code && { asset: payment.asset_code }),
+    }));
+    if (payment.amount || payment.memo) toast(t('send.qr_prefilled'));
   };
 
   const handleSignWithLedger = async () => {
     setLoading(true);
     try {
-      const res = await api.post('/payments/build-transaction', {
+      const res = await api.post('/ledger/build', {
         recipient_address: form.recipient_address,
         amount: parseFloat(form.amount),
         asset: form.asset,
@@ -390,13 +682,13 @@ export default function SendMoney() {
     setShowLedgerModal(false);
     setLoading(true);
     try {
-      await api.post('/payments/submit-signed', {
+      await api.post('/ledger/submit', {
         xdr: signedXDR,
         recipient_address: form.recipient_address,
         amount: parseFloat(form.amount),
         asset: form.asset,
         wallet_id: selectedWallet?.id || undefined,
-      });
+      }, { headers: { 'Idempotency-Key': crypto.randomUUID() } });
       toast.success('Payment sent via Ledger!');
       resetForm();
       navigate('/dashboard');
@@ -408,13 +700,17 @@ export default function SendMoney() {
   };
 
   const handlePINVerified = async () => {
+    if (requestError) { toast.error(requestError); return; }
     setLoading(true);
     try {
       let res;
       if (isCrossAsset && pathResult) {
         if (sendMode === 'receive') {
           // Strict receive: recipient gets exact destination_amount
-          const sourceMax = (parseFloat(pathResult.sourceAmount) * (1 + form.slippage / 100)).toFixed(7);
+          const sourceMax = (
+            parseFloat(pathResult.sourceAmount) *
+            (1 + form.slippage / 100)
+          ).toFixed(7);
           res = await api.post('/payments/send-strict-receive', {
             recipient_address: form.recipient_address,
             source_asset: form.asset,
@@ -439,9 +735,11 @@ export default function SendMoney() {
         }
         toast.success(t('send.success'));
         if (requestId) {
-          await api.post(`/payment-requests/${requestId}/claim`, {
-            txHash: res.data.transaction.tx_hash
-          }).catch(() => { });
+          await api
+            .post(`/payment-requests/${requestId}/claim`, {
+              txHash: res.data.transaction.tx_hash,
+            })
+            .catch(() => {});
         }
         resetForm();
         navigate('/dashboard');
@@ -451,7 +749,9 @@ export default function SendMoney() {
 
         // Resolve federation address if needed
         if (recipientAddress.includes('*')) {
-          const fedRes = await api.get('/payments/resolve-federation', { params: { address: recipientAddress } });
+          const fedRes = await api.get('/payments/resolve-federation', {
+            params: { address: recipientAddress },
+          });
           recipientAddress = fedRes.data.public_key;
         }
 
@@ -471,7 +771,10 @@ export default function SendMoney() {
 
       // Offline queue — the api interceptor returns { queued: true }
       if (res.data?.queued) {
-        toast.success('You\'re offline. Payment queued — it will send automatically when you reconnect.', { duration: 5000 });
+        toast.success(
+          "You're offline. Payment queued — you'll be asked to confirm it with your PIN when you reconnect.",
+          { duration: 5000 }
+        );
         resetForm();
         navigate('/dashboard');
         return;
@@ -479,28 +782,80 @@ export default function SendMoney() {
 
       // Mark payment request as claimed if applicable
       if (requestId) {
-        await api.post(`/payment-requests/${requestId}/claim`, {
-          txHash: res.data?.transaction?.tx_hash,
-        }).catch(() => { });
+        await api
+          .post(`/payment-requests/${requestId}/claim`, {
+            txHash: res.data?.transaction?.tx_hash,
+          })
+          .catch(() => {});
       }
 
       toast.success(t('send.success'));
+      // Issue #999: UX-only first-payment counter used solely to gate the
+      // push-notification pre-prompt (cosmetic). SECURITY WARNING: this
+      // localStorage counter is trivially resettable (clear storage, different
+      // browser/device) and must NEVER be used for transaction-velocity,
+      // fraud, or any security/limit decision — those live entirely server-side
+      // (backend/src/services/fraudDetection.js).
+      const count = parseInt(localStorage.getItem('afripay_payment_count') || '0', 10) + 1;
+      localStorage.setItem('afripay_payment_count', count.toString());
+      if (count === 1 && shouldShowPrompt()) setShowPushPrompt(true);
+      const recipientAddr = form.recipient_address;
+      const isKnown = contacts.some((c) => c.wallet_address === recipientAddr);
       resetForm();
-      navigate('/dashboard');
+      if (!isKnown && isValidStellarAddress(recipientAddr)) {
+        setShowSaveContactPrompt(recipientAddr);
+        setSaveContactName('');
+      } else {
+        navigate('/dashboard');
+      }
     } catch (err) {
-      toast.error(err.response?.data?.error || t('send.error'));
-      setConfirmed(false);
-      setShowPINVerification(false);
+      if (err.response?.data?.code === 'MEMO_REQUIRED') {
+        setMemoError(true);
+        setShowPINVerification(false);
+        dispatchStep({ type: 'GO', step: 2 });
+        setTimeout(() => {
+          memoRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          memoRef.current?.focus();
+        }, 50);
+      } else {
+        toast.error(err.response?.data?.error || t('send.error'));
+        setShowPINVerification(false);
+        // Stay on step 4 so the user can retry without starting over
+      }
     } finally {
       setLoading(false);
     }
   };
 
+  // Per-step validation
+  const step1Disabled =
+    !form.recipient_address ||
+    addressError ||
+    (!!form.recipient_address && !isValidStellarAddress(form.recipient_address));
+
+  const step2Disabled =
+    !form.amount ||
+    parseFloat(form.amount) <= 0 ||
+    belowMinBalance ||
+    (isCrossAsset && (!pathResult || pathLoading)) ||
+    stepLoading ||
+    (memoRequired && !form.memo.trim());
+
   return (
-    <div className="px-4 py-6 max-w-lg mx-auto pb-safe" style={{ paddingBottom: keyboardOpen ? 'max(1.5rem, env(safe-area-inset-bottom))' : '1.5rem' }}>
+    <div
+      className="px-4 py-6 max-w-lg mx-auto pb-safe"
+      style={{
+        paddingBottom: keyboardOpen ? 'max(1.5rem, env(safe-area-inset-bottom))' : '1.5rem',
+      }}
+    >
       <button
-        onClick={() => {
-          if (formIsDirty && !window.confirm('You have unsaved changes. Leave this page?')) return;
+        type="button"
+        onClick={async () => {
+          if (step > 1) {
+            dispatchStep({ type: 'BACK' });
+            return;
+          }
+          if (formIsDirty && !(await confirm(t('confirm.leave_unsaved', 'You have unsaved changes. Leave this page?'), { title: t('confirm.leave_title', 'Discard changes?'), confirmLabel: t('confirm.leave', 'Leave') }))) return;
           navigate(-1);
         }}
         className="text-gray-400 hover:text-white mb-6 flex items-center gap-1"
@@ -508,69 +863,127 @@ export default function SendMoney() {
         <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
-      <h2 className="text-2xl font-bold text-white mb-6">{t('send.title')}</h2>
+      <h2 className="text-2xl font-bold text-white mb-4">{t('send.title')}</h2>
+      {requestId && (requestError ? (
+        <div role="alert" className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-400">{requestError}</div>
+      ) : requestExpiry && (
+        <p className="mb-4 text-xs text-gray-400">
+          {t('send.request_expires', 'Payment request expires')} {new Date(requestExpiry).toLocaleString(i18n.language)}
+        </p>
+      ))}
 
-      <form onSubmit={handleSubmit} className="space-y-4 overflow-y-auto" style={{ maxHeight: keyboardOpen ? 'calc(100vh - 200px)' : 'auto' }}>
-        {/* Wallet selector */}
-        {wallets.length > 1 && (
-          <div>
-            <label className="text-sm text-gray-400 mb-1 block">Send from</label>
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowWalletDropdown((v) => !v)}
-                className="w-full flex items-center justify-between bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white hover:border-primary-500 transition-colors"
-                aria-haspopup="listbox"
-                aria-expanded={showWalletDropdown}
-              >
-                <div className="flex items-center gap-2">
-                  <Wallet size={15} className="text-primary-400" />
-                  <span className="text-sm">{selectedWallet?.label || 'Select wallet'}</span>
-                  {selectedWallet && (
-                    <span className="text-xs text-gray-500 font-mono">
-                      ({selectedWallet.balances?.find((b) => b.asset === 'XLM')?.balance || '0'} XLM)
-                    </span>
+      {/* Step indicator */}
+      <div className="flex items-center mb-6" aria-label="Progress">
+        {WIZARD_STEPS.map((label, i) => {
+          const num = i + 1;
+          return (
+            <React.Fragment key={num}>
+              <div className="flex flex-col items-center">
+                <div
+                  className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0 ${
+                    step > num
+                      ? 'bg-primary-500 text-white'
+                      : step === num
+                      ? 'bg-primary-500 text-white ring-4 ring-primary-500/20'
+                      : 'bg-gray-800 text-gray-500 border border-gray-700'
+                  }`}
+                  aria-current={step === num ? 'step' : undefined}
+                >
+                  {step > num ? <CheckCircle size={16} /> : num}
+                </div>
+                <span
+                  className={`text-xs mt-1 hidden sm:block ${
+                    step === num ? 'text-white' : 'text-gray-500'
+                  }`}
+                >
+                  {label}
+                </span>
+              </div>
+              {i < WIZARD_STEPS.length - 1 && (
+                <div
+                  className={`flex-1 h-0.5 mx-1 mb-4 ${step > num ? 'bg-primary-500' : 'bg-gray-700'}`}
+                />
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+
+      <form
+        onSubmit={handleStepSubmit}
+        className="space-y-4 overflow-y-auto"
+        style={{ maxHeight: keyboardOpen ? 'calc(100vh - 200px)' : 'auto' }}
+      >
+        {/* Issue #998: visible notice when the quote was auto-refreshed */}
+        {step >= 3 && (quoteRefreshing || quoteRefreshed) && (
+          <div
+            role="status"
+            className="bg-yellow-400/10 border border-yellow-400/30 text-yellow-300 text-xs rounded-xl px-3 py-2"
+          >
+            {quoteRefreshing ? 'Refreshing quote…' : 'Rate updated — showing the latest quote.'}
+          </div>
+        )}
+
+        {/* ── STEP 1: Recipient ── */}
+        {step === 1 && (
+          <>
+            {/* Wallet selector */}
+            {wallets.length > 1 && (
+              <div>
+                <label className="text-sm text-gray-400 mb-1 block">Send from</label>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowWalletDropdown((v) => !v)}
+                    className="w-full flex items-center justify-between bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white hover:border-primary-500 transition-colors"
+                    aria-haspopup="listbox"
+                    aria-expanded={showWalletDropdown}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Wallet size={15} className="text-primary-400" />
+                      <span className="text-sm">{selectedWallet?.label || 'Select wallet'}</span>
+                      {selectedWallet && (
+                        <span className="text-xs text-gray-500 font-mono">
+                          ({selectedWallet.balances?.find((b) => b.asset === 'XLM')?.balance || '0'} XLM)
+                        </span>
+                      )}
+                    </div>
+                    <ChevronDown
+                      size={14}
+                      className={`text-gray-400 transition-transform ${showWalletDropdown ? 'rotate-180' : ''}`}
+                    />
+                  </button>
+                  {showWalletDropdown && (
+                    <div
+                      className="absolute z-20 mt-1 w-full bg-gray-800 border border-gray-700 rounded-xl shadow-xl overflow-hidden"
+                      role="listbox"
+                    >
+                      {wallets.map((w) => {
+                        const xlm = w.balances?.find((b) => b.asset === 'XLM')?.balance || '0';
+                        return (
+                          <button
+                            key={w.id}
+                            type="button"
+                            role="option"
+                            aria-selected={w.id === selectedWalletId}
+                            onClick={() => { setSelectedWalletId(w.id); setShowWalletDropdown(false); }}
+                            className={`w-full flex items-center justify-between px-4 py-3 text-left transition-colors ${
+                              w.id === selectedWalletId
+                                ? 'bg-primary-500/20 text-primary-400'
+                                : 'hover:bg-gray-700 text-white'
+                            }`}
+                          >
+                            <div>
+                              <p className="text-sm font-medium">{w.label}</p>
+                              <p className="text-xs text-gray-500 font-mono">{w.public_key.slice(0, 16)}…</p>
+                            </div>
+                            <p className="text-sm font-semibold">{parseFloat(xlm).toLocaleString()} XLM</p>
+                          </button>
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
-                <ChevronDown
-                  size={14}
-                  className={`text-gray-400 transition-transform ${showWalletDropdown ? 'rotate-180' : ''}`}
-                />
-              </button>
-
-              {showWalletDropdown && (
-                <div
-                  className="absolute z-20 mt-1 w-full bg-gray-800 border border-gray-700 rounded-xl shadow-xl overflow-hidden"
-                  role="listbox"
-                >
-                  {wallets.map((w) => {
-                    const xlm = w.balances?.find((b) => b.asset === 'XLM')?.balance || '0';
-                    return (
-                      <button
-                        key={w.id}
-                        type="button"
-                        role="option"
-                        aria-selected={w.id === selectedWalletId}
-                        onClick={() => {
-                          setSelectedWalletId(w.id);
-                          setShowWalletDropdown(false);
-                        }}
-                        className={`w-full flex items-center justify-between px-4 py-3 text-left transition-colors ${w.id === selectedWalletId
-                          ? 'bg-primary-500/20 text-primary-400'
-                          : 'hover:bg-gray-700 text-white'
-                          }`}
-                      >
-                        <div>
-                          <p className="text-sm font-medium">{w.label}</p>
-                          <p className="text-xs text-gray-500 font-mono">{w.public_key.slice(0, 16)}…</p>
-                        </div>
-                        <p className="text-sm font-semibold">{parseFloat(xlm).toLocaleString()} XLM</p>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
           </div>
         )}
 
@@ -588,26 +1001,64 @@ export default function SendMoney() {
               >
                 <Camera size={16} />
               </button>
-              {contacts.length > 0 && (
-                <button type="button" onClick={() => setShowContacts(!showContacts)}
-                  className="text-primary-500 text-xs flex items-center gap-1">
-                  <Users size={12} /> {t('send.contacts')}
+              <button
+                  type="button"
+                  onClick={() => setShowContacts(!showContacts)}
+                  className="text-primary-500 hover:text-primary-400 p-1.5 rounded-lg hover:bg-primary-500/10 transition-colors"
+                  title="Contacts"
+                  aria-label="Open contact picker"
+                >
+                  <BookUser size={16} />
                 </button>
-              )}
             </div>
           </div>
           <input
             type="text"
             required
+            readOnly={!!requestId}
             placeholder={t('send.recipient_placeholder') || 'Wallet address or username*domain'}
             value={form.recipient_address}
-            onChange={e => { setForm({ ...form, recipient_address: e.target.value }); setMemoRequired(false); }}
-            onBlur={e => checkMemoRequired(e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors font-mono text-sm"
+            onChange={(e) => {
+              setForm({ ...form, recipient_address: e.target.value });
+              setMemoRequired(false);
+              setAddressError(false);
+              setSelectedContactName('');
+            }}
+            onBlur={(e) => {
+              const val = e.target.value.trim();
+              if (val && !isValidStellarAddress(val)) setAddressError(true);
+              checkMemoRequired(val);
+            }}
+            aria-invalid={addressError}
+            aria-describedby={addressError ? 'address-error' : undefined}
+            className={`w-full bg-gray-800 border rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none transition-colors font-mono text-sm ${
+              addressError
+                ? 'border-red-500 focus:border-red-400'
+                : 'border-gray-700 focus:border-primary-500'
+            }`}
           />
-          {showContacts && contacts.length > 0 && (
+          {addressError && (
+            <p id="address-error" className="mt-1 text-xs text-red-400">
+              Invalid address. Enter a valid Stellar public key or federation address
+              (name*domain).
+            </p>
+          )}
+          {!addressError &&
+            form.recipient_address &&
+            isValidStellarAddress(form.recipient_address) && (
+              <p className="mt-1 flex items-center gap-1 text-xs text-green-400">
+                <CheckCircle size={12} aria-hidden="true" /> Valid address
+              </p>
+            )}
+          {selectedContactName && (
+            <p className="mt-1 text-xs text-primary-400 font-medium">
+              Sending to: {selectedContactName}
+            </p>
+          )}
+          {showContacts && (
             <div
-              className="mt-1 bg-gray-800 border border-gray-700 rounded-xl overflow-hidden"
+              ref={contactsDropdownRef}
+              className="mt-1 bg-gray-800 border border-gray-700 rounded-xl overflow-hidden shadow-lg"
               onKeyDown={handleContactKeyDown}
             >
               {/* Search input */}
@@ -622,33 +1073,53 @@ export default function SendMoney() {
                   aria-label="Search contacts"
                 />
               </div>
-
               {/* Contact list */}
               <div ref={contactListRef} className="max-h-60 overflow-y-auto">
-                {filteredContacts.length > 0 ? (
-                  filteredContacts.map((c, index) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={() => {
-                        setForm({
-                          ...form,
-                          recipient_address: c.wallet_address,
-                          memo: c.default_memo || form.memo,
-                        });
-                        if (c.memo_required) setMemoRequired(true);
-                        setShowContacts(false);
-                        setContactSearch('');
-                      }}
-                      className={`w-full px-4 py-2.5 text-left transition-colors ${index === selectedContactIndex
-                        ? 'bg-primary-500/20 text-primary-400'
-                        : 'hover:bg-gray-700'
+                {contacts.length === 0 ? (
+                  <div className="px-4 py-6 text-center text-gray-400">
+                    <p className="text-sm mb-1">No contacts saved yet.</p>
+                    <Link to="/profile" className="text-xs text-primary-400 hover:underline" onClick={() => setShowContacts(false)}>
+                      Save a contact
+                    </Link>
+                  </div>
+                ) : filteredContacts.length > 0 ? (
+                  filteredContacts.map((c, index) => {
+                    const initials = c.name ? c.name.charAt(0).toUpperCase() : '?';
+                    const avatarColors = ['bg-purple-500', 'bg-blue-500', 'bg-green-500', 'bg-yellow-500', 'bg-pink-500'];
+                    const avatarColor = avatarColors[(c.name || '').charCodeAt(0) % avatarColors.length];
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => {
+                          setForm({
+                            ...form,
+                            recipient_address: c.wallet_address,
+                            memo: c.default_memo || form.memo,
+                          });
+                          setSelectedContactName(c.name);
+                          if (c.memo_required) setMemoRequired(true);
+                          setShowContacts(false);
+                          setContactSearch('');
+                        }}
+                        className={`w-full px-4 py-2.5 text-left flex items-center gap-3 transition-colors ${
+                          index === selectedContactIndex
+                            ? 'bg-primary-500/20 text-primary-400'
+                            : 'hover:bg-gray-700'
                         }`}
-                    >
-                      <p className="text-sm text-white">{c.name}</p>
-                      <p className="text-xs text-gray-500 font-mono">{c.wallet_address.slice(0, 20)}...</p>
-                    </button>
-                  ))
+                      >
+                        <div className={`w-8 h-8 rounded-full ${avatarColor} flex items-center justify-center text-white text-sm font-bold flex-shrink-0`}>
+                          {initials}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm text-white font-medium">{c.name}</p>
+                          <p className="text-xs text-gray-500 font-mono truncate">
+                            {c.wallet_address.slice(0, 12)}…{c.wallet_address.slice(-6)}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })
                 ) : (
                   <div className="px-4 py-6 text-center text-gray-400">
                     <p className="text-sm">No contacts match</p>
@@ -657,356 +1128,506 @@ export default function SendMoney() {
               </div>
             </div>
           )}
-        </div>
+            </div>
 
-        {memoRequired && !form.memo.trim() && (
-          <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-3 text-yellow-400 text-sm">
-            ⚠️ This address requires a memo. Payments without a memo may be lost.
-          </div>
-        )}
+            {memoRequired && (
+              <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-3 text-yellow-400 text-sm">
+                ⚠️ This address requires a memo — you'll be prompted to add one in the next step.
+              </div>
+            )}
 
-        {/* Trustline warning — advisory only, does not block submission */}
-        {trustlineWarning && (
-          <div
-            role="alert"
-            className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/40 rounded-xl px-4 py-3 text-amber-400 text-sm"
-          >
-            <AlertTriangle size={16} className="shrink-0 mt-0.5" aria-hidden="true" />
-            <span>
-              ⚠️ Recipient may not be able to receive {trustlineWarning}. Verify their wallet supports this asset.
-            </span>
-          </div>
-        )}
-
-        {/* Amount + Source Asset */}
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">
-            {isCrossAsset && sendMode === 'receive' ? `Recipient receives (${form.destination_asset || form.asset})` : t('send.amount')}
-          </label>
-          <div className="flex gap-2">
-            <input
-              type="number"
-              required
-              min="0.0000001"
-              step="any"
-              placeholder="0.00"
-              value={form.amount}
-              onChange={e => setForm({ ...form, amount: e.target.value })}
-              className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors"
-            />
-            <div className="relative">
-              <select
-                value={form.asset}
-                onChange={e => setForm({ ...form, asset: e.target.value })}
-                className="appearance-none bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
+            {trustlineWarning && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/40 rounded-xl px-4 py-3 text-amber-400 text-sm"
               >
-                {currencies.map(c => (
-                  <option key={c.code} value={c.code}>{c.flag} {c.code}</option>
-                ))}
-              </select>
-              <ChevronDown size={14} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-            </div>
-          </div>
-          {estimatedValue && (
-            <div className="mt-1 space-y-1">
-              <p className="text-xs text-gray-500">{estimatedValue}</p>
-              {usingApproximateRates && (
-                <p className="text-xs text-amber-500/90">{t('common.rates_disclaimer')}</p>
-              )}
-            </div>
-          )}
-          {availableXlm !== null && form.asset === 'XLM' && (
-            <p className="text-xs text-gray-500 mt-1">
-              Available to send: {availableXlm.toLocaleString()} XLM
-            </p>
-          )}
-          {belowMinBalance && (
-            <div className="mt-2 bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-3 text-red-400 text-sm">
-              ⚠️ This amount exceeds your available balance ({availableXlm.toLocaleString()} XLM). Sending it would drop your account below the Stellar minimum reserve.
-            </div>
-          )}
-        </div>
+                <AlertTriangle size={16} className="shrink-0 mt-0.5" aria-hidden="true" />
+                <span>
+                  ⚠️ Recipient may not be able to receive {trustlineWarning}. Verify their wallet supports this asset.
+                </span>
+              </div>
+            )}
 
-        {/* Destination Asset (cross-asset toggle) */}
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="text-sm text-gray-400 flex items-center gap-1">
-              <ArrowRightLeft size={13} /> Recipient receives (optional)
-            </label>
-            <div className="flex items-center gap-2">
-              {form.destination_asset && (
-                <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => { setSendMode('send'); setPathResult(null); }}
-                    className={`text-xs px-2 py-1 rounded-md transition-colors ${sendMode === 'send' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'}`}
-                  >
-                    I send exact
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setSendMode('receive'); setPathResult(null); }}
-                    className={`text-xs px-2 py-1 rounded-md transition-colors ${sendMode === 'receive' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'}`}
-                  >
-                    They receive exact
-                  </button>
-                </div>
-              )}
-              {form.destination_asset && (
-                <button type="button" onClick={() => { setForm({ ...form, destination_asset: '' }); setPathResult(null); setSendMode('send'); }}
-                  className="text-xs text-gray-500 hover:text-white transition-colors">
-                  Clear
-                </button>
-              )}
-            </div>
-          </div>
-          <div className="relative">
-            <select
-              value={form.destination_asset}
-              onChange={e => setForm({ ...form, destination_asset: e.target.value })}
-              className="appearance-none w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
+            <button
+              ref={submitButtonRef}
+              type="submit"
+              disabled={step1Disabled}
+              className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors"
             >
-              <option value="">Same as sent ({form.asset})</option>
-              {currencies.filter(c => c.code !== form.asset).map(c => (
-                <option key={c.code} value={c.code}>{c.flag} {c.code}</option>
-              ))}
-            </select>
-            <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-          </div>
+              Next: Amount →
+            </button>
+          </>
+        )}
 
-          {/* Path result / loading */}
-          {isCrossAsset && (
-            <div className="mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm">
-              {pathLoading && <p className="text-gray-400 animate-pulse">Finding best rate...</p>}
-              {!pathLoading && pathResult && sendMode === 'send' && (
-                <div className="space-y-1">
-                  <p className="text-green-400">
-                    Recipient receives ≈ <span className="font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span>
-                  </p>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs text-gray-500">Slippage tolerance:</span>
-                    {SLIPPAGE_OPTIONS.map(s => (
-                      <button
-                        key={s}
-                        type="button"
-                        onClick={() => { localStorage.setItem('afripay_slippage', s); setForm({ ...form, slippage: s }); }}
-                        className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${form.slippage === s
-                          ? 'border-primary-500 text-primary-400'
-                          : 'border-gray-600 text-gray-400 hover:border-gray-400'
-                          }`}
-                      >
-                        {s}%
-                      </button>
-                    ))}
-                  </div>
-                  <p className="text-xs text-gray-500">Min received: {destMin} {form.destination_asset}</p>
-                </div>
-              )}
-              {!pathLoading && pathResult && sendMode === 'receive' && (
-                <div className="space-y-1">
-                  <p className="text-green-400">
-                    Recipient receives exactly <span className="font-semibold">{form.amount} {form.destination_asset}</span>
-                  </p>
-                  <p className="text-yellow-300 text-xs">
-                    You pay approximately <span className="font-semibold">{pathResult.sourceAmount} {form.asset}</span>
-                  </p>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs text-gray-500">Max slippage:</span>
-                    {SLIPPAGE_OPTIONS.map(s => (
-                      <button
-                        key={s}
-                        type="button"
-                        onClick={() => { localStorage.setItem('afripay_slippage', s); setForm({ ...form, slippage: s }); }}
-                        className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${form.slippage === s
-                          ? 'border-primary-500 text-primary-400'
-                          : 'border-gray-600 text-gray-400 hover:border-gray-400'
-                          }`}
-                      >
-                        {s}%
-                      </button>
-                    ))}
-                  </div>
-                  <p className="text-xs text-gray-500">
-                    Max you pay: {(parseFloat(pathResult.sourceAmount) * (1 + form.slippage / 100)).toFixed(7)} {form.asset}
-                  </p>
-                </div>
-              )}
-              {!pathLoading && !pathResult && form.amount && form.recipient_address && (
-                <p className="text-yellow-500 text-xs">No conversion path found for these assets</p>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Fee Priority */}
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">Network fee priority</label>
-          <div className="flex gap-2">
-            {[
-              { key: 'economy', label: 'Economy', desc: 'Slower' },
-              { key: 'standard', label: 'Standard', desc: 'Normal' },
-              { key: 'priority', label: 'Priority', desc: 'Faster' },
-            ].map(({ key, label, desc }) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setForm({ ...form, fee_priority: key })}
-                className={`flex-1 rounded-xl border py-2 px-2 text-center transition-colors ${form.fee_priority === key
-                  ? 'border-primary-500 bg-primary-500/10 text-primary-400'
-                  : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-500'
-                  }`}
-              >
-                <p className="text-xs font-semibold">{label}</p>
-                <p className="text-xs text-gray-500">{desc}</p>
-                {feeStats && (
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {(feeStats.priorities[key] / 1e7).toFixed(5)} XLM
-                  </p>
-                )}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Memo */}
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">{t('send.memo')}</label>
-          <input
-            type="text"
-            maxLength={memoMaxLen}
-            placeholder={t('send.memo_placeholder')}
-            value={form.memo}
-            onChange={e => setForm({ ...form, memo: e.target.value })}
-            className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors font-mono text-sm"
-          />
-          {memoTrimmed ? (
-            <div className="mt-2">
-              <label className="text-sm text-gray-400 mb-1 block" htmlFor="memo-type">
-                {t('send.memo_type_label')}
+        {/* ── STEP 2: Amount ── */}
+        {step === 2 && (
+          <>
+            {/* Amount + Source Asset */}
+            <div>
+              <label className="text-sm text-gray-400 mb-1 block">
+                {isCrossAsset && sendMode === 'receive'
+                  ? `Recipient receives (${form.destination_asset || form.asset})`
+                  : t('send.amount')}
               </label>
-              <select
-                id="memo-type"
-                value={form.memo_type}
-                onChange={e => setForm({ ...form, memo_type: e.target.value })}
-                className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 transition-colors"
-              >
-                <option value="text">{t('send.memo_type_text')}</option>
-                <option value="id">{t('send.memo_type_id')}</option>
-                <option value="hash">{t('send.memo_type_hash')}</option>
-                <option value="return">{t('send.memo_type_return')}</option>
-              </select>
-              <p className="text-xs text-gray-500 mt-1">{t(`send.memo_hint_${form.memo_type}`)}</p>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  required
+                  min="0.0000001"
+                  step="any"
+                  placeholder="0.00"
+                  readOnly={!!requestId}
+                  value={form.amount}
+                  onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                  className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors"
+                />
+                <div className="relative">
+                  <select
+                    value={form.asset}
+                    disabled={!!requestId}
+                    onChange={(e) => setForm({ ...form, asset: e.target.value })}
+                    className="appearance-none bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
+                  >
+                    {currencies.map((c) => (
+                      <option key={c.code} value={c.code}>{c.flag} {c.code}</option>
+                    ))}
+                  </select>
+                  <ChevronDown size={14} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                </div>
+              </div>
+              {estimatedValue && (
+                <div className="mt-1 space-y-1">
+                  <p className="text-xs text-gray-500">{estimatedValue}</p>
+                  {usingApproximateRates && (
+                    <p className="text-xs text-amber-500/90">{t('common.rates_disclaimer')}</p>
+                  )}
+                </div>
+              )}
+              {availableXlm !== null && form.asset === 'XLM' && (
+                <p className="text-xs text-gray-500 mt-1">
+                  Available to send: {availableXlm.toLocaleString()} XLM
+                </p>
+              )}
+              {belowMinBalance && (
+                <div className="mt-2 bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-3 text-red-400 text-sm">
+                  ⚠️ This amount exceeds your available balance ({availableXlm.toLocaleString()} XLM).
+                  Sending it would drop your account below the Stellar minimum reserve.
+                </div>
+              )}
             </div>
-          ) : null}
-        </div>
 
-        {/* Private Note */}
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">Private note <span className="text-gray-600">(only visible to you)</span></label>
-          <input
-            type="text"
-            maxLength={500}
-            placeholder="Invoice #, project code, personal reminder…"
-            value={form.private_note}
-            onChange={e => setForm({ ...form, private_note: e.target.value })}
-            className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors"
-          />
-        </div>
-
-        {/* Confirmation preview */}
-        {confirmed && (
-          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 space-y-2">
-            <p className="text-yellow-400 font-semibold text-sm">{t('send.confirm_title')}</p>
-            <div className="text-sm text-gray-300 space-y-1">
-              <p>{t('send.confirm_to')} <span className="font-mono text-xs">{form.recipient_address.slice(0, 20)}...</span></p>
-              <p>{t('send.confirm_amount')} <span className="text-white font-semibold">{form.amount} {form.asset}</span></p>
-              {feeXLM && (
-                <>
-                  <p>{t('send.confirm_fee', 'Network fee:')} <span className="text-white">{feeXLM} XLM</span></p>
-                  {form.recipient_address.startsWith('C') && (
-                    <div className="mt-4 p-3 bg-gray-800 rounded-lg text-sm border border-gray-700">
-                      <p className="text-gray-400 font-semibold mb-1">Contract Simulation</p>
-                      {contractSimLoading ? (
-                        <p className="text-gray-500 animate-pulse">Simulating...</p>
-                      ) : contractSimData?.error ? (
-                        <p className="text-red-400 font-mono text-xs">{contractSimData.error}</p>
-                      ) : contractSimData ? (
-                        <div className="font-mono text-xs text-gray-300">
-                          <p>Fee: {contractSimData.fee || 'N/A'}</p>
-                          <p>Results: {contractSimData.results?.length ? 'Yes' : 'No'}</p>
-                        </div>
-                      ) : null}
+            {/* Destination Asset (cross-asset toggle) */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-sm text-gray-400 flex items-center gap-1">
+                  <ArrowRightLeft size={13} /> Recipient receives (optional)
+                </label>
+                <div className="flex items-center gap-2">
+                  {form.destination_asset && (
+                    <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => { setSendMode('send'); setPathResult(null); }}
+                        className={`text-xs px-2 py-1 rounded-md transition-colors ${sendMode === 'send' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'}`}
+                      >
+                        I send exact
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setSendMode('receive'); setPathResult(null); }}
+                        className={`text-xs px-2 py-1 rounded-md transition-colors ${sendMode === 'receive' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'}`}
+                      >
+                        They receive exact
+                      </button>
                     </div>
                   )}
-                  {form.asset === 'XLM' && (
-                    <p className="text-yellow-300 font-semibold">
-                      {t('send.confirm_total', 'Total:')} {(parseFloat(form.amount) + parseFloat(feeXLM)).toFixed(7)} XLM
-                    </p>
+                  {form.destination_asset && (
+                    <button
+                      type="button"
+                      onClick={() => { setForm({ ...form, destination_asset: '' }); setPathResult(null); setSendMode('send'); }}
+                      className="text-xs text-gray-500 hover:text-white transition-colors"
+                    >
+                      Clear
+                    </button>
                   )}
-                </>
+                </div>
+              </div>
+              <div className="relative">
+                <select
+                  value={form.destination_asset}
+                  onChange={(e) => setForm({ ...form, destination_asset: e.target.value })}
+                  className="appearance-none w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
+                >
+                  <option value="">Same as sent ({form.asset})</option>
+                  {currencies.filter((c) => c.code !== form.asset).map((c) => (
+                    <option key={c.code} value={c.code}>{c.flag} {c.code}</option>
+                  ))}
+                </select>
+                <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+              </div>
+              {isCrossAsset && (
+                <div className="mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm">
+                  {pathLoading && <p className="text-gray-400 animate-pulse">Finding best rate...</p>}
+                  {!pathLoading && pathResult && sendMode === 'send' && (
+                    <div className="space-y-1">
+                      <p className="text-green-400">
+                        Recipient receives ≈{' '}
+                        <span className="font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span>
+                      </p>
+                      {(() => {
+                        const srcAmt = parseFloat(form.amount);
+                        const dstAmt = parseFloat(pathResult.destinationAmount);
+                        if (!srcAmt || !dstAmt) return null;
+                        return (
+                          <>
+                            <p className="text-xs text-gray-400">Rate: 1 {form.asset} ≈ {(dstAmt / srcAmt).toPrecision(6)} {form.destination_asset}</p>
+                            {form.slippage > 1 && <p className="text-xs text-yellow-400">⚠️ High price impact ({form.slippage}%). Consider splitting.</p>}
+                          </>
+                        );
+                      })()}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs text-gray-500">Slippage tolerance:</span>
+                        {SLIPPAGE_OPTIONS.map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => { localStorage.setItem('afripay_slippage', s); setForm({ ...form, slippage: s }); }}
+                            className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${form.slippage === s ? 'border-primary-500 text-primary-400' : 'border-gray-600 text-gray-400 hover:border-gray-400'}`}
+                          >{s}%</button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-500">Min received: {destMin} {form.destination_asset}</p>
+                    </div>
+                  )}
+                  {!pathLoading && pathResult && sendMode === 'receive' && (
+                    <div className="space-y-1">
+                      <p className="text-green-400">Recipient receives exactly <span className="font-semibold">{form.amount} {form.destination_asset}</span></p>
+                      <p className="text-yellow-300 text-xs">You pay approximately <span className="font-semibold">{pathResult.sourceAmount} {form.asset}</span></p>
+                      {(() => {
+                        const srcAmt = parseFloat(pathResult.sourceAmount);
+                        const dstAmt = parseFloat(form.amount);
+                        if (!srcAmt || !dstAmt) return null;
+                        return (
+                          <>
+                            <p className="text-xs text-gray-400">Rate: 1 {form.asset} ≈ {(dstAmt / srcAmt).toPrecision(6)} {form.destination_asset}</p>
+                            {form.slippage > 1 && <p className="text-xs text-yellow-400">⚠️ High price impact ({form.slippage}%). Consider splitting.</p>}
+                          </>
+                        );
+                      })()}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs text-gray-500">Max slippage:</span>
+                        {SLIPPAGE_OPTIONS.map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => { localStorage.setItem('afripay_slippage', s); setForm({ ...form, slippage: s }); }}
+                            className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${form.slippage === s ? 'border-primary-500 text-primary-400' : 'border-gray-600 text-gray-400 hover:border-gray-400'}`}
+                          >{s}%</button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-500">Max you pay: {(parseFloat(pathResult.sourceAmount) * (1 + form.slippage / 100)).toFixed(7)} {form.asset}</p>
+                    </div>
+                  )}
+                  {!pathLoading && !pathResult && form.amount && form.recipient_address && (
+                    <p className="text-yellow-500 text-xs">No conversion path found for these assets</p>
+                  )}
+                </div>
               )}
-              {isCrossAsset && pathResult && sendMode === 'send' && (
-                <p>Recipient receives ≈ <span className="text-white font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span> (min {destMin})</p>
+            </div>
+
+            {/* Fee Priority */}
+            <div>
+              <label className="text-sm text-gray-400 mb-1 block">Network fee priority</label>
+              <div className="flex gap-2">
+                {[
+                  { key: 'economy', label: 'Economy', desc: 'Slower' },
+                  { key: 'standard', label: 'Standard', desc: 'Normal' },
+                  { key: 'priority', label: 'Priority', desc: 'Faster' },
+                ].map(({ key, label, desc }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setForm({ ...form, fee_priority: key })}
+                    className={`flex-1 rounded-xl border py-2 px-2 text-center transition-colors ${
+                      form.fee_priority === key
+                        ? 'border-primary-500 bg-primary-500/10 text-primary-400'
+                        : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-500'
+                    }`}
+                  >
+                    <p className="text-xs font-semibold">{label}</p>
+                    <p className="text-xs text-gray-500">{desc}</p>
+                    {feeStats?.priorities && (
+                      <p className="text-xs text-gray-500 mt-0.5">{(feeStats.priorities[key] / 1e7).toFixed(5)} XLM</p>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Memo */}
+            <div>
+              <label className="text-sm text-gray-400 mb-1 block">{t('send.memo')}</label>
+              <input
+                ref={memoRef}
+                readOnly={!!requestId}
+                type="text"
+                maxLength={memoMaxLen}
+                placeholder={t('send.memo_placeholder')}
+                value={form.memo}
+                onChange={(e) => { setForm({ ...form, memo: e.target.value }); setMemoError(false); }}
+                className={`w-full bg-gray-800 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none transition-colors font-mono text-sm border ${
+                  memoError ? 'border-red-500 focus:border-red-400' : 'border-gray-700 focus:border-primary-500'
+                }`}
+              />
+              {memoError && (
+                <p className="mt-1 text-xs text-red-400">A memo is required for this recipient. Please add one before sending.</p>
               )}
-              {isCrossAsset && pathResult && sendMode === 'receive' && (
-                <>
-                  <p>Recipient receives exactly <span className="text-white font-semibold">{form.amount} {form.destination_asset}</span></p>
-                  <p>You pay approximately <span className="text-white font-semibold">{pathResult.sourceAmount} {form.asset}</span></p>
-                </>
+              {memoRequired && !form.memo.trim() && !memoError && (
+                <p className="mt-1 text-xs text-yellow-400">⚠️ This address requires a memo.</p>
               )}
-              {form.memo && <p>{t('send.confirm_memo')} {form.memo}</p>}
-              {form.memo.trim() ? (
-                <>
-                  <p>{t('send.confirm_memo')} {form.memo.trim()}</p>
-                  <p className="text-gray-400 text-xs">
-                    {t('send.confirm_memo_type')} {t(`send.memo_type_${form.memo_type}`)}
-                  </p>
-                </>
+              {memoTrimmed ? (
+                <div className="mt-2">
+                  <label className="text-sm text-gray-400 mb-1 block" htmlFor="memo-type">{t('send.memo_type_label')}</label>
+                  <select
+                    id="memo-type"
+                    value={form.memo_type}
+                    onChange={(e) => setForm({ ...form, memo_type: e.target.value })}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 transition-colors"
+                  >
+                    <option value="text">{t('send.memo_type_text')}</option>
+                    <option value="id">{t('send.memo_type_id')}</option>
+                    <option value="hash">{t('send.memo_type_hash')}</option>
+                    <option value="return">{t('send.memo_type_return')}</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">{t(`send.memo_hint_${form.memo_type}`)}</p>
+                </div>
               ) : null}
             </div>
+
+            {/* Private Note */}
+            <div>
+              <label className="text-sm text-gray-400 mb-1 block">
+                Private note <span className="text-gray-600">(only visible to you)</span>
+              </label>
+              <input
+                type="text"
+                maxLength={500}
+                placeholder="Invoice #, project code, personal reminder…"
+                value={form.private_note}
+                onChange={(e) => setForm({ ...form, private_note: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors"
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => dispatchStep({ type: 'BACK' })}
+                className="flex-1 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 font-semibold py-3.5 rounded-xl transition-colors"
+              >
+                ← Back
+              </button>
+              <button
+                ref={submitButtonRef}
+                type="submit"
+                disabled={step2Disabled}
+                className="flex-1 bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors"
+              >
+                {stepLoading ? (
+                  <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" role="status" aria-label="Loading" />
+                ) : (
+                  'Next: Review →'
+                )}
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* ── STEP 3: Review ── */}
+        {step === 3 && (
+          <>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-2">
+              <p className="text-white font-semibold text-sm">{t('send.confirm_title')}</p>
+              <div className="text-sm text-gray-300 space-y-1">
+                <p>
+                  {t('send.confirm_to')}{' '}
+                  <span
+                    className="font-mono text-xs cursor-help border-b border-dotted border-gray-500"
+                    title={form.recipient_address}
+                    aria-label={`Full address: ${form.recipient_address}`}
+                  >
+                    {form.recipient_address.slice(0, 10)}…{form.recipient_address.slice(-10)}
+                  </span>{' '}
+                  <a
+                    href={`https://stellar.expert/explorer/${process.env.REACT_APP_STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet'}/account/${form.recipient_address}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary-400 hover:text-primary-300 text-xs underline"
+                    aria-label="Verify address on Stellar Expert Explorer"
+                  >
+                    Verify address ↗
+                  </a>
+                </p>
+                <p>
+                  {t('send.confirm_amount')}{' '}
+                  <span className="text-white font-semibold">{form.amount} {form.asset}</span>
+                </p>
+                {feeXLM && (
+                  <>
+                    {form.asset !== 'XLM' ? (
+                      <p>
+                        <span className="font-semibold">Network fee:</span>{' '}
+                        <span className="text-white">{feeXLM} XLM</span>{' '}
+                        <span className="text-gray-400 text-xs">(paid separately from your XLM balance)</span>
+                      </p>
+                    ) : (
+                      <p>{t('send.confirm_fee', 'Network fee:')} <span className="text-white">{feeXLM} XLM</span></p>
+                    )}
+                    {form.recipient_address.startsWith('C') && (
+                      <div className="mt-3 p-3 bg-gray-800 rounded-lg text-sm border border-gray-700">
+                        <p className="text-gray-400 font-semibold mb-1">Contract Simulation</p>
+                        {contractSimLoading ? (
+                          <p className="text-gray-500 animate-pulse">Simulating...</p>
+                        ) : contractSimData?.error ? (
+                          <p className="text-red-400 font-mono text-xs">{contractSimData.error}</p>
+                        ) : contractSimData ? (
+                          <div className="font-mono text-xs text-gray-300">
+                            <p>Fee: {contractSimData.fee || 'N/A'}</p>
+                            <p>Results: {contractSimData.results?.length ? 'Yes' : 'No'}</p>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                    {form.asset === 'XLM' && (
+                      <p className="text-yellow-300 font-semibold">
+                        {t('send.confirm_total', 'Total:')}{' '}
+                        {(parseFloat(form.amount) + parseFloat(feeXLM)).toFixed(7)} XLM
+                      </p>
+                    )}
+                  </>
+                )}
+                {isCrossAsset && pathResult && sendMode === 'send' && (
+                  <p>
+                    Recipient receives ≈{' '}
+                    <span className="text-white font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span>{' '}
+                    (min {destMin})
+                  </p>
+                )}
+                {isCrossAsset && pathResult && sendMode === 'receive' && (
+                  <>
+                    <p>Recipient receives exactly <span className="text-white font-semibold">{form.amount} {form.destination_asset}</span></p>
+                    <p>You pay approximately <span className="text-white font-semibold">{pathResult.sourceAmount} {form.asset}</span></p>
+                  </>
+                )}
+                {form.memo.trim() && (
+                  <>
+                    <p>{t('send.confirm_memo')} {form.memo.trim()}</p>
+                    <p className="text-gray-400 text-xs">{t('send.confirm_memo_type')} {t(`send.memo_type_${form.memo_type}`)}</p>
+                  </>
+                )}
+                {selectedWallet && (
+                  <p className="text-gray-400 text-xs">From: {selectedWallet.label}</p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowXDRInspector(true)}
+                className="w-full mt-2 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors"
+              >
+                <Code size={16} /> View Raw Transaction (XDR)
+              </button>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => dispatchStep({ type: 'BACK' })}
+                className="flex-1 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 font-semibold py-3.5 rounded-xl transition-colors"
+              >
+                ← Back
+              </button>
+              <button
+                type="submit"
+                className="flex-1 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors"
+              >
+                <Send size={18} /> Confirm
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* ── STEP 4: Authenticate ── */}
+        {step === 4 && (
+          <div className="space-y-4">
+            {/* Reconnecting indicator: shown when the payment status stream drops */}
+            {connectionState === CONNECTION_STATE.RECONNECTING && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-2.5 text-yellow-400 text-xs"
+              >
+                <span
+                  className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse shrink-0"
+                  aria-hidden="true"
+                />
+                Reconnecting to payment status stream…
+              </div>
+            )}
+            {connectionState === CONNECTION_STATE.DISCONNECTED && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-2 bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-2.5 text-red-400 text-xs"
+              >
+                <span
+                  className="w-2 h-2 rounded-full bg-red-400 shrink-0"
+                  aria-hidden="true"
+                />
+                Payment status stream disconnected — status may be delayed
+              </div>
+            )}
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-1">
+              <p className="text-white font-semibold">Authorize Payment</p>
+              <p className="text-gray-400 text-sm">
+                Sending <span className="text-white font-medium">{form.amount} {form.asset}</span> to{' '}
+                <span className="font-mono text-xs text-gray-300">
+                  {form.recipient_address.slice(0, 8)}…{form.recipient_address.slice(-8)}
+                </span>
+              </p>
+            </div>
+
             <button
               type="button"
-              onClick={() => setShowXDRInspector(true)}
-              className="w-full mt-2 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors"
+              onClick={() => setShowPINVerification(true)}
+              disabled={loading}
+              className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors"
             >
-              <Code size={16} /> View Raw Transaction (XDR)
+              {loading ? (
+                <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" role="status" aria-label="Loading" />
+              ) : (
+                '🔑 Authorize with PIN'
+              )}
+            </button>
+
+            {!isCrossAsset && hasWebUSB() && (
+              <button
+                type="button"
+                onClick={handleSignWithLedger}
+                disabled={loading}
+                className="w-full bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+              >
+                🔐 Sign with Ledger
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => dispatchStep({ type: 'BACK' })}
+              className="w-full text-gray-400 hover:text-white text-sm py-2 transition-colors"
+            >
+              ← Back to Review
             </button>
           </div>
-        )}
-
-        <button
-          ref={submitButtonRef}
-          type="submit"
-          disabled={loading || (isCrossAsset && !pathResult) || (memoRequired && !form.memo.trim())}
-          className={`w-full font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors ${confirmed
-            ? 'bg-yellow-500 hover:bg-yellow-600 text-black'
-            : 'bg-primary-500 hover:bg-primary-600 text-white'
-            } disabled:opacity-50`}
-        >
-          {loading ? (
-            <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" role="status" aria-label="Loading" />
-          ) : (
-            <><Send size={18} /> {confirmed ? t('send.confirm_send') : t('send.review')}</>
-          )}
-        </button>
-
-        {confirmed && (
-          <button type="button" onClick={() => { setConfirmed(false); setFeeXLM(null); }}
-            className="w-full text-gray-400 hover:text-white text-sm py-2 transition-colors">
-            {t('common.cancel')}
-          </button>
-        )}
-
-        {/* Ledger hardware wallet signing option — shown at confirmation step */}
-        {confirmed && !isCrossAsset && (
-          <button
-            type="button"
-            onClick={handleSignWithLedger}
-            disabled={loading}
-            className="w-full bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white font-semibold py-3 rounded-xl flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
-          >
-            🔐 Sign with Ledger
-          </button>
         )}
       </form>
 
@@ -1023,6 +1644,25 @@ export default function SendMoney() {
         onClose={() => setShowScanner(false)}
         onScan={(address) => setForm({ ...form, recipient_address: address })}
       />
+      <Suspense fallback={null}>
+        {showLedgerModal && (
+          <LedgerSignModal
+            show={showLedgerModal}
+            onClose={() => setShowLedgerModal(false)}
+            xdr={unsignedXDR}
+            networkPassphrase={ledgerNetworkPassphrase}
+            onSigned={handleLedgerSigned}
+          />
+        )}
+
+        {showScanner && (
+          <QRScanner
+            isOpen={showScanner}
+            onClose={() => setShowScanner(false)}
+            onScan={handleQRScan}
+          />
+        )}
+      </Suspense>
 
       <PINVerificationModal
         isOpen={showPINVerification}
@@ -1038,6 +1678,61 @@ export default function SendMoney() {
         onClose={() => setShowXDRInspector(false)}
         xdr={transactionXDR}
       />
+
+      {showPushPrompt && (
+        <PushNotificationPrompt onDismiss={() => setShowPushPrompt(false)} />
+      )}
+
+      {/* Save contact prompt after successful payment */}
+      {showSaveContactPrompt && (
+        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-sm p-6">
+            <h3 className="text-white font-semibold text-base mb-1">Save as a contact?</h3>
+            <p className="text-gray-400 text-xs font-mono mb-4 break-all">
+              {showSaveContactPrompt.slice(0, 16)}…{showSaveContactPrompt.slice(-8)}
+            </p>
+            <input
+              type="text"
+              placeholder="Contact name"
+              value={saveContactName}
+              onChange={(e) => setSaveContactName(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-primary-500 mb-4"
+              autoFocus
+            />
+            <div className="flex gap-3">
+              <button
+                type="button"
+                disabled={saveContactLoading}
+                onClick={async () => {
+                  if (!saveContactName.trim()) return;
+                  setSaveContactLoading(true);
+                  try {
+                    await api.post('/contacts', { name: saveContactName.trim(), wallet_address: showSaveContactPrompt });
+                    await api.post('/wallet/contacts', { name: saveContactName.trim(), wallet_address: showSaveContactPrompt });
+                    toast.success('Contact saved!');
+                  } catch {
+                    toast.error('Could not save contact');
+                  } finally {
+                    setSaveContactLoading(false);
+                    setShowSaveContactPrompt(null);
+                    navigate('/dashboard');
+                  }
+                }}
+                className="flex-1 bg-primary-500 hover:bg-primary-400 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors"
+              >
+                {saveContactLoading ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowSaveContactPrompt(null); navigate('/dashboard'); }}
+                className="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors"
+              >
+                Skip
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

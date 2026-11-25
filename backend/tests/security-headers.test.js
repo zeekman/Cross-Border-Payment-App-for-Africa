@@ -31,9 +31,10 @@ const SECURITY_HEADERS = [
   'x-dns-prefetch-control',
   'x-frame-options',
   'x-content-type-options',
-  'x-xss-protection',
   'strict-transport-security',
   'content-security-policy',
+  'permissions-policy',
+  'referrer-policy',
 ];
 
 const ROUTES = [
@@ -67,18 +68,73 @@ describe('Security headers', () => {
     });
   });
 
-  test('CSP restricts default-src to self', async () => {
+  test('CSP sets default-src to none', async () => {
     const res = await request(app).get('/health');
-    expect(res.headers['content-security-policy']).toContain("default-src 'self'");
+    expect(res.headers['content-security-policy']).toContain("default-src 'none'");
   });
 
-  test('CSP blocks framing (frame-src none)', async () => {
+  test('CSP allows scripts from self only', async () => {
     const res = await request(app).get('/health');
-    expect(res.headers['content-security-policy']).toContain("frame-src 'none'");
+    expect(res.headers['content-security-policy']).toContain("script-src 'self'");
   });
 
-  test('CSP blocks object-src', async () => {
+  test('CSP does not contain unsafe-inline', async () => {
     const res = await request(app).get('/health');
-    expect(res.headers['content-security-policy']).toContain("object-src 'none'");
+    expect(res.headers['content-security-policy']).not.toContain("'unsafe-inline'");
+  });
+
+  test('CSP contains a per-request nonce in script-src', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['content-security-policy']).toMatch(/script-src 'self' 'nonce-[A-Za-z0-9+/]+=*'/);
+  });
+
+  test('CSP allows connections to self and Stellar Horizon', async () => {
+    const res = await request(app).get('/health');
+    const csp = res.headers['content-security-policy'];
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).toContain('https://horizon.stellar.org');
+    expect(csp).toContain('wss://horizon.stellar.org');
+  });
+
+  test('CSP allows images from self and data URIs', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['content-security-policy']).toContain("img-src 'self'");
+    expect(res.headers['content-security-policy']).toContain('data:');
+  });
+
+  test('CSP blocks framing via frame-ancestors none', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['content-security-policy']).toContain("frame-ancestors 'none'");
+  });
+
+  test('X-Frame-Options is DENY', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['x-frame-options']).toBe('DENY');
+  });
+
+  test('HSTS sets max-age with includeSubDomains and preload', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['strict-transport-security']).toContain('max-age=31536000');
+    expect(res.headers['strict-transport-security']).toContain('includeSubDomains');
+    expect(res.headers['strict-transport-security']).toContain('preload');
+  });
+
+  test('Permissions-Policy disables camera, microphone, geolocation, payment', async () => {
+    const res = await request(app).get('/health');
+    const pp = res.headers['permissions-policy'];
+    expect(pp).toContain('camera=()');
+    expect(pp).toContain('microphone=()');
+    expect(pp).toContain('geolocation=()');
+    expect(pp).toContain('payment=()');
+  });
+
+  test('Referrer-Policy is strict-origin-when-cross-origin', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
+  });
+
+  test('X-Content-Type-Options is nosniff', async () => {
+    const res = await request(app).get('/health');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
   });
 });

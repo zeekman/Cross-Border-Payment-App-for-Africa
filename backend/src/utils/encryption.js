@@ -1,3 +1,19 @@
+'use strict';
+
+/**
+ * OWNERSHIP (BE-039): this module owns asymmetric, per-recipient payload
+ * encryption — specifically ECIES memo encryption keyed off a counterparty's
+ * Stellar (Ed25519) public key, with no shared server-side secret involved.
+ * There is no symmetric/AES code here and none should be added.
+ *
+ * For server-held-secret symmetric encryption (AES-256-GCM webhook secrets,
+ * AES-256-CBC Stellar private keys derived from ENCRYPTION_KEY /
+ * WEBHOOK_SECRET_ENCRYPTION_KEY), see utils/symmetricEncryption.js instead —
+ * that module owns all ENCRYPTION_KEY / WEBHOOK_SECRET_ENCRYPTION_KEY-based
+ * encryption. Do not duplicate AES helpers here; import from
+ * symmetricEncryption.js if a caller in this file ever needs them.
+ */
+
 const nacl = require('tweetnacl');
 const ed2curve = require('ed2curve');
 const StellarSdk = require('@stellar/stellar-sdk');

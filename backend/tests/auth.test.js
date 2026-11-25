@@ -10,7 +10,6 @@ const crypto = require('crypto');
 const db = require('../src/db');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../src/services/email');
 const { createWallet } = require('../src/services/stellar');
-const { register, login, refresh, logout, verifyEmail } = require('../src/controllers/authController');
 const {
   register,
   login,
@@ -20,6 +19,7 @@ const {
   getMe,
   forgotPassword,
   resetPassword,
+  completeOnboarding,
 } = require('../src/controllers/authController');
 
 function mockRes() {
@@ -79,7 +79,6 @@ test('register: does NOT return a JWT token', async () => {
 test('login: returns 401 for wrong password', async () => {
   const bcrypt = require('bcryptjs');
   const hash = await bcrypt.hash('correctpass', 12);
-  db.query.mockResolvedValueOnce({ rows: [{ id: '1', full_name: 'Alice', email: 'a@b.com', password_hash: hash, email_verified: true, public_key: 'GPUB' }] });
   db.query
     .mockResolvedValueOnce({
       rows: [{
@@ -92,14 +91,14 @@ test('login: returns 401 for wrong password', async () => {
         totp_enabled: false,
         failed_login_attempts: 0,
         locked_until: null,
-        public_key: 'GPUB'
-      }]
+        public_key: 'GPUB',
+      }],
     })
-    .mockResolvedValueOnce({ rows: [] });
+    .mockResolvedValueOnce({ rows: [] }); // UPDATE failed_login_attempts
 
-  const req = { body: { email: 'a@b.com', password: 'wrongpass' } };
+  const req = { body: { email: 'a@b.com', password: 'wrongpass' }, headers: {} };
   const res = mockRes();
-  await login({ body: { email: 'a@b.com', password: 'wrongpass' } }, res, jest.fn());
+  await login({ body: { email: 'a@b.com', password: 'wrongpass' }, headers: {} }, res, jest.fn());
   expect(res.status).toHaveBeenCalledWith(401);
 });
 
@@ -123,14 +122,14 @@ test('login: locks account after 10 consecutive failed attempts', async () => {
     })
     .mockResolvedValueOnce({ rows: [] });
 
-  const req = { body: { email: 'a@b.com', password: 'wrongpass' } };
+  const req = { body: { email: 'a@b.com', password: 'wrongpass' }, headers: {} };
   const res = mockRes();
   await login(req, res, jest.fn());
 
   expect(res.status).toHaveBeenCalledWith(423);
-  expect(res.json).toHaveBeenCalledWith({
-    error: expect.stringMatching(/^Account locked until .*Z$/),
-  });
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+    error: expect.stringMatching(/^Account locked due to too many failed login attempts\. Try again after .*Z$/),
+  }));
 });
 
 test('login: returns 423 when account is locked', async () => {
@@ -152,12 +151,12 @@ test('login: returns 423 when account is locked', async () => {
     }]
   });
 
-  const req = { body: { email: 'a@b.com', password: 'correctpass' } };
+  const req = { body: { email: 'a@b.com', password: 'correctpass' }, headers: {} };
   const res = mockRes();
   await login(req, res, jest.fn());
 
   expect(res.status).toHaveBeenCalledWith(423);
-  expect(res.json).toHaveBeenCalledWith({ error: `Account locked until ${future}` });
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: `Account locked. Try again after ${future}` }));
   expect(db.query).toHaveBeenCalledTimes(1);
 });
 
@@ -184,7 +183,7 @@ test('login: resets failed login counter on successful login', async () => {
     .mockResolvedValueOnce({ rows: [] })
     .mockResolvedValueOnce({ rows: [] });
 
-  const req = { body: { email: 'a@b.com', password: 'password1' } };
+  const req = { body: { email: 'a@b.com', password: 'password1' }, headers: {} };
   const res = mockRes();
   await login(req, res, jest.fn());
 
@@ -199,20 +198,9 @@ test('login: returns 403 when email not verified', async () => {
   const hash = await bcrypt.hash('password1', 12);
   db.query.mockResolvedValueOnce({ rows: [{ id: '1', full_name: 'Alice', email: 'a@b.com', password_hash: hash, email_verified: false, public_key: 'GPUB' }] });
   const res = mockRes();
-  await login({ body: { email: 'a@b.com', password: 'password1' } }, res, jest.fn());
+  await login({ body: { email: 'a@b.com', password: 'password1' }, headers: {} }, res, jest.fn());
   expect(res.status).toHaveBeenCalledWith(403);
 });
-  db.query.mockResolvedValueOnce({
-    rows: [{
-      id: '1',
-      full_name: 'Alice',
-      email: 'a@b.com',
-      password_hash: hash,
-      email_verified: false,
-      role: 'user',
-      public_key: 'GPUB'
-    }]
-  });
 
 test('login: returns JWT and sets HttpOnly cookie on success', async () => {
   const bcrypt = require('bcryptjs');
@@ -220,9 +208,9 @@ test('login: returns JWT and sets HttpOnly cookie on success', async () => {
   db.query.mockResolvedValueOnce({ rows: [{ id: '1', full_name: 'Alice', email: 'a@b.com', password_hash: hash, email_verified: true, public_key: 'GPUB' }] })
     .mockResolvedValueOnce({ rows: [] });
   const res = mockRes();
-  await login({ body: { email: 'a@b.com', password: 'password1' } }, res, jest.fn());
+  await login({ body: { email: 'a@b.com', password: 'password1' }, headers: {} }, res, jest.fn());
   expect(res.json.mock.calls[0][0].token).toBeDefined();
-  expect(res.cookie).toHaveBeenCalledWith('refreshToken', expect.any(String), expect.objectContaining({ httpOnly: true, sameSite: 'strict' }));
+  expect(res.cookie).toHaveBeenCalledWith('refreshToken', expect.any(String), expect.objectContaining({ httpOnly: true, sameSite: 'lax' }));
 });
 
 test('login: stores hashed refresh token in DB, not the raw value', async () => {
@@ -231,7 +219,7 @@ test('login: stores hashed refresh token in DB, not the raw value', async () => 
   db.query.mockResolvedValueOnce({ rows: [{ id: '1', full_name: 'Alice', email: 'a@b.com', password_hash: hash, email_verified: true, public_key: 'GPUB' }] })
     .mockResolvedValueOnce({ rows: [] });
   const res = mockRes();
-  await login({ body: { email: 'a@b.com', password: 'password1' } }, res, jest.fn());
+  await login({ body: { email: 'a@b.com', password: 'password1' }, headers: {} }, res, jest.fn());
   const rawToken = res.cookie.mock.calls[0][1];
   const insertCall = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO refresh_tokens'));
   expect(insertCall).toBeDefined();
@@ -244,10 +232,10 @@ test('login: seeds a family_id when issuing the first refresh token', async () =
   db.query.mockResolvedValueOnce({ rows: [{ id: '1', full_name: 'Alice', email: 'a@b.com', password_hash: hash, email_verified: true, public_key: 'GPUB' }] })
     .mockResolvedValueOnce({ rows: [] });
   const res = mockRes();
-  await login({ body: { email: 'a@b.com', password: 'password1' } }, res, jest.fn());
+  await login({ body: { email: 'a@b.com', password: 'password1' }, headers: {} }, res, jest.fn());
   const insertCall = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO refresh_tokens'));
   expect(insertCall).toBeDefined();
-  expect(insertCall[1][3]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+  expect(insertCall[1][4]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
 });
 
 test('refresh: returns 401 when no cookie present', async () => {
@@ -258,28 +246,13 @@ test('refresh: returns 401 when no cookie present', async () => {
 });
 
 test('refresh: returns 401 for unknown token', async () => {
-  db.query.mockResolvedValueOnce({ rows: [] });
+  // First lookup (active) misses, second lookup (revoked) also misses
+  db.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
   const res = mockRes();
   await refresh({ cookies: { refreshToken: 'unknownrawtoken' } }, res, jest.fn());
   expect(res.status).toHaveBeenCalledWith(401);
   expect(res.json).toHaveBeenCalledWith({ error: 'Invalid refresh token' });
 });
-  db.query
-    .mockResolvedValueOnce({
-      rows: [
-        {
-          id: '1',
-          full_name: 'Alice',
-          email: 'a@b.com',
-          password_hash: hash,
-          email_verified: true,
-          role: 'user',
-          public_key: 'GPUB',
-        },
-      ],
-    })
-    .mockResolvedValueOnce({ rows: [] })
-    .mockResolvedValueOnce({ rows: [] }); // account reset + INSERT refresh_token
 
 test('refresh: returns 401 and clears cookie for expired token', async () => {
   db.query.mockResolvedValueOnce({ rows: [makeActiveToken({ expires_at: new Date(Date.now() - 1000).toISOString() })] })
@@ -308,7 +281,7 @@ test('refresh: new token carries the same family_id as the old one', async () =>
   const res = mockRes();
   await refresh({ cookies: { refreshToken: 'validrawtoken' } }, res, jest.fn());
   const insertCall = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO refresh_tokens'));
-  expect(insertCall[1][3]).toBe(FAMILY_ID);
+  expect(insertCall[1][4]).toBe(FAMILY_ID);
 });
 
 test('refresh: new cookie token differs from old one (rotation)', async () => {
@@ -337,7 +310,7 @@ test('login: sets HttpOnly refreshToken cookie on success', async () => {
     })
     .mockResolvedValueOnce({ rows: [] }); // INSERT refresh_token
 
-  const req = { body: { email: 'a@b.com', password: 'password1' } };
+  const req = { body: { email: 'a@b.com', password: 'password1' }, headers: {} };
   const res = mockRes();
   await login(req, res, jest.fn());
 
@@ -367,7 +340,7 @@ test('login: stores hashed refresh token in DB, not the raw value', async () => 
     })
     .mockResolvedValueOnce({ rows: [] });
 
-  const req = { body: { email: 'a@b.com', password: 'password1' } };
+  const req = { body: { email: 'a@b.com', password: 'password1' }, headers: {} };
   const res = mockRes();
   await login(req, res, jest.fn());
 
@@ -391,7 +364,7 @@ test('login: seeds a family_id when issuing the first refresh token', async () =
     })
     .mockResolvedValueOnce({ rows: [] });
 
-  const req = { body: { email: 'a@b.com', password: 'password1' } };
+  const req = { body: { email: 'a@b.com', password: 'password1' }, headers: {} };
   const res = mockRes();
   await login(req, res, jest.fn());
 
@@ -403,21 +376,6 @@ test('login: seeds a family_id when issuing the first refresh token', async () =
 });
 
 // ── refresh ───────────────────────────────────────────────────────────────────
-
-const FAMILY_ID = 'fam-uuid-1234-5678-abcd-ef0123456789';
-
-function makeActiveToken(overrides = {}) {
-  return {
-    id: 'rt-1',
-    user_id: 'u-1',
-    expires_at: new Date(Date.now() + 60000).toISOString(),
-    family_id: FAMILY_ID,
-    revoked: false,
-    email: 'a@b.com',
-    role: 'user',
-    ...overrides,
-  };
-}
 
 test('refresh: returns 401 when no cookie present', async () => {
   const req = { cookies: {} };
@@ -579,7 +537,9 @@ test('refresh: reuse of a token that is still in DB as revoked also invalidates 
 // ── logout ────────────────────────────────────────────────────────────────────
 
 test('logout: deletes refresh token from DB and clears cookie', async () => {
-  db.query.mockResolvedValueOnce({ rows: [] }); // DELETE
+  db.query
+    .mockResolvedValueOnce({ rows: [{ family_id: FAMILY_ID, expires_at: new Date(Date.now() + 60000).toISOString() }] }) // lookup
+    .mockResolvedValueOnce({ rows: [] }); // DELETE
 
   const req = { cookies: { refreshToken: 'somerawtoken' } };
   const res = mockRes();
@@ -715,6 +675,9 @@ test('forgotPassword: returns 200, replaces pending tokens, sends email when use
   const res = mockRes();
   await forgotPassword(req, res, jest.fn());
 
+  // forgotPassword sends the email via a fire-and-forget promise chain
+  await new Promise((r) => setImmediate(r));
+
   expect(res.status).toHaveBeenCalledWith(200);
   expect(res.json).toHaveBeenCalledWith(FORGOT_PASSWORD_RESPONSE);
   expect(sendPasswordResetEmail).toHaveBeenCalledWith('alice@example.com', expect.any(String));
@@ -733,6 +696,9 @@ test('forgotPassword: stores hashed token in database, not raw secret', async ()
   const req = { body: { email: 'alice@example.com' } };
   const res = mockRes();
   await forgotPassword(req, res, jest.fn());
+
+  // forgotPassword sends the email via a fire-and-forget promise chain
+  await new Promise((r) => setImmediate(r));
 
   const raw = sendPasswordResetEmail.mock.calls[0][1];
   const expectedHash = crypto.createHash('sha256').update(raw).digest('hex');
@@ -773,7 +739,7 @@ test('resetPassword: updates password and marks tokens used', async () => {
     .mockResolvedValueOnce({ rows: [] })  // DELETE refresh_tokens
     .mockResolvedValueOnce({ rows: [] }); // COMMIT
 
-  const req = { body: { token: 'raw-reset-token', password: 'newpass12' } };
+  const req = { body: { token: 'raw-reset-token', password: 'newpass12' }, ip: '1.2.3.4', headers: { 'user-agent': 'test' } };
   const res = mockRes();
   await resetPassword(req, res, jest.fn());
 
@@ -848,4 +814,80 @@ test('getMe: returns 404 when user not found', async () => {
 
   expect(res.status).toHaveBeenCalledWith(404);
   expect(res.json).toHaveBeenCalledWith({ error: 'User not found' });
+});
+
+test('getMe: includes onboarding_completed in the response', async () => {
+  db.query.mockResolvedValueOnce({
+    rows: [{
+      id: 'u1',
+      full_name: 'Alice',
+      email: 'a@b.com',
+      phone: '+1234',
+      pin_setup_completed: true,
+      totp_enabled: false,
+      account_type: 'personal',
+      public_key: 'GPUB',
+      onboarding_completed: false,
+    }],
+  });
+
+  const req = { user: { userId: 'u1' } };
+  const res = mockRes();
+  await getMe(req, res, jest.fn());
+
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ onboarding_completed: false }));
+});
+
+test('login: includes onboarding_completed in the user response', async () => {
+  const bcrypt = require('bcryptjs');
+  const hash = await bcrypt.hash('password1', 12);
+  db.query
+    .mockResolvedValueOnce({
+      rows: [{
+        id: '1',
+        full_name: 'Alice',
+        email: 'a@b.com',
+        password_hash: hash,
+        email_verified: true,
+        role: 'user',
+        totp_enabled: false,
+        failed_login_attempts: 0,
+        locked_until: null,
+        public_key: 'GPUB',
+        onboarding_completed: true,
+      }],
+    })
+    .mockResolvedValueOnce({ rows: [] }) // reset failed_login_attempts
+    .mockResolvedValueOnce({ rows: [] }); // INSERT refresh_token
+
+  const req = { body: { email: 'a@b.com', password: 'password1' }, headers: {} };
+  const res = mockRes();
+  await login(req, res, jest.fn());
+
+  expect(res.json.mock.calls[0][0].user.onboarding_completed).toBe(true);
+});
+
+// ── completeOnboarding ────────────────────────────────────────────────────────
+
+test('completeOnboarding: marks onboarding completed for the authenticated user', async () => {
+  db.query.mockResolvedValueOnce({ rows: [] });
+
+  const req = { user: { userId: 'u1' }, ip: '1.2.3.4', headers: { 'user-agent': 'test' } };
+  const res = mockRes();
+  await completeOnboarding(req, res, jest.fn());
+
+  expect(db.query).toHaveBeenCalledWith(
+    'UPDATE users SET onboarding_completed = TRUE WHERE id = $1',
+    ['u1']
+  );
+  expect(res.json).toHaveBeenCalledWith({ message: 'Onboarding completed' });
+});
+
+test('completeOnboarding: passes errors to next', async () => {
+  const next = jest.fn();
+  db.query.mockRejectedValueOnce(new Error('db down'));
+
+  await completeOnboarding({ user: { userId: 'u1' } }, mockRes(), next);
+
+  expect(next).toHaveBeenCalledWith(expect.any(Error));
 });

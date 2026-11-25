@@ -11,25 +11,33 @@ const { getTradeHistory } = require('../services/dex');
 const logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
 
+const CONCURRENCY = Math.max(1, parseInt(process.env.OFFER_SYNC_CONCURRENCY || '5', 10));
+
 async function syncOfferEvents() {
   try {
-    // Fetch all wallets that have ever placed a DEX order
+    // Only wallets that have DEX activity are polled
     const { rows: wallets } = await db.query(
       `SELECT DISTINCT w.public_key, w.user_id
        FROM wallets w
-       WHERE w.public_key IS NOT NULL`
+       WHERE w.public_key IS NOT NULL AND w.has_dex_activity = TRUE`
     );
 
-    for (const wallet of wallets) {
-      try {
-        await syncWallet(wallet.public_key, wallet.user_id);
-      } catch (err) {
-        logger.warn('syncOfferEvents: failed for wallet', {
-          wallet: wallet.public_key,
-          error: err.message,
-        });
+    // Bounded concurrency: at most CONCURRENCY Horizon calls in flight, one per wallet
+    let next = 0;
+    const worker = async () => {
+      while (next < wallets.length) {
+        const wallet = wallets[next++];
+        try {
+          await syncWallet(wallet.public_key, wallet.user_id);
+        } catch (err) {
+          logger.warn('syncOfferEvents: failed for wallet', {
+            wallet: wallet.public_key,
+            error: err.message,
+          });
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, wallets.length) }, worker));
   } catch (err) {
     logger.error('syncOfferEvents: top-level error', { error: err.message });
   }
@@ -65,7 +73,7 @@ async function syncWallet(publicKey, userId) {
             base_asset, counter_asset, base_amount, counter_amount,
             price, paging_token, ledger_close_time)
          VALUES ($1,$2,$3,$4,'trade',$5,$6,$7,$8,$9,$10,$11)
-         ON CONFLICT (paging_token) DO NOTHING`,
+         ON CONFLICT (paging_token, wallet_address) DO NOTHING`,
         [
           uuidv4(),
           userId,

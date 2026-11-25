@@ -2,9 +2,9 @@
 
 export const FALLBACK_XLM_FIAT_RATES = {
   USD: 0.11,
-  NGN: 170,
-  GHS: 1.35,
-  KES: 14.5,
+  NGN: 176,   // ~1600 NGN/USD × 0.11 USD/XLM
+  GHS: 1.70,  // ~15.5 GHS/USD × 0.11 USD/XLM
+  KES: 14.2,  // ~129 KES/USD × 0.11 USD/XLM
 };
 
 const FIAT_META = [

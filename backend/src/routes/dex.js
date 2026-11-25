@@ -1,10 +1,16 @@
 const router = require('express').Router();
 const { query, body, validationResult } = require('express-validator');
 const authMiddleware = require('../middleware/auth');
+const { requireStepUp } = require('../middleware/requireStepUp');
 const db = require('../db');
-const { getOrderbook, executeSwap, getTradeHistory } = require('../services/dex');
+const idempotency = require('../middleware/idempotency');
+const cache = require('../utils/cache');
+const { parseAssetParam, getOrderbook, executeSwap, getTradeHistory } = require('../services/dex');
 
-const VALID_ASSETS = /^[A-Z0-9]{1,12}$/;
+const ORDERBOOK_TTL = 5; // seconds — one Stellar ledger close
+
+// Accepts "XLM" or "CODE" or "CODE:GISSUER..."
+const ASSET_PARAM_RE = /^[A-Z0-9]{1,12}(:[A-Z2-7]{56})?$/i;
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -18,15 +24,44 @@ const validate = (req, res, next) => {
  */
 router.get('/orderbook',
   [
-    query('selling').matches(VALID_ASSETS).withMessage('Invalid selling asset'),
-    query('buying').matches(VALID_ASSETS).withMessage('Invalid buying asset'),
+    query('selling')
+      .matches(ASSET_PARAM_RE)
+      .withMessage('selling must be XLM, a CODE, or CODE:GISSUER'),
+    query('buying')
+      .matches(ASSET_PARAM_RE)
+      .withMessage('buying must be XLM, a CODE, or CODE:GISSUER'),
+    query('limit')
+      .optional()
+      .isInt({ min: 1, max: 200 })
+      .withMessage('limit must be 1–200'),
+    query('amount')
+      .optional()
+      .isFloat({ gt: 0 })
+      .withMessage('amount must be a positive number'),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const data = await getOrderbook(req.query.selling, req.query.buying);
+      // Validate asset params early to return a clean 400 before hitting Horizon
+      try {
+        parseAssetParam(req.query.selling);
+        parseAssetParam(req.query.buying);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+
+      const limit  = req.query.limit  ? parseInt(req.query.limit, 10) : 10;
+      const amount = req.query.amount ? parseFloat(req.query.amount)  : null;
+      const cacheKey = `orderbook:${req.query.selling}:${req.query.buying}:${limit}:${amount ?? ''}`;
+
+      const cached = await cache.get(cacheKey);
+      if (cached) return res.json(cached);
+
+      const data = await getOrderbook(req.query.selling, req.query.buying, limit, amount);
+      await cache.set(cacheKey, data, ORDERBOOK_TTL);
       res.json(data);
     } catch (err) {
+      if (err.status === 400) return res.status(400).json({ error: err.message });
       next(err);
     }
   }
@@ -35,27 +70,59 @@ router.get('/orderbook',
 /**
  * POST /api/dex/swap
  * @protected — accesses and signs with the authenticated user's wallet.
+ * Body: sell_asset, sell_amount, buy_asset, plus either
+ *   - min_received (decimal string): binding destMin for the path payment, or
+ *   - slippage_pct (0–50, default 1): used to derive destMin from the server quote.
+ * Supports the Idempotency-Key header.
  */
 router.post('/swap',
   authMiddleware,
   [
-    body('sell_asset').matches(VALID_ASSETS).withMessage('Invalid sell_asset'),
+    body('sell_asset').matches(ASSET_PARAM_RE).withMessage('Invalid sell_asset'),
     body('sell_amount').isFloat({ gt: 0 }).withMessage('sell_amount must be > 0'),
-    body('buy_asset').matches(VALID_ASSETS).withMessage('Invalid buy_asset'),
+    body('buy_asset').matches(ASSET_PARAM_RE).withMessage('Invalid buy_asset'),
     body('slippage_pct').optional().isFloat({ min: 0, max: 50 }).withMessage('slippage_pct must be 0–50'),
+    body('min_received').optional().matches(/^\d+(\.\d{1,7})?$/).withMessage('min_received must be a decimal string with up to 7 decimals')
+      .bail().custom((v) => parseFloat(v) > 0).withMessage('min_received must be > 0'),
   ],
   validate,
+  idempotency,
+  requireStepUp,
   async (req, res, next) => {
     try {
-      const { sell_asset, sell_amount, buy_asset, slippage_pct } = req.body;
+      const { sell_asset, sell_amount, buy_asset, slippage_pct, min_received } = req.body;
 
       const walletResult = await db.query(
-        'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
+        'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
         [req.user.userId]
       );
       if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
 
       const { public_key, encrypted_secret_key } = walletResult.rows[0];
+
+      // Issue #1156: Apply compliance checks to DEX swaps (value-moving endpoint)
+      const { ensureKycIfNeeded, amlRescreenForPayment, dailyLimitExceeded, checkFraud, logFraudBlock } = require('../controllers/paymentController');
+      const { estimateUSDValue } = require('../controllers/paymentController');
+      
+      // Use sell_asset for compliance thresholds
+      await ensureKycIfNeeded(req.user.userId, sell_amount, sell_asset);
+      
+      const estimatedUSD = estimateUSDValue(sell_amount, sell_asset);
+      await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD);
+      
+      const overLimit = await dailyLimitExceeded(public_key, sell_amount);
+      if (overLimit) {
+        return res.status(400).json({
+          error: 'Daily send limit reached. Try again tomorrow.',
+          code: 'DAILY_LIMIT_EXCEEDED',
+        });
+      }
+      
+      const fraudCheck = await checkFraud(public_key, sell_amount, sell_asset);
+      if (fraudCheck.blocked) {
+        await logFraudBlock(public_key, fraudCheck.reason, sell_amount, sell_asset);
+        return res.status(429).json({ error: fraudCheck.reason });
+      }
 
       const result = await executeSwap({
         publicKey: public_key,
@@ -64,9 +131,43 @@ router.post('/swap',
         sellAmount: sell_amount,
         buyAsset: buy_asset,
         slippagePct: slippage_pct,
+        minReceived: min_received,
       });
 
+      await db.query('UPDATE wallets SET has_dex_activity = TRUE WHERE public_key = $1', [public_key]);
+
       res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * GET /api/dex/trades
+ * @protected — returns Horizon trade history for the authenticated user's wallet.
+ * Calls getTradeHistory from services/dex.js.
+ */
+router.get('/trades',
+  authMiddleware,
+  [
+    query('cursor').optional().isString().trim().notEmpty().withMessage('cursor must be a non-empty string'),
+    query('limit').optional().isInt({ min: 1, max: 200 }).withMessage('limit must be 1–200'),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit, 10) : 50;
+      const cursor = req.query.cursor || null;
+
+      const walletResult = await db.query(
+        'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC LIMIT 1',
+        [req.user.userId]
+      );
+      if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
+
+      const trades = await getTradeHistory(walletResult.rows[0].public_key, cursor, limit);
+      res.json({ trades });
     } catch (err) {
       next(err);
     }

@@ -1,76 +1,96 @@
 const db = require('../db');
-const { sendExpiryNotification } = require('../services/email');
-const { getClaimableBalances } = require('../services/stellar');
+const webhook = require('../services/webhook');
 const logger = require('../utils/logger');
+const { persistAndBroadcast } = require('../services/notificationInbox');
+const { sendClaimableBalanceExpiringEmail } = require('../services/email');
 
-// Check for claimable balances expiring within 7 days
-async function checkClaimableBalanceExpiry() {
+const WARN_HOURS = parseInt(process.env.CLAIMABLE_BALANCE_WARN_HOURS || '24', 10);
+
+async function notifyUser(userId, balanceId, expiresAt) {
   try {
-    logger.info('Starting claimable balance expiry check');
-
-    const { rows: transactions } = await db.query(
-      `SELECT t.*, u.email as sender_email, u.full_name as sender_name
-       FROM transactions t
-       JOIN users u ON u.id = t.user_id
-       WHERE t.type = 'claimable_balance' AND t.status = 'pending'`
-    );
-
-    const now = Date.now();
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-
-    for (const tx of transactions) {
-      const createdAt = new Date(tx.created_at).getTime();
-      const expiresAt = createdAt + thirtyDaysMs;
-      const timeUntilExpiry = expiresAt - now;
-
-      // Check if expiring within 7 days
-      if (timeUntilExpiry > 0 && timeUntilExpiry <= sevenDaysMs) {
-        const daysLeft = Math.ceil(timeUntilExpiry / (24 * 60 * 60 * 1000));
-
-        // Send notification to sender
-        await sendExpiryNotification(
-          tx.sender_email,
-          tx.sender_name,
-          tx.recipient_wallet,
-          tx.amount,
-          tx.asset,
-          daysLeft,
-          'sender'
-        );
-
-        // Check if recipient is registered and send notification
-        const { rows: recipientRows } = await db.query(
-          `SELECT u.email, u.full_name FROM users u
-           JOIN wallets w ON w.user_id = u.id
-           WHERE w.public_key = $1`,
-          [tx.recipient_wallet]
-        );
-
-        if (recipientRows.length > 0) {
-          await sendExpiryNotification(
-            recipientRows[0].email,
-            recipientRows[0].full_name,
-            tx.recipient_wallet,
-            tx.amount,
-            tx.asset,
-            daysLeft,
-            'recipient'
-          );
-        }
-
-        logger.info('Expiry notification sent', {
-          txId: tx.id,
-          daysLeft,
-          recipient: tx.recipient_wallet
-        });
-      }
-    }
-
-    logger.info('Claimable balance expiry check completed');
+    const { rows } = await db.query('SELECT email, full_name FROM users WHERE id = $1', [userId]);
+    if (!rows[0]) return;
+    const { email, full_name } = rows[0];
+    await sendClaimableBalanceExpiringEmail(email, full_name, balanceId, expiresAt);
+    logger.info('Expiry notification sent', { userId, balanceId });
   } catch (err) {
-    logger.error('Error checking claimable balance expiry', { error: err.message });
+    logger.warn('Failed to send expiry notification email', { userId, balanceId, error: err.message });
   }
 }
 
-module.exports = checkClaimableBalanceExpiry;
+async function checkClaimableBalanceExpiry(now = new Date()) {
+  const { rows: expired } = await db.query(
+    `WITH expired_balances AS (
+       UPDATE claimable_balances
+       SET status = 'expired', updated_at = NOW()
+      WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= $1
+       RETURNING id, balance_id, user_id, asset, amount
+     ), expired_transactions AS (
+       UPDATE transactions AS tx
+      SET status = 'expired', confirmed_at = $1
+       FROM expired_balances AS balance
+       WHERE tx.claimable_balance_id = balance.balance_id
+         AND tx.status = 'pending_claim'
+       RETURNING tx.id
+     )
+    SELECT balance.* FROM expired_balances AS balance`,
+      [now],
+  );
+
+  for (const row of expired) {
+    logger.info('Claimable balance expired', { balanceId: row.balance_id });
+    webhook.deliver('claimable_balance.expired', row.user_id, {
+      id: row.id,
+      balance_id: row.balance_id,
+      asset: row.asset,
+      amount: row.amount,
+    }).catch(() => {});
+
+    if (row.user_id) {
+      persistAndBroadcast(row.user_id, 'claimable_balance_expired', 'Claimable balance expired',
+        `Your claimable balance ${row.balance_id} has expired`,
+        { balance_id: row.balance_id, asset: row.asset, amount: row.amount }
+      ).catch(() => {});
+    }
+  }
+
+  // Claim each warning exactly once: mark and return in the same statement
+  const { rows: expiringSoon } = await db.query(
+    `UPDATE claimable_balances
+     SET warning_sent_at = $1, updated_at = $1
+     WHERE status = 'active'
+       AND warning_sent_at IS NULL
+       AND expires_at IS NOT NULL
+       AND expires_at > $1
+       AND expires_at <= $1 + ($2::int * interval '1 hour')
+     RETURNING id, balance_id, user_id, asset, amount, expires_at`,
+     [now, WARN_HOURS]
+  );
+
+  for (const row of expiringSoon) {
+    webhook.deliver('claimable_balance.expiring_soon', row.user_id, {
+      id: row.id,
+      balance_id: row.balance_id,
+      asset: row.asset,
+      amount: row.amount,
+      expires_at: row.expires_at,
+    }).catch(() => {});
+
+    if (row.user_id) {
+      await notifyUser(row.user_id, row.balance_id, row.expires_at);
+      persistAndBroadcast(row.user_id, 'claimable_balance_expiring', 'Claimable balance expiring soon',
+        `Your claimable balance ${row.balance_id} will expire on ${new Date(row.expires_at).toUTCString()}`,
+        { balance_id: row.balance_id, asset: row.asset, amount: row.amount, expires_at: row.expires_at }
+      ).catch(() => {});
+    }
+  }
+
+  if (expired.length > 0 || expiringSoon.length > 0) {
+    logger.info('Claimable balance expiry check complete', {
+      expired: expired.length,
+      expiringSoon: expiringSoon.length,
+    });
+  }
+}
+
+module.exports = { checkClaimableBalanceExpiry };

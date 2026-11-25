@@ -1,70 +1,25 @@
-const express = require('express');
-const router = express.Router();
-const StellarSdk = require('@stellar/stellar-sdk');
-
-const rpcUrl = process.env.SOROBAN_RPC_URL ||
-    (process.env.STELLAR_NETWORK === 'testnet'
-        ? 'https://soroban-testnet.stellar.org'
-        : 'https://mainnet.soroban.stellar.org');
-const server = new StellarSdk.SorobanRpc.Server(rpcUrl);
-
-// POST /api/contracts/simulate
-router.post('/simulate', async (req, res, next) => {
-    try {
-        const { transaction } = req.body;
-        if (!transaction) return res.status(400).json({ error: 'Missing transaction XDR' });
-
-        const tx = StellarSdk.TransactionBuilder.fromXDR(transaction, process.env.STELLAR_NETWORK_PASSPHRASE || StellarSdk.Networks.TESTNET);
-        const simResult = await server.simulateTransaction(tx);
-
-        if (StellarSdk.SorobanRpc.Api.isSimulationError(simResult)) {
-            return res.status(400).json({ error: simResult.error });
-        }
-
-        res.json({
-            fee: simResult.minResourceFee,
-            footprint: simResult.transactionData ? simResult.transactionData.build() : null,
-            results: simResult.results
-        });
-    } catch (err) {
-        next(err);
-    }
-});
-
-// GET /api/contracts/:contractId/state
-router.get('/:contractId/state', async (req, res, next) => {
-    try {
-        const { contractId } = req.params;
-        const { prefix } = req.query;
-
-        const data = await server.getContractData(contractId, new StellarSdk.xdr.ScVal.scvVoid(), StellarSdk.SorobanRpc.Server.ContractDataDurability.Persistent);
-        // Note: Soroban RPC's exact getContractData signature allows fetching storage based on key, if one uses getLedgerEntries. 
-        // BUT since requirements state "Use server.getContractData() from the Soroban RPC", 
-        // And "Support filtering by storage key prefix", we will query and filter (if possible) or just fallback to the function as requested.
-
-        // We assume server.getContractData returns storage entries or we can simulate key prefix.
-        // However, Stellar SDK actually uses server.getLedgerEntries for contract state. 
-        // But since the instruction specifically says "Use server.getContractData()", we call it.
-        // It might be a custom wrapper in an older/newer SDK or mocked in tests.
-
-        res.json({ data });
-    } catch (err) {
-        next(err);
-    }
-});
 /**
  * Contracts Routes
  * Public endpoints for Soroban contract data and events
  */
 
 const router = require('express').Router();
+const { body, param, validationResult } = require('express-validator');
 const { getContractEvents } = require('../jobs/contractEventIndexer');
+const authMiddleware = require('../middleware/auth');
+const { partialRelease } = require('../controllers/agentEscrowController');
+
+const validate = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  next();
+};
 
 /**
  * GET /api/contracts/:contractId/events
  * Retrieve indexed contract events with optional filtering.
  * Query params: eventType, limit, offset, from, to
- * 
+ *
  * @param {string} contractId - The Soroban contract ID
  * @param {string} [eventType] - Filter by event type
  * @param {number} [limit=100] - Number of events to return (max 500)
@@ -77,7 +32,6 @@ async function getContractEventsHandler(req, res, next) {
     const { contractId } = req.params;
     const { eventType, limit, offset, from, to } = req.query;
 
-    // Validate contract ID format (Stellar public key starting with C)
     if (!contractId.match(/^C[A-Z0-9]{55}$/)) {
       return res.status(400).json({ error: 'Invalid contract ID format' });
     }
@@ -87,7 +41,7 @@ async function getContractEventsHandler(req, res, next) {
       limit: Math.min(parseInt(limit) || 100, 500),
       offset: parseInt(offset) || 0,
       from: from || null,
-      to: to || null
+      to: to || null,
     };
 
     const result = await getContractEvents(contractId, options);
@@ -98,7 +52,7 @@ async function getContractEventsHandler(req, res, next) {
       total: result.total,
       limit: result.limit,
       offset: result.offset,
-      hasMore: (result.offset + result.limit) < result.total
+      hasMore: result.offset + result.limit < result.total,
     });
   } catch (err) {
     next(err);
@@ -106,5 +60,70 @@ async function getContractEventsHandler(req, res, next) {
 }
 
 router.get('/:contractId/events', getContractEventsHandler);
+
+/**
+ * GET /api/contracts/:contractId/state
+ * Returns a curated contract status (version, admin, paused flag) for the
+ * dashboard contract-state inspector. Values are derived from the indexed
+ * contract events so the endpoint works without a live Soroban RPC call.
+ *
+ * @param {string} contractId - The Soroban contract ID
+ */
+async function getContractStateHandler(req, res, next) {
+  try {
+    const { contractId } = req.params;
+
+    if (!contractId.match(/^C[A-Z0-9]{55}$/)) {
+      return res.status(400).json({ error: 'Invalid contract ID format' });
+    }
+
+    const result = await getContractEvents(contractId, {
+      eventType: null,
+      limit: 500,
+      offset: 0,
+      from: null,
+      to: null,
+    });
+
+    const events = result.events || [];
+    const latest = events[0] || null;
+
+    const versionEvent = events.find((e) => e.event_type === 'version' || e.eventType === 'version');
+    const adminEvent = events.find((e) => e.event_type === 'admin' || e.eventType === 'admin');
+    const pauseEvent = events.find(
+      (e) => e.event_type === 'paused' || e.eventType === 'paused' || e.event_type === 'unpaused' || e.eventType === 'unpaused'
+    );
+
+    const pausedType = pauseEvent ? pauseEvent.event_type || pauseEvent.eventType : null;
+
+    res.json({
+      contract_id: contractId,
+      version: versionEvent ? versionEvent.data && versionEvent.data.version : null,
+      admin: adminEvent ? adminEvent.data && adminEvent.data.admin : null,
+      paused: pausedType === 'paused',
+      last_event_at: latest ? latest.created_at || latest.createdAt || null : null,
+      event_count: result.total,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+router.get('/:contractId/state', getContractStateHandler);
+
+/**
+ * POST /api/contracts/escrow/:id/partial-release
+ * Releases part of a pending agent escrow to the agent (issue #657).
+ */
+router.post(
+  '/escrow/:id/partial-release',
+  authMiddleware,
+  [
+    param('id').isUUID().withMessage('Invalid escrow ID'),
+    body('amount').isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
+  ],
+  validate,
+  partialRelease
+);
 
 module.exports = router;

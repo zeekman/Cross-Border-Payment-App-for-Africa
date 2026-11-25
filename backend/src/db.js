@@ -3,6 +3,8 @@ const { dbQueryDuration } = require('./utils/metrics');
 const logger = require('./utils/logger');
 
 const WAITING_ALERT_THRESHOLD = 5;
+const SLOW_QUERY_THRESHOLD_MS = 500;
+const POOL_STATS_INTERVAL_MS = parseInt(process.env.DB_POOL_STATS_INTERVAL_MS) || 60_000;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -60,6 +62,11 @@ pool.on('error', (err) => {
   });
 });
 
+// Periodic pool health snapshot — unref'd so it doesn't prevent process exit.
+setInterval(() => {
+  logger.info('DB pool stats', getPoolStats());
+}, POOL_STATS_INTERVAL_MS).unref();
+
 /**
  * Executes a SQL query using a client from the pool.
  * @param {string} text - SQL query string
@@ -68,9 +75,14 @@ pool.on('error', (err) => {
  */
 async function query(text, params) {
   const end = dbQueryDuration.startTimer();
+  const start = Date.now();
   try {
     const result = await pool.query(text, params);
+    const duration = Date.now() - start;
     end({ success: 'true' });
+    if (duration > SLOW_QUERY_THRESHOLD_MS) {
+      logger.warn('Slow query detected', { duration, text, params });
+    }
     return result;
   } catch (err) {
     end({ success: 'false' });
