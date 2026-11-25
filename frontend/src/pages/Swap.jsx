@@ -212,9 +212,8 @@ export default function Swap() {
         // Backend honours slippage_pct; min_received kept for BE-139 forward-compat.
         slippage_pct: slippage,
         min_received: minReceived || undefined,
-      }, idemRef.current.get());
+      }, idemRef.current.get(), { headers: { 'X-Step-Up-Token': stepUpToken } });
       idemRef.current.reset();
-      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
       setResult(res.data);
       setSellAmount('');
       setQuote(null);
