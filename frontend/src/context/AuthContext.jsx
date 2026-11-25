@@ -95,6 +95,9 @@ export function AuthProvider({ children }) {
     return res.data;
   };
 
+  // Registration does not establish a session (email verification comes first),
+  // so the full response is returned — including phone_verification_token, which
+  // the phone-OTP step needs to authenticate POST /auth/verify-phone (FE-190).
   const register = async (data) => {
     const res = await api.post('/auth/register', data);
     return res.data;
