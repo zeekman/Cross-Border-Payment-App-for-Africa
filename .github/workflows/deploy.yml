@@ -1,28 +1,58 @@
 name: Deploy
 
 on:
-  push:
+  workflow_run:
+    workflows: [ CI ]
+    types: [ completed ]
     branches: [ main ]
 
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    name: Run Database Migrations
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    environment: production
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: backend/package-lock.json
+
+    - name: Migrate
+      env:
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      run: |
+        cd backend
+        npm ci
+        npm run migrate
+
   deploy-backend:
     runs-on: ubuntu-latest
     name: Deploy Backend
+    needs: migrate
+    environment: production
     
     steps:
     - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
     
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '20'
         cache: 'npm'
-    
-    - name: Build Backend
-      run: |
-        cd backend
-        npm ci --only=production
-        npm run build  # if build script exists
     
     # Railway example (replace with your platform)
     - name: Deploy to Railway
@@ -42,9 +72,13 @@ jobs:
   deploy-frontend:
     runs-on: ubuntu-latest
     name: Deploy Frontend
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    environment: production
     
     steps:
     - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
     
     - name: Setup Node.js
       uses: actions/setup-node@v4
