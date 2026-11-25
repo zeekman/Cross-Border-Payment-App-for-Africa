@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Activity, Users, DollarSign, TrendingUp, Server, BarChart3, ShieldAlert, CheckCircle, XCircle } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line,
@@ -82,6 +83,7 @@ async function pollExportJob(jobId, { intervalMs = 2000, maxAttempts = 60 } = {}
 }
 
 export default function AdminDashboard() {
+  const { t } = useTranslation();
   const [stats, setStats] = useState(null);
   const [dailyStats, setDailyStats] = useState([]);
   const [stellarStats, setStellarStats] = useState(null);
@@ -114,9 +116,9 @@ export default function AdminDashboard() {
       setStats(statsRes.data);
       setDailyStats(dailyRes.data);
       setStellarStats(stellarRes.data);
-    }).catch(() => toast.error('Failed to load admin stats'))
+    }).catch(() => toast.error(t('adminDashboard.toast.loadStatsFailed')))
       .finally(() => setLoading(false));
-  }, []);
+  }, [t]);
 
   /**
    * Fetch a preview of the users that will be affected by the chosen bulk action
@@ -131,7 +133,7 @@ export default function AdminDashboard() {
       setBulkPreviewUsers(users);
       setBulkAction(action);
     } catch {
-      toast.error('Failed to load affected users. Please try again.');
+      toast.error(t('adminDashboard.toast.loadAffectedUsersFailed'));
     } finally {
       setBulkPreviewLoading(false);
     }
@@ -146,7 +148,7 @@ export default function AdminDashboard() {
       bulkReason
     );
     if (!request) {
-      toast.error('Unsupported bulk action.');
+      toast.error(t('adminDashboard.toast.unsupportedBulkAction'));
       return;
     }
 
@@ -169,20 +171,27 @@ export default function AdminDashboard() {
           const url = job.download_url ?? job.downloadUrl ?? job.url;
           if (url) {
             setBulkExportUrl(url);
-            toast.success('Export ready — download available.');
+            toast.success(t('adminDashboard.toast.exportReady'));
           } else {
-            toast.success('Export completed.');
+            toast.success(t('adminDashboard.toast.exportCompleted'));
           }
         } else {
-          toast.success('Export started.');
+          toast.success(t('adminDashboard.toast.exportStarted'));
         }
       } else if (failed.length) {
         toast.error(
-          `Bulk ${bulkAction}: ${failed.length} of ${results.length} user${results.length !== 1 ? 's' : ''} failed.`
+          t('adminDashboard.toast.bulkPartialFailure', {
+            action: bulkAction,
+            failed: failed.length,
+            total: results.length,
+          })
         );
       } else {
         toast.success(
-          `Bulk ${bulkAction} applied to ${bulkPreviewUsers.length} user${bulkPreviewUsers.length !== 1 ? 's' : ''}`
+          t('adminDashboard.toast.bulkSuccess', {
+            action: bulkAction,
+            count: bulkPreviewUsers.length,
+          })
         );
       }
 
@@ -190,16 +199,16 @@ export default function AdminDashboard() {
       setBulkPreviewUsers([]);
       setBulkReason('');
     } catch {
-      toast.error('Bulk action failed. Please try again.');
+      toast.error(t('adminDashboard.toast.bulkActionFailed'));
     } finally {
       setBulkLoading(false);
     }
   };
 
   if (loading) return (
-    <div className="flex items-center justify-center h-64" role="status" aria-live="polite" aria-label="Loading admin dashboard">
+    <div className="flex items-center justify-center h-64" role="status" aria-live="polite" aria-label={t('adminDashboard.loading')}>
       <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" aria-hidden="true" />
-      <span className="sr-only">Loading admin dashboard…</span>
+      <span className="sr-only">{t('adminDashboard.loading')}</span>
     </div>
   );
 
@@ -211,14 +220,14 @@ export default function AdminDashboard() {
   }));
 
   return (
-    <div className="px-4 py-6 max-w-6xl mx-auto space-y-6" role="main" aria-label="Admin dashboard">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Admin Dashboard</h2>
+    <div className="px-4 py-6 max-w-6xl mx-auto space-y-6" role="main" aria-label={t('adminDashboard.title')}>
+      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">{t('adminDashboard.title')}</h2>
 
       {/* Platform Stats */}
       <div
         className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"
         role="group"
-        aria-label="Platform statistics"
+        aria-label={t('adminDashboard.platformStats')}
         aria-live="polite"
       >
         <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm">
@@ -227,7 +236,7 @@ export default function AdminDashboard() {
               <Users size={20} />
             </div>
             <div>
-              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-total-users-label">Total Users</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-total-users-label">{t('adminDashboard.stats.totalUsers')}</p>
               <p className="text-2xl font-bold text-gray-900 dark:text-white" aria-labelledby="stat-total-users-label">{stats?.total_users || 0}</p>
             </div>
           </div>
@@ -239,7 +248,7 @@ export default function AdminDashboard() {
               <Activity size={20} />
             </div>
             <div>
-              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-transactions-label">Transactions</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-transactions-label">{t('adminDashboard.stats.transactions')}</p>
               <p className="text-2xl font-bold text-gray-900 dark:text-white" aria-labelledby="stat-transactions-label">{stats?.total_transactions || 0}</p>
             </div>
           </div>
@@ -251,7 +260,7 @@ export default function AdminDashboard() {
               <DollarSign size={20} />
             </div>
             <div>
-              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-volume-label">Total Volume</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-volume-label">{t('adminDashboard.stats.totalVolume')}</p>
               <p className="text-2xl font-bold text-gray-900 dark:text-white" aria-labelledby="stat-volume-label">{parseFloat(stats?.total_volume || 0).toFixed(2)}</p>
             </div>
           </div>
@@ -263,7 +272,7 @@ export default function AdminDashboard() {
               <TrendingUp size={20} />
             </div>
             <div>
-              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-fees-label">Total Fees</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-fees-label">{t('adminDashboard.stats.totalFees')}</p>
               <p className="text-2xl font-bold text-gray-900 dark:text-white" aria-labelledby="stat-fees-label">{parseFloat(stats?.total_fees || 0).toFixed(2)}</p>
             </div>
           </div>
@@ -272,8 +281,8 @@ export default function AdminDashboard() {
 
       {/* Bulk action results (per-user, including partial failures) */}
       {bulkResults.length > 0 && (
-        <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm" role="region" aria-label="Bulk action results">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">Bulk action results</h3>
+        <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm" role="region" aria-label={t('adminDashboard.bulkResultsTitle')}>
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">{t('adminDashboard.bulkResultsTitle')}</h3>
           <ul className="space-y-2">
             {bulkResults.map((r, i) => {
               const ok = r.success !== false && !r.error;
@@ -285,10 +294,10 @@ export default function AdminDashboard() {
                     <XCircle size={16} className="text-red-500" aria-hidden="true" />
                   )}
                   <span className="text-gray-700 dark:text-gray-300">
-                    {r.user_id ?? r.id ?? `User ${i + 1}`}
+                    {r.user_id ?? r.id ?? t('adminDashboard.userFallback', { index: i + 1 })}
                   </span>
                   {!ok && (
-                    <span className="text-red-500">{r.error || 'Failed'}</span>
+                    <span className="text-red-500">{r.error || t('adminDashboard.bulkResultFailed')}</span>
                   )}
                 </li>
               );
@@ -305,7 +314,7 @@ export default function AdminDashboard() {
             className="inline-flex items-center gap-2 text-primary-500 font-semibold hover:underline"
             download
           >
-            Download export
+            {t('adminDashboard.downloadExport')}
           </a>
         </div>
       )}

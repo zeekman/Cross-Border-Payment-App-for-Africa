@@ -209,14 +209,20 @@ export default function Login() {
       </button>
 
       <div className="flex-1 flex flex-col justify-center max-w-sm mx-auto w-full">
-        <div className="w-12 h-12 bg-primary-500 rounded-2xl flex items-center justify-center text-2xl mb-6">
+        <div
+          data-testid="login-header-icon"
+          className="w-12 h-12 bg-primary-500 rounded-2xl flex items-center justify-center text-2xl mb-6"
+        >
           {requires2fa ? <ShieldCheck size={24} className="text-white" /> : '💸'}
         </div>
 
         {requires2fa ? (
           /* ── TOTP step ── */
           <>
-            <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-1">
+            <h2
+              data-testid="login-2fa-title"
+              className="text-2xl font-bold text-gray-900 dark:text-white mb-1"
+            >
               {t('login.totp_title', 'Two-factor authentication')}
             </h2>
             <p className="text-gray-600 dark:text-gray-400 mb-8">
@@ -232,7 +238,7 @@ export default function Login() {
             )}
 
             {useBackupCode ? (
-              <form onSubmit={handleBackupCodeSubmit}>
+              <form onSubmit={handleBackupCodeSubmit} data-testid="login-backup-code-form">
                 <label
                   htmlFor="backup-code-input"
                   className="text-sm text-gray-600 dark:text-gray-400 mb-1 block"
@@ -241,6 +247,7 @@ export default function Login() {
                 </label>
                 <input
                   id="backup-code-input"
+                  data-testid="login-backup-code-input"
                   ref={backupInputRef}
                   type="text"
                   autoComplete="one-time-code"
@@ -258,6 +265,7 @@ export default function Login() {
                 </p>
                 <button
                   type="submit"
+                  data-testid="login-backup-code-submit"
                   disabled={loading || !backupCode.trim()}
                   className="w-full mt-4 bg-primary-500 hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-4 transition-colors"
                 >
@@ -274,6 +282,7 @@ export default function Login() {
                 </label>
                 <input
                   id="totp-input"
+                  data-testid="login-totp-input"
                   ref={totpInputRef}
                   type="text"
                   inputMode="numeric"
@@ -299,6 +308,7 @@ export default function Login() {
 
             <button
               type="button"
+              data-testid="login-toggle-backup-code"
               onClick={toggleBackupCode}
               aria-pressed={useBackupCode}
               aria-controls={useBackupCode ? 'backup-code-input' : 'totp-input'}
@@ -312,7 +322,10 @@ export default function Login() {
         ) : (
           /* ── Credentials step ── */
           <>
-            <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-1">
+            <h2
+              data-testid="login-title"
+              className="text-2xl font-bold text-gray-900 dark:text-white mb-1"
+            >
               {t('login.title', 'Welcome back')}
             </h2>
             <p className="text-gray-600 dark:text-gray-400 mb-8">
@@ -320,19 +333,23 @@ export default function Login() {
             </p>
 
             {emailVerificationRequired && (
-              <div className="mb-6 flex items-start gap-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
+              <div
+                data-testid="login-verify-email-banner"
+                className="mb-6 flex items-start gap-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-4 py-3 text-sm text-amber-800 dark:text-amber-300"
+              >
                 <MailCheck size={18} className="mt-0.5 shrink-0" />
                 <span>{t('login.verify_email', 'Please verify your email before signing in.')}</span>
               </div>
             )}
 
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={handleSubmit} data-testid="login-form" className="space-y-4">
               <div>
                 <label htmlFor="email" className="text-sm text-gray-600 dark:text-gray-400 mb-1 block">
                   {t('login.email', 'Email')}
                 </label>
                 <input
                   id="email"
+                  data-testid="login-email-input"
                   type="email"
                   autoComplete="email"
                   value={form.email}
@@ -349,6 +366,7 @@ export default function Login() {
                 <div className="relative">
                   <input
                     id="password"
+                    data-testid="login-password-input"
                     type={showPass ? 'text' : 'password'}
                     autoComplete="current-password"
                     value={form.password}
@@ -358,6 +376,7 @@ export default function Login() {
                   />
                   <button
                     type="button"
+                    data-testid="login-toggle-password"
                     onClick={() => setShowPass((v) => !v)}
                     aria-label={showPass ? t('login.hide_password', 'Hide password') : t('login.show_password', 'Show password')}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
@@ -370,6 +389,7 @@ export default function Login() {
               <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
                 <input
                   type="checkbox"
+                  data-testid="login-remember-device"
                   checked={rememberDevice}
                   onChange={(e) => setRememberDevice(e.target.checked)}
                   disabled={loading}
@@ -380,6 +400,7 @@ export default function Login() {
 
               <button
                 type="submit"
+                data-testid="login-submit"
                 disabled={loading || secondsLeft > 0}
                 className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 transition-colors"
               >
@@ -393,7 +414,11 @@ export default function Login() {
 
             <p className="text-sm text-gray-600 dark:text-gray-400 mt-6 text-center">
               {t('login.no_account', "Don't have an account?")}{' '}
-              <Link to="/register" className="text-primary-600 dark:text-primary-400 hover:underline">
+              <Link
+                to="/register"
+                data-testid="login-register-link"
+                className="text-primary-600 dark:text-primary-400 hover:underline"
+              >
                 {t('login.register', 'Sign up')}
               </Link>
             </p>

@@ -850,6 +850,7 @@ export default function SendMoney() {
     >
       <button
         type="button"
+        data-testid="send-back-button"
         onClick={async () => {
           if (step > 1) {
             dispatchStep({ type: 'BACK' });
@@ -863,9 +864,9 @@ export default function SendMoney() {
         <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
-      <h2 className="text-2xl font-bold text-white mb-4">{t('send.title')}</h2>
+      <h2 className="text-2xl font-bold text-white mb-4" data-testid="send-title">{t('send.title')}</h2>
       {requestId && (requestError ? (
-        <div role="alert" className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-400">{requestError}</div>
+        <div role="alert" data-testid="send-request-error" className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-400">{requestError}</div>
       ) : requestExpiry && (
         <p className="mb-4 text-xs text-gray-400">
           {t('send.request_expires', 'Payment request expires')} {new Date(requestExpiry).toLocaleString(i18n.language)}
@@ -873,13 +874,14 @@ export default function SendMoney() {
       ))}
 
       {/* Step indicator */}
-      <div className="flex items-center mb-6" aria-label="Progress">
+      <div className="flex items-center mb-6" aria-label="Progress" data-testid="send-progress" data-step={step}>
         {WIZARD_STEPS.map((label, i) => {
           const num = i + 1;
           return (
             <React.Fragment key={num}>
               <div className="flex flex-col items-center">
                 <div
+                  data-testid={`send-step-indicator-${num}`}
                   className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0 ${
                     step > num
                       ? 'bg-primary-500 text-white'
@@ -911,6 +913,7 @@ export default function SendMoney() {
 
       <form
         onSubmit={handleStepSubmit}
+        data-testid="send-form"
         className="space-y-4 overflow-y-auto"
         style={{ maxHeight: keyboardOpen ? 'calc(100vh - 200px)' : 'auto' }}
       >
@@ -918,6 +921,7 @@ export default function SendMoney() {
         {step >= 3 && (quoteRefreshing || quoteRefreshed) && (
           <div
             role="status"
+            data-testid="send-quote-refresh-notice"
             className="bg-yellow-400/10 border border-yellow-400/30 text-yellow-300 text-xs rounded-xl px-3 py-2"
           >
             {quoteRefreshing ? 'Refreshing quote…' : 'Rate updated — showing the latest quote.'}
@@ -934,6 +938,7 @@ export default function SendMoney() {
                 <div className="relative">
                   <button
                     type="button"
+                    data-testid="send-wallet-selector"
                     onClick={() => setShowWalletDropdown((v) => !v)}
                     className="w-full flex items-center justify-between bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white hover:border-primary-500 transition-colors"
                     aria-haspopup="listbox"
@@ -965,6 +970,7 @@ export default function SendMoney() {
                             key={w.id}
                             type="button"
                             role="option"
+                            data-testid={`send-wallet-option-${w.id}`}
                             aria-selected={w.id === selectedWalletId}
                             onClick={() => { setSelectedWalletId(w.id); setShowWalletDropdown(false); }}
                             className={`w-full flex items-center justify-between px-4 py-3 text-left transition-colors ${
@@ -994,6 +1000,7 @@ export default function SendMoney() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
+                data-testid="send-scan-qr-button"
                 onClick={() => setShowScanner(true)}
                 className="text-primary-500 hover:text-primary-400 p-1.5 rounded-lg hover:bg-primary-500/10 transition-colors"
                 title={t('send.scan_qr')}
@@ -1003,6 +1010,7 @@ export default function SendMoney() {
               </button>
               <button
                   type="button"
+                  data-testid="send-contacts-button"
                   onClick={() => setShowContacts(!showContacts)}
                   className="text-primary-500 hover:text-primary-400 p-1.5 rounded-lg hover:bg-primary-500/10 transition-colors"
                   title="Contacts"
@@ -1016,6 +1024,7 @@ export default function SendMoney() {
             type="text"
             required
             readOnly={!!requestId}
+            data-testid="send-recipient-input"
             placeholder={t('send.recipient_placeholder') || 'Wallet address or username*domain'}
             value={form.recipient_address}
             onChange={(e) => {
@@ -1038,7 +1047,7 @@ export default function SendMoney() {
             }`}
           />
           {addressError && (
-            <p id="address-error" className="mt-1 text-xs text-red-400">
+            <p id="address-error" data-testid="send-address-error" className="mt-1 text-xs text-red-400">
               Invalid address. Enter a valid Stellar public key or federation address
               (name*domain).
             </p>
@@ -1046,7 +1055,7 @@ export default function SendMoney() {
           {!addressError &&
             form.recipient_address &&
             isValidStellarAddress(form.recipient_address) && (
-              <p className="mt-1 flex items-center gap-1 text-xs text-green-400">
+              <p data-testid="send-address-valid" className="mt-1 flex items-center gap-1 text-xs text-green-400">
                 <CheckCircle size={12} aria-hidden="true" /> Valid address
               </p>
             )}
@@ -1058,6 +1067,7 @@ export default function SendMoney() {
           {showContacts && (
             <div
               ref={contactsDropdownRef}
+              data-testid="send-contacts-dropdown"
               className="mt-1 bg-gray-800 border border-gray-700 rounded-xl overflow-hidden shadow-lg"
               onKeyDown={handleContactKeyDown}
             >
@@ -1066,6 +1076,7 @@ export default function SendMoney() {
                 <input
                   ref={contactSearchRef}
                   type="text"
+                  data-testid="send-contacts-search"
                   placeholder="Search contacts..."
                   value={contactSearch}
                   onChange={(e) => setContactSearch(e.target.value)}
@@ -1091,6 +1102,7 @@ export default function SendMoney() {
                       <button
                         key={c.id}
                         type="button"
+                        data-testid={`send-contact-option-${c.id}`}
                         onClick={() => {
                           setForm({
                             ...form,
@@ -1131,7 +1143,7 @@ export default function SendMoney() {
             </div>
 
             {memoRequired && (
-              <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-3 text-yellow-400 text-sm">
+              <div data-testid="send-memo-required-notice" className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-3 text-yellow-400 text-sm">
                 ⚠️ This address requires a memo — you'll be prompted to add one in the next step.
               </div>
             )}
@@ -1139,6 +1151,7 @@ export default function SendMoney() {
             {trustlineWarning && (
               <div
                 role="alert"
+                data-testid="send-trustline-warning"
                 className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/40 rounded-xl px-4 py-3 text-amber-400 text-sm"
               >
                 <AlertTriangle size={16} className="shrink-0 mt-0.5" aria-hidden="true" />
@@ -1151,6 +1164,7 @@ export default function SendMoney() {
             <button
               ref={submitButtonRef}
               type="submit"
+              data-testid="send-next-amount-button"
               disabled={step1Disabled}
               className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors"
             >
@@ -1175,6 +1189,7 @@ export default function SendMoney() {
                   required
                   min="0.0000001"
                   step="any"
+                  data-testid="send-amount-input"
                   placeholder="0.00"
                   readOnly={!!requestId}
                   value={form.amount}
@@ -1185,6 +1200,7 @@ export default function SendMoney() {
                   <select
                     value={form.asset}
                     disabled={!!requestId}
+                    data-testid="send-asset-select"
                     onChange={(e) => setForm({ ...form, asset: e.target.value })}
                     className="appearance-none bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
                   >
@@ -1209,7 +1225,7 @@ export default function SendMoney() {
                 </p>
               )}
               {belowMinBalance && (
-                <div className="mt-2 bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-3 text-red-400 text-sm">
+                <div data-testid="send-below-min-balance-error" className="mt-2 bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-3 text-red-400 text-sm">
                   ⚠️ This amount exceeds your available balance ({availableXlm.toLocaleString()} XLM).
                   Sending it would drop your account below the Stellar minimum reserve.
                 </div>
@@ -1227,6 +1243,7 @@ export default function SendMoney() {
                     <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
                       <button
                         type="button"
+                        data-testid="send-mode-strict-send"
                         onClick={() => { setSendMode('send'); setPathResult(null); }}
                         className={`text-xs px-2 py-1 rounded-md transition-colors ${sendMode === 'send' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'}`}
                       >
@@ -1234,6 +1251,7 @@ export default function SendMoney() {
                       </button>
                       <button
                         type="button"
+                        data-testid="send-mode-strict-receive"
                         onClick={() => { setSendMode('receive'); setPathResult(null); }}
                         className={`text-xs px-2 py-1 rounded-md transition-colors ${sendMode === 'receive' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'}`}
                       >
@@ -1244,6 +1262,7 @@ export default function SendMoney() {
                   {form.destination_asset && (
                     <button
                       type="button"
+                      data-testid="send-clear-destination-asset"
                       onClick={() => { setForm({ ...form, destination_asset: '' }); setPathResult(null); setSendMode('send'); }}
                       className="text-xs text-gray-500 hover:text-white transition-colors"
                     >
@@ -1255,6 +1274,7 @@ export default function SendMoney() {
               <div className="relative">
                 <select
                   value={form.destination_asset}
+                  data-testid="send-destination-asset-select"
                   onChange={(e) => setForm({ ...form, destination_asset: e.target.value })}
                   className="appearance-none w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
                 >
@@ -1266,11 +1286,11 @@ export default function SendMoney() {
                 <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
               </div>
               {isCrossAsset && (
-                <div className="mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm">
-                  {pathLoading && <p className="text-gray-400 animate-pulse">Finding best rate...</p>}
+                <div data-testid="send-path-result" className="mt-2 px-3 py-2 bg-gray-800 border border-gray-700 rounded-xl text-sm">
+                  {pathLoading && <p data-testid="send-path-loading" className="text-gray-400 animate-pulse">Finding best rate...</p>}
                   {!pathLoading && pathResult && sendMode === 'send' && (
                     <div className="space-y-1">
-                      <p className="text-green-400">
+                      <p data-testid="send-path-destination-amount" className="text-green-400">
                         Recipient receives ≈{' '}
                         <span className="font-semibold">{pathResult.destinationAmount} {form.destination_asset}</span>
                       </p>
@@ -1291,18 +1311,19 @@ export default function SendMoney() {
                           <button
                             key={s}
                             type="button"
+                            data-testid={`send-slippage-${s}`}
                             onClick={() => { localStorage.setItem('afripay_slippage', s); setForm({ ...form, slippage: s }); }}
                             className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${form.slippage === s ? 'border-primary-500 text-primary-400' : 'border-gray-600 text-gray-400 hover:border-gray-400'}`}
                           >{s}%</button>
                         ))}
                       </div>
-                      <p className="text-xs text-gray-500">Min received: {destMin} {form.destination_asset}</p>
+                      <p data-testid="send-path-min-received" className="text-xs text-gray-500">Min received: {destMin} {form.destination_asset}</p>
                     </div>
                   )}
                   {!pathLoading && pathResult && sendMode === 'receive' && (
                     <div className="space-y-1">
-                      <p className="text-green-400">Recipient receives exactly <span className="font-semibold">{form.amount} {form.destination_asset}</span></p>
-                      <p className="text-yellow-300 text-xs">You pay approximately <span className="font-semibold">{pathResult.sourceAmount} {form.asset}</span></p>
+                      <p data-testid="send-path-receive-exact" className="text-green-400">Recipient receives exactly <span className="font-semibold">{form.amount} {form.destination_asset}</span></p>
+                      <p data-testid="send-path-source-amount" className="text-yellow-300 text-xs">You pay approximately <span className="font-semibold">{pathResult.sourceAmount} {form.asset}</span></p>
                       {(() => {
                         const srcAmt = parseFloat(pathResult.sourceAmount);
                         const dstAmt = parseFloat(form.amount);
@@ -1320,16 +1341,17 @@ export default function SendMoney() {
                           <button
                             key={s}
                             type="button"
+                            data-testid={`send-slippage-${s}`}
                             onClick={() => { localStorage.setItem('afripay_slippage', s); setForm({ ...form, slippage: s }); }}
                             className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${form.slippage === s ? 'border-primary-500 text-primary-400' : 'border-gray-600 text-gray-400 hover:border-gray-400'}`}
                           >{s}%</button>
                         ))}
                       </div>
-                      <p className="text-xs text-gray-500">Max you pay: {(parseFloat(pathResult.sourceAmount) * (1 + form.slippage / 100)).toFixed(7)} {form.asset}</p>
+                      <p data-testid="send-path-max-pay" className="text-xs text-gray-500">Max you pay: {(parseFloat(pathResult.sourceAmount) * (1 + form.slippage / 100)).toFixed(7)} {form.asset}</p>
                     </div>
                   )}
                   {!pathLoading && !pathResult && form.amount && form.recipient_address && (
-                    <p className="text-yellow-500 text-xs">No conversion path found for these assets</p>
+                    <p data-testid="send-path-not-found" className="text-yellow-500 text-xs">No conversion path found for these assets</p>
                   )}
                 </div>
               )}
@@ -1347,6 +1369,7 @@ export default function SendMoney() {
                   <button
                     key={key}
                     type="button"
+                    data-testid={`send-fee-priority-${key}`}
                     onClick={() => setForm({ ...form, fee_priority: key })}
                     className={`flex-1 rounded-xl border py-2 px-2 text-center transition-colors ${
                       form.fee_priority === key
@@ -1371,6 +1394,7 @@ export default function SendMoney() {
                 ref={memoRef}
                 readOnly={!!requestId}
                 type="text"
+                data-testid="send-memo-input"
                 maxLength={memoMaxLen}
                 placeholder={t('send.memo_placeholder')}
                 value={form.memo}
@@ -1380,16 +1404,17 @@ export default function SendMoney() {
                 }`}
               />
               {memoError && (
-                <p className="mt-1 text-xs text-red-400">A memo is required for this recipient. Please add one before sending.</p>
+                <p data-testid="send-memo-error" className="mt-1 text-xs text-red-400">A memo is required for this recipient. Please add one before sending.</p>
               )}
               {memoRequired && !form.memo.trim() && !memoError && (
-                <p className="mt-1 text-xs text-yellow-400">⚠️ This address requires a memo.</p>
+                <p data-testid="send-memo-required-hint" className="mt-1 text-xs text-yellow-400">⚠️ This address requires a memo.</p>
               )}
               {memoTrimmed ? (
                 <div className="mt-2">
                   <label className="text-sm text-gray-400 mb-1 block" htmlFor="memo-type">{t('send.memo_type_label')}</label>
                   <select
                     id="memo-type"
+                    data-testid="send-memo-type-select"
                     value={form.memo_type}
                     onChange={(e) => setForm({ ...form, memo_type: e.target.value })}
                     className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 transition-colors"
@@ -1412,6 +1437,7 @@ export default function SendMoney() {
               <input
                 type="text"
                 maxLength={500}
+                data-testid="send-private-note-input"
                 placeholder="Invoice #, project code, personal reminder…"
                 value={form.private_note}
                 onChange={(e) => setForm({ ...form, private_note: e.target.value })}
@@ -1422,6 +1448,7 @@ export default function SendMoney() {
             <div className="flex gap-3">
               <button
                 type="button"
+                data-testid="send-amount-back-button"
                 onClick={() => dispatchStep({ type: 'BACK' })}
                 className="flex-1 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 font-semibold py-3.5 rounded-xl transition-colors"
               >
@@ -1430,6 +1457,7 @@ export default function SendMoney() {
               <button
                 ref={submitButtonRef}
                 type="submit"
+                data-testid="send-next-review-button"
                 disabled={step2Disabled}
                 className="flex-1 bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors"
               >
@@ -1446,7 +1474,7 @@ export default function SendMoney() {
         {/* ── STEP 3: Review ── */}
         {step === 3 && (
           <>
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-2">
+            <div data-testid="send-review-summary" className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-2">
               <p className="text-white font-semibold text-sm">{t('send.confirm_title')}</p>
               <div className="text-sm text-gray-300 space-y-1">
                 <p>
@@ -1470,7 +1498,7 @@ export default function SendMoney() {
                 </p>
                 <p>
                   {t('send.confirm_amount')}{' '}
-                  <span className="text-white font-semibold">{form.amount} {form.asset}</span>
+                  <span data-testid="send-review-amount" className="text-white font-semibold">{form.amount} {form.asset}</span>
                 </p>
                 {feeXLM && (
                   <>
@@ -1531,6 +1559,7 @@ export default function SendMoney() {
               </div>
               <button
                 type="button"
+                data-testid="send-view-xdr-button"
                 onClick={() => setShowXDRInspector(true)}
                 className="w-full mt-2 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors"
               >
@@ -1541,6 +1570,7 @@ export default function SendMoney() {
             <div className="flex gap-3">
               <button
                 type="button"
+                data-testid="send-review-back-button"
                 onClick={() => dispatchStep({ type: 'BACK' })}
                 className="flex-1 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 font-semibold py-3.5 rounded-xl transition-colors"
               >
@@ -1548,6 +1578,7 @@ export default function SendMoney() {
               </button>
               <button
                 type="submit"
+                data-testid="send-confirm-button"
                 className="flex-1 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors"
               >
                 <Send size={18} /> Confirm
@@ -1564,6 +1595,7 @@ export default function SendMoney() {
               <div
                 role="status"
                 aria-live="polite"
+                data-testid="send-stream-reconnecting"
                 className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-2.5 text-yellow-400 text-xs"
               >
                 <span
@@ -1577,6 +1609,7 @@ export default function SendMoney() {
               <div
                 role="status"
                 aria-live="polite"
+                data-testid="send-stream-disconnected"
                 className="flex items-center gap-2 bg-red-500/10 border border-red-500/40 rounded-xl px-4 py-2.5 text-red-400 text-xs"
               >
                 <span
@@ -1586,7 +1619,7 @@ export default function SendMoney() {
                 Payment status stream disconnected — status may be delayed
               </div>
             )}
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-1">
+            <div data-testid="send-authorize-summary" className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-1">
               <p className="text-white font-semibold">Authorize Payment</p>
               <p className="text-gray-400 text-sm">
                 Sending <span className="text-white font-medium">{form.amount} {form.asset}</span> to{' '}
@@ -1598,6 +1631,7 @@ export default function SendMoney() {
 
             <button
               type="button"
+              data-testid="send-authorize-pin-button"
               onClick={() => setShowPINVerification(true)}
               disabled={loading}
               className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors"
@@ -1612,6 +1646,7 @@ export default function SendMoney() {
             {!isCrossAsset && hasWebUSB() && (
               <button
                 type="button"
+                data-testid="send-ledger-sign-button"
                 onClick={handleSignWithLedger}
                 disabled={loading}
                 className="w-full bg-gray-800 hover:bg-gray-700 border border-gray-600 text-white font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
@@ -1622,6 +1657,7 @@ export default function SendMoney() {
 
             <button
               type="button"
+              data-testid="send-authorize-back-button"
               onClick={() => dispatchStep({ type: 'BACK' })}
               className="w-full text-gray-400 hover:text-white text-sm py-2 transition-colors"
             >
@@ -1685,7 +1721,7 @@ export default function SendMoney() {
 
       {/* Save contact prompt after successful payment */}
       {showSaveContactPrompt && (
-        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50 p-4">
+        <div data-testid="send-save-contact-modal" className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50 p-4">
           <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-sm p-6">
             <h3 className="text-white font-semibold text-base mb-1">Save as a contact?</h3>
             <p className="text-gray-400 text-xs font-mono mb-4 break-all">
@@ -1693,6 +1729,7 @@ export default function SendMoney() {
             </p>
             <input
               type="text"
+              data-testid="send-save-contact-name-input"
               placeholder="Contact name"
               value={saveContactName}
               onChange={(e) => setSaveContactName(e.target.value)}
@@ -1702,6 +1739,7 @@ export default function SendMoney() {
             <div className="flex gap-3">
               <button
                 type="button"
+                data-testid="send-save-contact-submit"
                 disabled={saveContactLoading}
                 onClick={async () => {
                   if (!saveContactName.trim()) return;
@@ -1724,6 +1762,7 @@ export default function SendMoney() {
               </button>
               <button
                 type="button"
+                data-testid="send-save-contact-skip"
                 onClick={() => { setShowSaveContactPrompt(null); navigate('/dashboard'); }}
                 className="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors"
               >

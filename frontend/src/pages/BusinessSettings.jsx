@@ -75,9 +75,9 @@ export default function BusinessSettings() {
       setWebhooks(prev => prev.map(w => w.id === webhookId ? { ...w, secret: data.secret } : w));
       // Auto-reveal the new secret so the user can copy it before it's masked
       setRevealedSecret(webhookId);
-      toast.success('Secret rotated successfully');
+      toast.success(t('business_settings.toast.secret_rotated', 'Secret rotated successfully'));
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to rotate secret');
+      toast.error(err.response?.data?.error || t('business_settings.toast.rotate_secret_failed', 'Failed to rotate secret'));
     } finally {
       setRotating(null);
       setRotateConfirm(null);
@@ -96,9 +96,9 @@ export default function BusinessSettings() {
     try {
       await api.post('/wallet/upgrade-business');
       updateUser({ account_type: 'business' });
-      toast.success('Account upgraded to Business');
+      toast.success(t('business_settings.toast.upgraded', 'Account upgraded to Business'));
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Upgrade failed');
+      toast.error(err.response?.data?.error || t('business_settings.toast.upgrade_failed', 'Upgrade failed'));
     } finally {
       setUpgrading(false);
     }
@@ -112,7 +112,7 @@ export default function BusinessSettings() {
     // Cheap client-side format checks — the server re-validates the key with
     // Stellar StrKey, but failing fast avoids a pointless network round-trip.
     if (!key.startsWith('G') || key.length !== 56 || !/^[A-Z0-9]+$/.test(key)) {
-      toast.error('Invalid Stellar address — must be a 56-character public key starting with "G"');
+      toast.error(t('business_settings.toast.invalid_address', 'Invalid Stellar address — must be a 56-character public key starting with "G"'));
       return;
     }
 
@@ -120,14 +120,14 @@ export default function BusinessSettings() {
     // NOTHING) but still submits a fee-paying Stellar transaction first, so
     // block duplicates here where the user can see why nothing changed.
     if (signers.some(s => s.signer_public_key === key)) {
-      toast.error('That signer is already configured for this account');
+      toast.error(t('business_settings.toast.duplicate_signer', 'That signer is already configured for this account'));
       return;
     }
 
     // The owner key is already a signer on the account (weight 1); adding it
     // again would duplicate it on-chain, which the server does not reject.
     if (user?.wallet_address && key === user.wallet_address) {
-      toast.error('Your own wallet key is already a signer and cannot be added again');
+      toast.error(t('business_settings.toast.own_key_signer', 'Your own wallet key is already a signer and cannot be added again'));
       return;
     }
 
@@ -137,10 +137,10 @@ export default function BusinessSettings() {
       setSigners(prev => [...prev, { signer_public_key: key, label: newLabel.trim() || null, added_at: new Date().toISOString() }]);
       setNewKey('');
       setNewLabel('');
-      toast.success('Signer added');
+      toast.success(t('business_settings.toast.signer_added', 'Signer added'));
     } catch (err) {
       // Keep the typed key/label so the user does not have to re-enter them.
-      toast.error(err.response?.data?.error || err.response?.data?.errors?.[0]?.msg || 'Failed to add signer');
+      toast.error(err.response?.data?.error || err.response?.data?.errors?.[0]?.msg || t('business_settings.toast.add_signer_failed', 'Failed to add signer'));
     } finally {
       setAdding(false);
     }
@@ -160,12 +160,12 @@ export default function BusinessSettings() {
       setRemoveTarget(null);
       if (remaining.length === 0) {
         updateUser({ account_type: 'personal' });
-        toast.success('Last signer removed — account reverted to personal');
+        toast.success(t('business_settings.toast.last_signer_removed', 'Last signer removed — account reverted to personal'));
       } else {
-        toast.success('Signer removed');
+        toast.success(t('business_settings.toast.signer_removed', 'Signer removed'));
       }
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to remove signer');
+      toast.error(err.response?.data?.error || t('business_settings.toast.remove_signer_failed', 'Failed to remove signer'));
     } finally {
       setRemoving(null);
     }
