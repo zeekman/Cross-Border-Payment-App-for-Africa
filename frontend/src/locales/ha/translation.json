@@ -1,4 +1,52 @@
 {
+  "paymentRequest": {
+    "requestedBy": "Wanda ya nema",
+    "unknown": "Ba a san mai nema ba",
+    "verified": "An tabbatar",
+    "memberSince": "Memba tun {{date}}",
+    "expiresIn": "Zai ƙare cikin {{time}}",
+    "notContact": "Ba ka taɓa biyan wannan mutum ba. Ka biya buƙatun mutanen da ka sani kawai.",
+    "cancelled": "An soke wannan buƙatar biyan kuɗi.",
+    "unavailable": "Babu wannan buƙatar biyan kuɗi"
+  },
+  "pinPolicy": {
+    "repeated": "PIN mai maimaita lambobi yana da sauƙin hasashe",
+    "sequential": "Guji jerin lambobi kamar 1234",
+    "common": "Wannan PIN ya zama gama-gari",
+    "personal": "Guji shekara ko ranar haihuwarka",
+    "sixDigits": "PIN mai lambobi 6 ya fi wahalar hasashe"
+  },
+  "contractStatus": {
+    "names": {
+      "escrow": "escrow",
+      "agentEscrow": "escrow na wakili",
+      "savingsVault": "asusun ajiya",
+      "recurringPayments": "biyan kuɗi mai maimaitawa"
+    },
+    "paused": {
+      "escrow": "An dakatar da ƙirƙirar escrow na ɗan lokaci don gyara. Har yanzu ana iya soke ko sakin waɗanda suke akwai.",
+      "agentEscrow": "An dakatar da ƙirƙirar escrow na wakili na ɗan lokaci don gyara. Har yanzu ana iya soke ko sakin waɗanda suke akwai.",
+      "savingsVault": "An dakatar da saka ajiya na ɗan lokaci don gyara. Har yanzu ana iya cire ajiyar da ta buɗe.",
+      "recurringPayments": "An dakatar da ƙirƙirar biyan kuɗi da aka tsara don gyara. Har yanzu ana iya soke waɗanda suke akwai."
+    },
+    "upgrade": "An shirya sabunta kwangilar {{contract}} a {{eta}}.",
+    "upgradeNoEta": "Ana jiran sabunta kwangilar {{contract}}.",
+    "releaseNotes": "Bayanan sabuntawa",
+    "exit": "Cire ko soke",
+    "dismiss": "Rufe"
+  },
+  "webhookVerify": {
+    "title": "Tabbatar da sa hannu",
+    "eventId": "ID na dindindin na abin da ya faru; ana sake amfani da shi.",
+    "deliveryId": "ID na musamman na kowane yunƙuri.",
+    "timestamp": "Lokacin Unix, a daƙiƙa, da aka sa hannu.",
+    "signature": "HMAC-SHA256 na \"timestamp.body\", a tsarin t=<timestamp>,v1=<signature>. Ana iya samun v1 fiye da ɗaya yayin sauya sirri.",
+    "tolerance": "Ƙi saƙon da lokacinsa ya bambanta da agogonka da fiye da minti 5.",
+    "dedupe": "Ajiye kowane X-AfriPay-Event-Id ka yi watsi da waɗanda ka riga ka sarrafa.",
+    "copy": "Kwafi lamba",
+    "requestHeaders": "Headers na buƙata",
+    "headersUnavailable": "Ba a adana headers na wannan yunƙuri ba."
+  },
   "common": {
     "offline_cached": "Ba ka kan layi — ana nuna bayanan da aka ajiye",
     "back": "Koma",

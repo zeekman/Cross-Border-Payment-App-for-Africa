@@ -13,6 +13,7 @@ import {
   CheckCircle,
   BookUser,
 } from 'lucide-react';
+import RequesterCard from '../components/RequesterCard';
 import api from '../utils/api';
 import { useWallet } from '../context/WalletContext';
 import { useConfirm } from '../context/ConfirmContext';
@@ -107,6 +108,8 @@ export default function SendMoney() {
   const [requestId] = useState(searchParams.get('request'));
   const [requestError, setRequestError] = useState(null);
   const [requestExpiry, setRequestExpiry] = useState(null);
+  const [requestInfo, setRequestInfo] = useState(null);
+  const [contactsLoaded, setContactsLoaded] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [showPushPrompt, setShowPushPrompt] = useState(false);
   const { shouldShowPrompt } = usePushNotifications();
@@ -118,8 +121,20 @@ export default function SendMoney() {
       .get(`/payment-requests/${requestId}`)
       .then((r) => {
         const { requester_wallet, amount, asset, memo, expires_at, claimed } = r.data;
+        if (claimed) {
+          setRequestError(t('send.request_claimed', 'This payment request has already been paid.'));
+          return;
+        }
+        if (r.data.status === 'cancelled') {
+          setRequestError(t('paymentRequest.cancelled'));
+          return;
+        }
+        if (expires_at && new Date(expires_at) <= new Date()) {
+          setRequestError(t('send.request_expired', 'This payment request has expired.'));
+          return;
+        }
         setRequestExpiry(expires_at || null);
-        if (claimed) setRequestError(t('send.request_claimed', 'This payment request has already been paid.'));
+        setRequestInfo({ requester: r.data.requester, wallet: requester_wallet });
         setForm((f) => ({
           ...f,
           recipient_address: requester_wallet || f.recipient_address,
@@ -131,7 +146,9 @@ export default function SendMoney() {
       .catch((err) => {
         const status = err.response?.status;
         setRequestError(
-          status === 410
+          status === 410 && /cancel/i.test(err.response?.data?.error || '')
+            ? t('paymentRequest.cancelled')
+            : status === 410
             ? t('send.request_expired', 'This payment request has expired.')
             : status === 404
               ? t('send.request_not_found', 'Payment request not found.')
@@ -307,7 +324,8 @@ export default function SendMoney() {
     api
       .get('/contacts')
       .then((r) => setContacts(r.data.contacts || []))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setContactsLoaded(true));
   }, []);
 
   // Filter contacts based on search term
@@ -701,6 +719,10 @@ export default function SendMoney() {
 
   const handlePINVerified = async () => {
     if (requestError) { toast.error(requestError); return; }
+    if (requestExpiry && new Date(requestExpiry) <= new Date()) {
+      toast.error(t('send.request_expired', 'This payment request has expired.'));
+      return;
+    }
     setLoading(true);
     try {
       let res;
@@ -841,6 +863,20 @@ export default function SendMoney() {
     stepLoading ||
     (memoRequired && !form.memo.trim());
 
+  if (requestId && requestError) {
+    return (
+      <div className="px-4 py-6 max-w-lg mx-auto">
+        <div role="alert" className="p-6 rounded-xl bg-red-500/10 border border-red-500/30 text-center space-y-3">
+          <h2 className="text-xl font-bold text-white">{t('paymentRequest.unavailable')}</h2>
+          <p className="text-sm text-red-400">{requestError}</p>
+          <button type="button" onClick={() => navigate('/dashboard')} className="text-sm text-primary-400 underline">
+            {t('common.back')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className="px-4 py-6 max-w-lg mx-auto pb-safe"
@@ -864,13 +900,15 @@ export default function SendMoney() {
       </button>
 
       <h2 className="text-2xl font-bold text-white mb-4">{t('send.title')}</h2>
-      {requestId && (requestError ? (
-        <div role="alert" className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-400">{requestError}</div>
-      ) : requestExpiry && (
-        <p className="mb-4 text-xs text-gray-400">
-          {t('send.request_expires', 'Payment request expires')} {new Date(requestExpiry).toLocaleString(i18n.language)}
-        </p>
-      ))}
+      {requestInfo && (
+        <RequesterCard
+          requester={requestInfo.requester}
+          expiresAt={requestExpiry}
+          isContact={!contactsLoaded || contacts.some((c) => c.wallet_address === requestInfo.wallet)}
+          // Later steps may have a payment in flight; submission re-checks expiry.
+          onExpire={() => step === 1 && setRequestError(t('send.request_expired', 'This payment request has expired.'))}
+        />
+      )}
 
       {/* Step indicator */}
       <div className="flex items-center mb-6" aria-label="Progress">
