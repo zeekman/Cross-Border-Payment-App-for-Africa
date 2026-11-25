@@ -15,22 +15,9 @@ const StellarSdk = require("@stellar/stellar-sdk");
 
 const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
-const isTestnet = process.env.STELLAR_NETWORK !== "mainnet";
-const networkPassphrase = isTestnet
-  ? StellarSdk.Networks.TESTNET
-  : StellarSdk.Networks.PUBLIC;
-
-const rpcUrl =
-  process.env.SOROBAN_RPC_URL ||
-  (isTestnet
-    ? "https://soroban-testnet.stellar.org"
-    : "https://mainnet.soroban.stellar.org");
+const { networkPassphrase, getRpc, waitForSorobanTx } = require("../config/soroban");
 
 const CONTRACT_ID = process.env.FEE_DISTRIBUTOR_CONTRACT_ID;
-
-function getRpc() {
-  return new StellarSdk.SorobanRpc.Server(rpcUrl);
-}
 
 function decryptSecret(encryptedKey) {
   return decryptAesCbc(encryptedKey);
@@ -42,7 +29,13 @@ function decryptSecret(encryptedKey) {
  *
  * @param {number|string} feeAmount  - Fee in USDC stroops (7 decimal places).
  * @param {string}        tokenId   - Stellar asset contract address for the fee token.
- * @param {string|null}   [source]  - Optional originating address for audit purposes.
+ * @param {string|null}   [source]  - Optional fee-source contract address (e.g. escrow,
+ *                                    agent-escrow, recurring-payments). SC-196: this is
+ *                                    no longer a free-form audit label. The contract only
+ *                                    accepts a `source` that is on its fee-source allow-list
+ *                                    and that has authorized the deposit; otherwise the
+ *                                    deposit reverts. When omitted, the service wallet
+ *                                    (`depositor`) is recorded as the provenance.
  * @returns {Promise<string>} transaction hash
  */
 
@@ -85,15 +78,20 @@ async function depositFee(feeAmount, tokenId, source = null) {
   const account = await rpc.getAccount(depositor);
   const contract = new StellarSdk.Contract(CONTRACT_ID);
 
-  // Contract signature: deposit_fee(depositor, token, amount, source)
+  // SC-196: `source` is authenticated on-chain. Only pass it when the caller
+  // explicitly attributes the fee to a known fee-source contract; the contract
+  // enforces the allow-list and authorization. Otherwise omit it entirely so
+  // the service wallet (`depositor`) is recorded as the provenance.
   const args = [
     StellarSdk.nativeToScVal(depositor, { type: "address" }),
     StellarSdk.nativeToScVal(tokenId, { type: "address" }),
     StellarSdk.nativeToScVal(feeAmountBigInt, { type: "i128" }),
-    source
-      ? StellarSdk.nativeToScVal(source, { type: "address" })
-      : StellarSdk.xdr.ScVal.scvVoid(),
   ];
+  if (source) {
+    args.push(StellarSdk.nativeToScVal(source, { type: "address" }));
+  } else {
+    args.push(StellarSdk.xdr.ScVal.scvVoid());
+  }
 
   const tx = new StellarSdk.TransactionBuilder(account, {
     fee: StellarSdk.BASE_FEE,
@@ -111,11 +109,7 @@ async function depositFee(feeAmount, tokenId, source = null) {
     throw new Error(`deposit_fee failed: ${result.errorResult}`);
   }
 
-  let response = result;
-  while (response.status === "PENDING" || response.status === "NOT_FOUND") {
-    await new Promise((r) => setTimeout(r, 1000));
-    response = await rpc.getTransaction(result.hash);
-  }
+  const response = await waitForSorobanTx(rpc, result);
 
   if (response.status !== "SUCCESS") {
     throw new Error(`Transaction failed: ${response.status}`);

@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Symbol};
 
+#[cfg(test)]
 mod test;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -11,8 +12,18 @@ const DEFAULT_GRACE_PERIOD_SECS: u64 = 3_600;
 /// Default maximum consecutive missed executions before auto-cancel.
 const DEFAULT_MAX_MISSED_EXECUTIONS: u64 = 3;
 
+/// TTL bump amount for instance storage (~30 days at 5s ledgers).
+const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
+/// TTL lifetime threshold for instance storage (~7 days at 5s ledgers).
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 120_960;
+/// TTL bump amount for persistent storage (~30 days at 5s ledgers).
+const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
+/// TTL lifetime threshold for persistent storage (~7 days at 5s ledgers).
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
+
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 #[contracttype]
 pub enum DataKey {
     TokenAddress,
@@ -26,6 +37,16 @@ pub enum DataKey {
     UserSchedules(Address),
     /// Global schedule count for full enumeration.
     TotalSchedules,
+    /// Ledger timestamp at which the contract was paused (0 = not paused).
+    PausedAt,
+    /// Ledger timestamp at which the contract was last unpaused.
+    UnpausedAt,
+    /// Two-step admin rotation: proposed new admin awaiting acceptance.
+    PendingAdmin,
+    /// Ledger timestamp after which the pending admin may accept.
+    PendingAdminEta,
+    /// Optional fee-distributor contract that receives platform fees.
+    FeeDistributor,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -33,15 +54,19 @@ pub enum DataKey {
 /// Frequency of a recurring payment, expressed in seconds.
 pub type IntervalSecs = u64;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[contracttype]
 pub enum ScheduleStatus {
     Active,
+    /// Stopped by the sender, or auto-cancelled after too many missed windows.
     Cancelled,
     Paused,
+    /// Finished successfully: all `max_executions` payments were made.
+    Completed,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[contracttype]
 pub struct RecurringSchedule {
     pub id: u64,
@@ -72,7 +97,7 @@ pub struct RecurringSchedule {
 
 // ── Events ────────────────────────────────────────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[contracttype]
 pub struct ScheduleAuthorized {
     pub id: u64,
@@ -85,37 +110,39 @@ pub struct ScheduleAuthorized {
     pub max_executions: u64,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[contracttype]
 pub struct PaymentExecuted {
     pub id: u64,
     pub executor: Address,
     pub amount: i128,
+    /// Platform fee charged for this execution (0 when fees are disabled).
+    pub fee_amount: i128,
     pub next_payment_at: u64,
     pub executions_completed: u64,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[contracttype]
 pub struct ScheduleCancelled {
     pub id: u64,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[contracttype]
 pub struct SchedulePaused {
     pub schedule_id: u64,
     pub paused_at: u64,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[contracttype]
 pub struct ScheduleResumed {
     pub schedule_id: u64,
     pub next_payment_at: u64,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[contracttype]
 pub struct AmountUpdated {
     pub schedule_id: u64,
@@ -124,7 +151,7 @@ pub struct AmountUpdated {
     pub updated_by: Address,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[contracttype]
 pub struct RecipientUpdated {
     pub schedule_id: u64,
@@ -136,14 +163,65 @@ pub struct RecipientUpdated {
 /// Emitted when an execution window (plus grace period) passes without a
 /// successful payment. Also emitted when the caller detects a missed window
 /// by calling `execute_payment` after the grace period has expired.
+#[derive(Debug, Clone)]
+/// Emitted when `execute_payment` finds one or more execution windows whose
+/// grace period expired without a successful payment.
 #[derive(Clone)]
 #[contracttype]
 pub struct PaymentMissed {
     pub schedule_id: u64,
     /// Ledger timestamp at which the miss was recorded.
     pub missed_at: u64,
+    /// Number of windows found missed by this call (can be > 1 when nobody
+    /// executed the schedule for several intervals).
+    pub newly_missed: u64,
     /// Total consecutive misses recorded for this schedule after this event.
     pub total_missed: u64,
+}
+
+/// Emitted when a bounded schedule makes its final payment and becomes
+/// `Completed`.
+#[derive(Clone)]
+#[contracttype]
+pub struct ScheduleCompleted {
+    pub schedule_id: u64,
+    pub executions_completed: u64,
+    pub completed_at: u64,
+}
+
+/// Emitted when a schedule is cancelled automatically because it reached
+/// `max_missed_executions` consecutive missed windows.
+#[derive(Clone)]
+#[contracttype]
+pub struct ScheduleAutoCancelled {
+    pub schedule_id: u64,
+    pub total_missed: u64,
+    pub cancelled_at: u64,
+}
+
+/// Emitted once when the contract is initialized.
+#[derive(Clone)]
+#[contracttype]
+pub struct Initialized {
+    pub admin: Address,
+    pub token_address: Address,
+    pub fee_bps: u32,
+}
+
+/// Emitted when the contract is paused by the admin.
+#[derive(Clone)]
+#[contracttype]
+pub struct Paused {
+    pub admin: Address,
+    pub paused_at: u64,
+}
+
+/// Emitted when the contract is unpaused by the admin.
+#[derive(Clone)]
+#[contracttype]
+pub struct Unpaused {
+    pub admin: Address,
+    pub unpaused_at: u64,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -156,27 +234,70 @@ impl RecurringPaymentsContract {
     /// One-time initializer — stores the admin, token (USDC) address, and fee in basis points.
     /// `fee_bps` of 0 disables fee collection; max is 10 000 (100 %).
     pub fn initialize(env: Env, admin: Address, token_address: Address, fee_bps: u32) {
-        if env.storage().persistent().has(&DataKey::TokenAddress) {
+        Self::bump_instance(&env);
+        if env.storage().instance().has(&DataKey::TokenAddress) {
             panic!("already initialized");
         }
         if fee_bps > 10_000 {
             panic!("fee_bps must be <= 10000");
         }
+        admin.require_auth();
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::TokenAddress, &token_address);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::Admin, &admin);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::FeeBps, &fee_bps);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::Counter, &0u64);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::MaxMissedExecutions, &DEFAULT_MAX_MISSED_EXECUTIONS);
+
+        env.events().publish(
+            (Symbol::new(&env, "Initialized"),),
+            Initialized {
+                admin,
+                token_address,
+                fee_bps,
+            },
+        );
+    }
+
+    /// Configure (or clear) the fee-distributor contract that receives platform
+    /// fees. Admin only.
+    ///
+    /// When set, `execute_payment` routes fees through
+    /// `fee_distributor.deposit_fee(...)` so they are split between the
+    /// platform treasury and the agent reward pool and appear in
+    /// `fee-distributor::get_accumulated_fees`. When unset, fees are sent
+    /// directly to the admin address (legacy behaviour).
+    pub fn set_fee_distributor(env: Env, admin: Address, distributor: Option<Address>) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("only the admin can set the fee distributor");
+        }
+        match distributor {
+            Some(addr) => env
+                .storage()
+                .persistent()
+                .set(&DataKey::FeeDistributor, &addr),
+            None => env.storage().persistent().remove(&DataKey::FeeDistributor),
+        }
+    }
+
+    /// Return the configured fee-distributor address, if any.
+    pub fn get_fee_distributor(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::FeeDistributor)
     }
 
     /// Sender authorizes a recurring transfer with configurable grace period and
@@ -191,6 +312,11 @@ impl RecurringPaymentsContract {
     /// * `max_missed_executions` — Consecutive misses before auto-cancel (default 3,
     ///                             0 means use contract default).
     ///
+    /// Authorization lives only as long as the schedule: cancelling it
+    /// revokes execution, pausing halts it, and it ends after
+    /// `max_executions` payments (if > 0), after `max_missed_executions`
+    /// consecutive misses, or when the sender's token allowance lapses.
+    ///
     /// Returns the new schedule ID.
     pub fn create_recurring_payment(
         env: Env,
@@ -203,6 +329,8 @@ impl RecurringPaymentsContract {
         grace_period_secs: u64,
         max_missed_executions: u64,
     ) -> u64 {
+        Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -211,6 +339,12 @@ impl RecurringPaymentsContract {
         }
         if max_executions == u64::MAX {
             panic!("Invalid max_executions");
+        }
+        if recipient == sender {
+            panic!("recipient cannot be the sender");
+        }
+        if recipient == env.current_contract_address() {
+            panic!("recipient cannot be the contract");
         }
 
         sender.require_auth();
@@ -249,6 +383,7 @@ impl RecurringPaymentsContract {
         env.storage()
             .persistent()
             .set(&DataKey::Schedule(id), &schedule);
+        Self::bump_persistent(&env, &DataKey::Schedule(id));
 
         // Update UserSchedules for the sender (bounded to 500 per sender).
         let mut user_ids: soroban_sdk::Vec<u64> = env
@@ -263,21 +398,23 @@ impl RecurringPaymentsContract {
         env.storage()
             .persistent()
             .set(&DataKey::UserSchedules(sender.clone()), &user_ids);
+        Self::bump_persistent(&env, &DataKey::UserSchedules(sender.clone()));
 
         // Increment global TotalSchedules counter.
         let total: u64 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TotalSchedules)
             .unwrap_or(0);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::TotalSchedules, &(total + 1));
 
         // Initialise the missed-executions counter for this schedule ID.
         env.storage()
             .persistent()
             .set(&DataKey::MissedExecutions(id), &0u64);
+        Self::bump_persistent(&env, &DataKey::MissedExecutions(id));
 
         env.events().publish(
             (Symbol::new(&env, "ScheduleAuthorized"),),
@@ -296,22 +433,36 @@ impl RecurringPaymentsContract {
         id
     }
 
-    /// Pre-authorization semantics, replay/expiry rules, and schedule lifecycle:
+    /// Execute a due payment for `schedule_id`. Anyone may call this.
     ///
-    /// - **Authorization vs Schedule Lifetime**: Pre-authorization is tied strictly
-    ///   to the underlying `RecurringSchedule` identified by `schedule_id`. Cancelling the schedule
-    ///   via `cancel_recurring_payment` permanently revokes execution authority; any subsequent
-    ///   `execute_payment` calls will fail with `"schedule is not active"`. Pausing the schedule
-    ///   via `pause_recurring_payment` immediately halts payment execution with `"Schedule is paused"`.
-    ///   There is no separate authorization object that survives or outlives a cancelled or paused schedule.
-    /// - **Replay Protection**: Each payment execution checks timing (`now >= next_payment_at`)
-    ///   and advances `next_payment_at` monotonically by `interval`, preventing double execution
-    ///   or replay attacks within the same interval window.
-    /// - **Authorization Expiry**: Pre-authorization expires when `max_executions` is reached (if > 0),
-    ///   when `max_missed_executions` consecutive missed windows occur (which auto-cancels the schedule),
-    ///   or when the token allowance / approval granted off-chain by the sender expires or is revoked.
+    /// - `now < next_payment_at` → panics "payment not yet due".
+    /// - `now <= next_payment_at + grace_period_secs` → payment executes and
+    ///   `consecutive_misses` resets to 0.
+    /// - Otherwise every window whose grace period has expired counts as a
+    ///   miss (one per interval, not one per call). `next_payment_at` moves to
+    ///   the first window that has not expired, `PaymentMissed` is emitted and
+    ///   the call returns without paying. If the open window is already due,
+    ///   a second call executes it.
+    /// - When `consecutive_misses >= max_missed_executions` the schedule is
+    ///   cancelled and `ScheduleAutoCancelled` is emitted.
+    // Pre-authorization semantics, replay/expiry rules, and schedule lifecycle:
+    //
+    // - Authorization vs schedule lifetime: pre-authorization is tied strictly
+    //   to the `RecurringSchedule` identified by `schedule_id`. Cancelling via
+    //   `cancel_recurring_payment` permanently revokes execution authority
+    //   ("schedule is not active"); pausing via `pause_recurring_payment` halts
+    //   execution ("Schedule is paused"). No separate authorization object
+    //   outlives a cancelled or paused schedule.
+    // - Replay protection: each execution checks `now >= next_payment_at` and
+    //   advances `next_payment_at` monotonically by `interval`.
+    // - Expiry: when `max_executions` is reached (if > 0), when
+    //   `max_missed_executions` consecutive windows are missed (auto-cancel),
+    //   or when the sender's off-chain token allowance expires or is revoked.
+
+    /// Deprecated alias for `create_recurring_payment`; use that instead.
     ///
-    /// Deprecated alias for create_recurring_payment. Use create_recurring_payment instead.
+    /// The schedule's asset is the token configured in `initialize` (USDC),
+    /// with no execution cap and default grace / missed-execution settings.
     #[deprecated]
     pub fn authorize_recurring(
         env: Env,
@@ -320,20 +471,48 @@ impl RecurringPaymentsContract {
         amount: i128,
         interval: IntervalSecs,
     ) -> u64 {
+        Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         // Legacy support: default to USDC asset (0-address as placeholder).
         // Uses contract defaults for grace_period_secs and max_missed_executions.
-        let usdc_placeholder = Address::from_contract_id(&env, &[0u8; 32]);
+        // Strkey of the all-zero contract id.
+        let usdc_placeholder = Address::from_str(
+            &env,
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        );
+        let token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAddress)
+            .expect("not initialized");
         Self::create_recurring_payment(
             env,
             sender,
             recipient,
-            usdc_placeholder,
+            token,
             amount,
             interval,
             0,
             DEFAULT_GRACE_PERIOD_SECS,
             DEFAULT_MAX_MISSED_EXECUTIONS,
         )
+    }
+
+    /// Next due date after a successful execution at `now`, kept on the
+    /// original schedule grid (`next_payment_at + k * interval`).
+    ///
+    /// Normally this is just `next_payment_at + interval`. If the execution
+    /// was so late that this is already due (only possible when the grace
+    /// period is at least one interval), it skips ahead to the first grid
+    /// slot after `now`, so one call never unlocks a burst of back-to-back
+    /// payments.
+    fn next_anchored_due(schedule: &RecurringSchedule, now: u64) -> u64 {
+        let mut next = schedule.next_payment_at + schedule.interval;
+        if next <= now {
+            let behind = now - next;
+            next += (behind / schedule.interval + 1) * schedule.interval;
+        }
+        next
     }
 
     /// Execute a due payment for `schedule_id`.
@@ -346,13 +525,12 @@ impl RecurringPaymentsContract {
     /// - `now > next_payment_at + grace_period_secs`      → miss recorded, `consecutive_misses` incremented by 1,
     ///   `PaymentMissed` emitted, schedule state persisted, and function returns early.
     ///
-    /// Consecutive Miss Threshold & Auto-Cancellation:
-    /// - When `consecutive_misses >= max_missed_executions`, the schedule is automatically cancelled
-    ///   (`status` set to `ScheduleStatus::Cancelled`).
-    /// - If `consecutive_misses < max_missed_executions`, the schedule's `next_payment_at` is skipped
-    ///   forward across elapsed intervals to prevent a deadlock, remaining `Active` until the next window.
-    /// - A subsequent successful execution before reaching `max_missed_executions` resets the consecutive miss counter to 0.
+    /// Auto-cancellation: once `consecutive_misses >= max_missed_executions` the schedule is
+    /// cancelled; below that, `next_payment_at` skips past elapsed intervals and the schedule
+    /// stays `Active`. A successful execution resets the miss counter to 0.
     pub fn execute_payment(env: Env, executor: Address, schedule_id: u64) {
+        Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         executor.require_auth();
 
         let mut schedule: RecurringSchedule = env
@@ -360,6 +538,7 @@ impl RecurringPaymentsContract {
             .persistent()
             .get(&DataKey::Schedule(schedule_id))
             .expect("schedule not found");
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         if schedule.status == ScheduleStatus::Paused {
             panic!("Schedule is paused");
@@ -377,19 +556,64 @@ impl RecurringPaymentsContract {
         // ── Grace period check ────────────────────────────────────────────────
         let grace_deadline = schedule.next_payment_at + schedule.grace_period_secs;
         if now > grace_deadline {
-            // The execution window AND grace period have both passed.
-            // Record the miss, emit the event, and potentially auto-cancel.
-            schedule.consecutive_misses += 1;
-            let total_missed = schedule.consecutive_misses;
+            // Count every window whose grace period has expired: window k is
+            // due at next_payment_at + k * interval and expired if its
+            // deadline (due + grace) is before `now`. Window 0 is known to
+            // have expired, so newly_missed >= 1.
+            let mut newly_missed = (now - grace_deadline - 1) / schedule.interval + 1;
 
-            // Advance next_payment_at so the schedule does not get permanently stuck.
-            // Skip forward by enough intervals to land in the future.
-            let elapsed = now - schedule.next_payment_at;
-            let intervals_missed = elapsed / schedule.interval + 1;
-            schedule.next_payment_at += intervals_missed * schedule.interval;
+            // Windows that elapsed while the contract was paused must not
+            // count against the sender, otherwise a platform pause could
+            // auto-cancel schedules through no fault of the sender. The
+            // paused window is [paused_at, unpaused_at]; any window whose
+            // grace deadline falls inside it is forgiven.
+            let paused_at: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::PausedAt)
+                .unwrap_or(0);
+            let unpaused_at: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::UnpausedAt)
+                .unwrap_or(0);
+            if paused_at > 0 && unpaused_at > paused_at {
+                let forgiven = Self::windows_in_range(
+                    schedule.next_payment_at,
+                    schedule.grace_period_secs,
+                    schedule.interval,
+                    paused_at,
+                    unpaused_at,
+                );
+                newly_missed = newly_missed.saturating_sub(forgiven);
+            }
 
-            // Auto-cancel if the consecutive miss threshold is reached.
-            if total_missed >= schedule.max_missed_executions {
+            if newly_missed == 0 {
+                // Every expired window fell inside the pause: advance the
+                // schedule past them without recording a miss.
+                let skipped = (now - grace_deadline - 1) / schedule.interval + 1;
+                schedule.next_payment_at = skipped
+                    .checked_mul(schedule.interval)
+                    .and_then(|skip| schedule.next_payment_at.checked_add(skip))
+                    .expect("next_payment_at overflow");
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Schedule(schedule_id), &schedule);
+                Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
+                return;
+            }
+
+            let total_missed = schedule.consecutive_misses.saturating_add(newly_missed);
+            schedule.consecutive_misses = total_missed;
+
+            // Move to the first window that has not expired yet.
+            schedule.next_payment_at = newly_missed
+                .checked_mul(schedule.interval)
+                .and_then(|skip| schedule.next_payment_at.checked_add(skip))
+                .expect("next_payment_at overflow");
+
+            let auto_cancelled = total_missed >= schedule.max_missed_executions;
+            if auto_cancelled {
                 schedule.status = ScheduleStatus::Cancelled;
             }
 
@@ -397,18 +621,32 @@ impl RecurringPaymentsContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::MissedExecutions(schedule_id), &total_missed);
+            Self::bump_persistent(&env, &DataKey::MissedExecutions(schedule_id));
             env.storage()
                 .persistent()
                 .set(&DataKey::Schedule(schedule_id), &schedule);
+            Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
             env.events().publish(
                 (Symbol::new(&env, "PaymentMissed"),),
                 PaymentMissed {
                     schedule_id,
                     missed_at: now,
+                    newly_missed,
                     total_missed,
                 },
             );
+
+            if auto_cancelled {
+                env.events().publish(
+                    (Symbol::new(&env, "ScheduleAutoCancelled"),),
+                    ScheduleAutoCancelled {
+                        schedule_id,
+                        total_missed,
+                        cancelled_at: now,
+                    },
+                );
+            }
 
             return;
         }
@@ -422,18 +660,23 @@ impl RecurringPaymentsContract {
 
         let token_address: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TokenAddress)
             .expect("not initialized");
 
         let fee_bps: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::FeeBps)
             .unwrap_or(0);
 
         let fee_amount = if fee_bps > 0 {
-            schedule.amount * fee_bps as i128 / 10_000
+            schedule
+                .amount
+                .checked_mul(fee_bps as i128)
+                .expect("fee calculation overflow")
+                .checked_div(10_000)
+                .expect("fee calculation overflow")
         } else {
             0
         };
@@ -447,9 +690,9 @@ impl RecurringPaymentsContract {
             &net_amount,
         );
         if fee_amount > 0 {
-            let admin: Address = env
+            let distributor: Option<Address> = env
                 .storage()
-                .persistent()
+                .instance()
                 .get(&DataKey::Admin)
                 .expect("not initialized");
             token.transfer_from(
@@ -458,6 +701,46 @@ impl RecurringPaymentsContract {
                 &admin,
                 &fee_amount,
             );
+                .persistent()
+                .get(&DataKey::FeeDistributor);
+            match distributor {
+                Some(distributor) => {
+                    // Pull the fee into this contract, then forward it to the
+                    // fee-distributor, which splits it between the platform
+                    // treasury and the agent reward pool and records it in its
+                    // per-token fee ledger.
+                    token.transfer_from(
+                        &env.current_contract_address(),
+                        &schedule.sender,
+                        &env.current_contract_address(),
+                        &fee_amount,
+                    );
+                    let distributor_client =
+                        fee_distributor::Client::new(&env, &distributor);
+                    distributor_client.deposit_fee(
+                        &env.current_contract_address(),
+                        &token_address,
+                        &fee_amount,
+                        &Some(schedule.sender.clone()),
+                    );
+                }
+                None => {
+                    // Fallback (no fee distributor configured): preserve the
+                    // legacy behaviour of sending the fee straight to the
+                    // admin address.
+                    let admin: Address = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::Admin)
+                        .expect("not initialized");
+                    token.transfer_from(
+                        &env.current_contract_address(),
+                        &schedule.sender,
+                        &admin,
+                        &fee_amount,
+                    );
+                }
+            }
         }
 
         // Successful execution resets the consecutive miss counter.
@@ -465,18 +748,28 @@ impl RecurringPaymentsContract {
         env.storage()
             .persistent()
             .set(&DataKey::MissedExecutions(schedule_id), &0u64);
+        Self::bump_persistent(&env, &DataKey::MissedExecutions(schedule_id));
 
-        schedule.next_payment_at = now + schedule.interval;
+        // Anchor the next due date to the schedule, not to when this call
+        // happened. Using `now + interval` made every late (in-grace)
+        // execution push the schedule later, so a "1st of the month" payment
+        // drifted by days over a year and disagreed with the off-chain
+        // calendar.
+        schedule.next_payment_at = Self::next_anchored_due(&schedule, now);
         schedule.executions_completed += 1;
 
-        // Cancel schedule if max executions reached
-        if schedule.max_executions > 0 && schedule.executions_completed >= schedule.max_executions {
-            schedule.status = ScheduleStatus::Cancelled;
+        // A bounded schedule that has made all its payments is Completed,
+        // not Cancelled, so clients can tell success from cancellation.
+        let completed = schedule.max_executions > 0
+            && schedule.executions_completed >= schedule.max_executions;
+        if completed {
+            schedule.status = ScheduleStatus::Completed;
         }
 
         env.storage()
             .persistent()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         env.events().publish(
             (Symbol::new(&env, "PaymentExecuted"),),
@@ -484,15 +777,28 @@ impl RecurringPaymentsContract {
                 id: schedule_id,
                 executor,
                 amount: schedule.amount,
+                fee_amount,
                 next_payment_at: schedule.next_payment_at,
                 executions_completed: schedule.executions_completed,
             },
         );
+
+        if completed {
+            env.events().publish(
+                (Symbol::new(&env, "ScheduleCompleted"),),
+                ScheduleCompleted {
+                    schedule_id,
+                    executions_completed: schedule.executions_completed,
+                    completed_at: now,
+                },
+            );
+        }
     }
 
     /// Cancel a recurring schedule. Only the original sender may cancel.
     /// A paused schedule may also be cancelled.
     pub fn cancel_recurring_payment(env: Env, sender: Address, schedule_id: u64) {
+        Self::bump_instance(&env);
         sender.require_auth();
 
         let mut schedule: RecurringSchedule = env
@@ -500,6 +806,7 @@ impl RecurringPaymentsContract {
             .persistent()
             .get(&DataKey::Schedule(schedule_id))
             .expect("schedule not found");
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         if schedule.sender != sender {
             panic!("only the sender can cancel");
@@ -507,11 +814,15 @@ impl RecurringPaymentsContract {
         if schedule.status == ScheduleStatus::Cancelled {
             panic!("schedule is already cancelled");
         }
+        if schedule.status == ScheduleStatus::Completed {
+            panic!("schedule is already completed");
+        }
 
         schedule.status = ScheduleStatus::Cancelled;
         env.storage()
             .persistent()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         env.events().publish(
             (Symbol::new(&env, "ScheduleCancelled"),),
@@ -522,6 +833,7 @@ impl RecurringPaymentsContract {
     /// Pause a recurring schedule. Only the original sender may pause.
     /// A paused schedule will not execute until resumed.
     pub fn pause_recurring_payment(env: Env, sender: Address, schedule_id: u64) {
+        Self::bump_instance(&env);
         sender.require_auth();
 
         let mut schedule: RecurringSchedule = env
@@ -529,6 +841,7 @@ impl RecurringPaymentsContract {
             .persistent()
             .get(&DataKey::Schedule(schedule_id))
             .expect("schedule not found");
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         if schedule.sender != sender {
             panic!("only the sender can pause");
@@ -548,6 +861,7 @@ impl RecurringPaymentsContract {
         env.storage()
             .persistent()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         env.events().publish(
             (Symbol::new(&env, "SchedulePaused"),),
@@ -560,6 +874,8 @@ impl RecurringPaymentsContract {
 
     /// Resume a paused recurring schedule. Only the original sender may resume.
     pub fn resume_recurring_payment(env: Env, sender: Address, schedule_id: u64) {
+        Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         sender.require_auth();
 
         let mut schedule: RecurringSchedule = env
@@ -567,6 +883,7 @@ impl RecurringPaymentsContract {
             .persistent()
             .get(&DataKey::Schedule(schedule_id))
             .expect("schedule not found");
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         if schedule.sender != sender {
             panic!("only the sender can resume");
@@ -584,6 +901,7 @@ impl RecurringPaymentsContract {
         env.storage()
             .persistent()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         env.events().publish(
             (Symbol::new(&env, "ScheduleResumed"),),
@@ -594,29 +912,21 @@ impl RecurringPaymentsContract {
         );
     }
 
-    /// Deprecated alias for cancel_recurring_payment. Use cancel_recurring_payment instead.
-    #[deprecated]
-    pub fn cancel_recurring(env: Env, sender: Address, schedule_id: u64) {
-        Self::cancel_recurring_payment(env, sender, schedule_id)
-    }
-
     /// Read a schedule by ID.
     pub fn get_schedule(env: Env, schedule_id: u64) -> RecurringSchedule {
+        Self::bump_instance(&env);
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
         env.storage()
             .persistent()
             .get(&DataKey::Schedule(schedule_id))
             .expect("schedule not found")
     }
 
-    /// Deprecated alias for get_schedule. Use get_schedule instead.
-    #[deprecated]
-    pub fn get_recurring_payment(env: Env, schedule_id: u64) -> RecurringSchedule {
-        Self::get_schedule(env, schedule_id)
-    }
-
     /// Update the payment amount for a recurring schedule. Only the sender may update.
     /// The new amount takes effect from the next scheduled execution.
     pub fn update_amount(env: Env, sender: Address, schedule_id: u64, new_amount: i128) {
+        Self::bump_instance(&env);
+        Self::require_not_paused(&env);
         sender.require_auth();
 
         if new_amount <= 0 {
@@ -628,6 +938,7 @@ impl RecurringPaymentsContract {
             .persistent()
             .get(&DataKey::Schedule(schedule_id))
             .expect("schedule not found");
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         if schedule.sender != sender {
             panic!("only the sender can update amount");
@@ -635,12 +946,16 @@ impl RecurringPaymentsContract {
         if schedule.status == ScheduleStatus::Cancelled {
             panic!("cannot update cancelled schedule");
         }
+        if schedule.status == ScheduleStatus::Completed {
+            panic!("cannot update completed schedule");
+        }
 
         let old_amount = schedule.amount;
         schedule.amount = new_amount;
         env.storage()
             .persistent()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         env.events().publish(
             (Symbol::new(&env, "AmountUpdated"),),
@@ -665,6 +980,7 @@ impl RecurringPaymentsContract {
     ///   `new_recipient`. Off-chain listening infrastructure (e.g. notification pipelines and
     ///   scheduled job daemons) should monitor `RecipientUpdated` to proactively notify both parties.
     pub fn update_recipient(env: Env, sender: Address, schedule_id: u64, new_recipient: Address) {
+        Self::bump_instance(&env);
         sender.require_auth();
 
         let mut schedule: RecurringSchedule = env
@@ -672,6 +988,7 @@ impl RecurringPaymentsContract {
             .persistent()
             .get(&DataKey::Schedule(schedule_id))
             .expect("schedule not found");
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         if schedule.sender != sender {
             panic!("only the sender can update recipient");
@@ -679,12 +996,22 @@ impl RecurringPaymentsContract {
         if schedule.status == ScheduleStatus::Cancelled {
             panic!("cannot update cancelled schedule");
         }
+        if schedule.status == ScheduleStatus::Completed {
+            panic!("cannot update completed schedule");
+        }
+        if new_recipient == sender {
+            panic!("recipient cannot be the sender");
+        }
+        if new_recipient == env.current_contract_address() {
+            panic!("recipient cannot be the contract");
+        }
 
         let old_recipient = schedule.recipient.clone();
         schedule.recipient = new_recipient.clone();
         env.storage()
             .persistent()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
 
         env.events().publish(
             (Symbol::new(&env, "RecipientUpdated"),),
@@ -699,6 +1026,8 @@ impl RecurringPaymentsContract {
 
     /// Return the current consecutive missed-execution count for a schedule.
     pub fn get_missed_executions(env: Env, schedule_id: u64) -> u64 {
+        Self::bump_instance(&env);
+        Self::bump_persistent(&env, &DataKey::MissedExecutions(schedule_id));
         env.storage()
             .persistent()
             .get(&DataKey::MissedExecutions(schedule_id))
@@ -709,6 +1038,8 @@ impl RecurringPaymentsContract {
     /// Returns None for unlimited schedules (max_executions = 0).
     /// Returns Some(remaining) for bounded schedules.
     pub fn get_remaining_executions(env: Env, schedule_id: u64) -> Option<u64> {
+        Self::bump_instance(&env);
+        Self::bump_persistent(&env, &DataKey::Schedule(schedule_id));
         let schedule: RecurringSchedule = env
             .storage()
             .persistent()
@@ -731,6 +1062,8 @@ impl RecurringPaymentsContract {
     /// * `start` - 0-based offset into the sender's schedule list.
     /// * `limit` - Maximum number of IDs to return (capped at 50 to prevent excessive gas usage).
     pub fn get_user_schedules(env: Env, sender: Address, start: u32, limit: u32) -> soroban_sdk::Vec<u64> {
+        Self::bump_instance(&env);
+        Self::bump_persistent(&env, &DataKey::UserSchedules(sender.clone()));
         let cap = if limit > 50 { 50 } else { limit };
         let ids: soroban_sdk::Vec<u64> = env
             .storage()
@@ -748,24 +1081,17 @@ impl RecurringPaymentsContract {
         result
     }
 
-    /// Returns the full schedule struct for a given ID.
-    pub fn get_schedule_by_id(env: Env, schedule_id: u64) -> RecurringSchedule {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Schedule(schedule_id))
-            .expect("schedule not found")
-    }
-
     /// Returns paginated IDs of schedules with Active status.
     ///
     /// # Arguments
     /// * `start` - 0-based offset among active schedules.
     /// * `limit` - Maximum number of IDs to return (capped at 50 to prevent excessive gas usage).
     pub fn get_active_schedules(env: Env, start: u64, limit: u64) -> soroban_sdk::Vec<u64> {
+        Self::bump_instance(&env);
         let cap = if limit > 50 { 50 } else { limit };
         let total: u64 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TotalSchedules)
             .unwrap_or(0);
         let mut result: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
@@ -793,13 +1119,113 @@ impl RecurringPaymentsContract {
     fn next_id(env: &Env) -> u64 {
         let current: u64 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Counter)
             .unwrap_or(0);
         let next = current.checked_add(1).expect("Schedule counter overflow");
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::Counter, &next);
         next
+    }
+
+    /// Bump the instance storage TTL. Called from every public entry point.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Bump the TTL of a persistent record that was read or written.
+    fn bump_persistent(env: &Env, key: &DataKey) {
+        env.storage().persistent().extend_ttl(
+            key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Number of execution windows of a schedule whose grace deadline falls
+    /// inside `[from, to]`. Used to forgive windows that elapsed during a
+    /// platform pause.
+    fn windows_in_range(
+        first_due: u64,
+        grace: u64,
+        interval: u64,
+        from: u64,
+        to: u64,
+    ) -> u64 {
+        if interval == 0 || to <= from {
+            return 0;
+        }
+        // Window k has grace deadline first_due + k*interval + grace.
+        // Count k >= 0 with from <= deadline <= to.
+        let first_deadline = first_due.saturating_add(grace);
+        if first_deadline > to {
+            return 0;
+        }
+        let start_k = if first_deadline >= from {
+            0
+        } else {
+            (from - first_deadline + interval - 1) / interval
+        };
+        let end_k = (to - first_deadline) / interval;
+        if end_k < start_k {
+            0
+        } else {
+            end_k - start_k + 1
+        }
+    }
+}
+
+mod governance;
+pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
+
+#[contractimpl]
+impl RecurringPaymentsContract {
+    /// Propose a new admin. The current admin must authorize. The proposal
+    /// becomes acceptable by the new admin after `ADMIN_ROTATION_DELAY_SECS`.
+    ///
+    /// The admin should be a multisig account or the `multisig-approval`
+    /// contract so a single lost or compromised key cannot take over.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        governance::propose_admin(&env, &admin, &new_admin);
+    }
+
+    /// Accept a pending admin proposal. Requires the new admin's signature and
+    /// that the rotation delay has elapsed.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        governance::accept_admin(&env, &new_admin);
+    }
+
+    /// Cancel a pending admin proposal. Only the current admin may cancel.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) {
+        governance::cancel_admin_proposal(&env, &admin);
+    }
+
+    /// Return the current admin address.
+    pub fn get_admin(env: Env) -> Address {
+        governance::get_admin(&env)
+    }
+
+    /// Return the pending admin proposal, if any, as `(new_admin, eta)`.
+    pub fn get_pending_admin(env: Env) -> Option<(Address, u64)> {
+        governance::get_pending_admin(&env)
+/// Minimal client interface for the fee-distributor contract.
+mod fee_distributor {
+    use soroban_sdk::{contractclient, Address, Env};
+
+    #[contractclient(name = "Client")]
+    pub trait FeeDistributor {
+        /// Deposit `amount` of `token` as a platform fee, attributed to
+        /// `source`. The caller must have transferred the tokens to itself and
+        /// authorize this call.
+        fn deposit_fee(
+            env: Env,
+            contract: Address,
+            token: Address,
+            amount: i128,
+            source: Option<Address>,
+        );
     }
 }

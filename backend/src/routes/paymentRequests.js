@@ -2,7 +2,7 @@ const express = require('express');
 const { param, validationResult } = require('express-validator');
 const auth = require('../middleware/auth');
 const { readLimiter } = require('../middleware/rateLimiter');
-const { create, getById, markClaimed } = require('../controllers/paymentRequestController');
+const { create, getById, markClaimed, listMine, cancel } = require('../controllers/paymentRequestController');
 
 const router = express.Router();
 
@@ -17,7 +17,9 @@ const validateId = [
   },
 ];
 
+router.get('/', auth, listMine);
 router.get('/:id', readLimiter, validateId, getById);
+router.delete('/:id', auth, validateId, cancel);
 router.post('/:id/claim', auth, validateId, markClaimed);
 
 module.exports = router;

@@ -5,6 +5,8 @@ import { FixedSizeList } from 'react-window';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
+import { useWallet } from '../context/WalletContext';
+import { explorerTxUrl } from '../config/network';
 import { truncateAddress } from '../utils/currency';
 import { TransactionCardSkeleton } from '../components/Skeleton';
 import ConfirmModal from '../components/ConfirmModal';
@@ -42,18 +44,21 @@ const DATE_PRESETS = [
   { label: 'Last 30 days', getFrom: () => getDateDaysAgo(30), getTo: () => new Date().toISOString().split('T')[0] },
 ];
 
-function buildHistoryParams(cursor, dateFrom, dateTo, asset, statuses) {
+function buildHistoryParams(cursor, dateFrom, dateTo, asset, statuses, direction, walletId) {
   const params = { limit: 20 };
+  if (walletId) params.wallet_id = walletId;
   if (cursor) params.cursor = cursor;
   if (dateFrom) params.from = dateFrom;
   if (dateTo) params.to = dateTo;
   if (asset) params.asset = asset;
   if (statuses && statuses.length > 0) params.status = statuses.join(',');
+  if (direction && direction !== 'all') params.direction = direction;
   return params;
 }
 
 export default function TransactionHistory() {
   const navigate = useNavigate();
+  const { activeWalletId } = useWallet();
   const [searchParams, setSearchParams] = useSearchParams();
   const { t } = useTranslation();
   const { isOnline } = useOnlineStatus();
@@ -145,6 +150,12 @@ export default function TransactionHistory() {
   const [selectedTx, setSelectedTx] = useState(null); // tx detail modal
   const [copiedHash, setCopiedHash] = useState(false);
   const sentinelRef = useRef(null);
+  const txParam = searchParams.get('tx');
+  useEffect(() => {
+    if (!txParam) return;
+    const match = transactions.find((t) => t.tx_hash === txParam);
+    if (match) setSelectedTx(match);
+  }, [txParam, transactions]);
   const SCROLL_KEY = 'txhistory_scroll';
 
   const fetchInitial = useCallback(async () => {
@@ -175,7 +186,7 @@ export default function TransactionHistory() {
 
     // Online — fetch fresh and persist
     try {
-      const params = buildHistoryParams(null, dateFrom, dateTo, asset, selectedStatuses);
+      const params = buildHistoryParams(null, dateFrom, dateTo, asset, selectedStatuses, filter, activeWalletId);
       const r = await api.get('/payments/history', { params });
       const txList = r.data.transactions;
       setTransactions(txList);
@@ -184,7 +195,7 @@ export default function TransactionHistory() {
       setFromCache(false);
 
       // Only cache the unfiltered first page
-      if (!dateFrom && !dateTo && !asset && selectedStatuses.length === 0) {
+      if (!dateFrom && !dateTo && !asset && selectedStatuses.length === 0 && filter === 'all') {
         await setCacheEntry('history', txList);
       }
     } catch {
@@ -208,7 +219,7 @@ export default function TransactionHistory() {
     } finally {
       setLoading(false);
     }
-  }, [dateFrom, dateTo, asset, selectedStatuses, t]);
+  }, [dateFrom, dateTo, asset, selectedStatuses, filter, t]);
 
   useEffect(() => {
     fetchInitial();
@@ -226,7 +237,7 @@ export default function TransactionHistory() {
   const loadMore = useCallback(() => {
     if (nextCursor && !loadingMore) {
       setLoadingMore(true);
-      const params = buildHistoryParams(nextCursor, dateFrom, dateTo, asset);
+      const params = buildHistoryParams(nextCursor, dateFrom, dateTo, asset, selectedStatuses, filter, activeWalletId);
       api
         .get('/payments/history', { params })
         .then((r) => {
@@ -237,7 +248,7 @@ export default function TransactionHistory() {
         .catch(() => {})
         .finally(() => setLoadingMore(false));
     }
-  }, [nextCursor, loadingMore, dateFrom, dateTo, asset]);
+  }, [nextCursor, loadingMore, dateFrom, dateTo, asset, selectedStatuses, filter]);
 
   // IntersectionObserver: load next page when sentinel scrolls into view
   useEffect(() => {
@@ -257,9 +268,6 @@ export default function TransactionHistory() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return transactions.filter((tx) => {
-      if (filter === 'sent' && tx.direction !== 'sent') return false;
-      if (filter === 'received' && tx.direction !== 'received') return false;
-      if (selectedStatuses.length > 0 && !selectedStatuses.includes(tx.status)) return false;
       if (!q) return true;
       const memo = (tx.memo || '').toLowerCase();
       const sender = (tx.sender_wallet || '').toLowerCase();
@@ -272,26 +280,34 @@ export default function TransactionHistory() {
         amountStr.includes(q)
       );
     });
-  }, [transactions, filter, search, selectedStatuses]);
+  }, [transactions, search]);
 
   async function handleExportCSV() {
     if (exporting) return;
     setExporting(true);
     try {
-      const params = { format: 'csv' };
+      const params = {};
       if (dateFrom) params.from = dateFrom;
       if (dateTo) params.to = dateTo;
       if (asset) params.asset = asset;
       if (filter !== 'all') params.direction = filter;
-      const res = await api.get('/payments/history', { params, responseType: 'blob' });
+      const res = await api.get('/payments/export', { params, responseType: 'blob' });
       const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
       const a = document.createElement('a');
       a.href = url;
-      a.download = `transactions_${new Date().toISOString().split('T')[0]}.csv`;
+      const cd = res.headers?.['content-disposition'] || '';
+      const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+      a.download = m ? decodeURIComponent(m[1]) : `transactions_${new Date().toISOString().split('T')[0]}.csv`;
       a.click();
       URL.revokeObjectURL(url);
-    } catch {
-      toast.error('Export failed. Please try again.');
+    } catch (err) {
+      let msg = 'Export failed. Please try again.';
+      try {
+        const data = err.response?.data;
+        const text = data instanceof Blob ? await data.text() : null;
+        msg = (text && JSON.parse(text).error) || msg;
+      } catch { /* keep default message */ }
+      toast.error(msg);
     } finally {
       setExporting(false);
     }
@@ -682,7 +698,7 @@ export default function TransactionHistory() {
                             </div>
                             {tx.tx_hash && (
                               <a
-                                href={`https://stellar.expert/explorer/${process.env.REACT_APP_STELLAR_NETWORK || 'testnet'}/tx/${tx.tx_hash}`}
+                                href={explorerTxUrl(tx.tx_hash)}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="text-gray-500 hover:text-primary-400 transition-colors"
@@ -809,7 +825,7 @@ export default function TransactionHistory() {
               {/* Stellar Explorer Link */}
               {selectedTx.tx_hash && (
                 <a
-                  href={`https://stellar.expert/explorer/testnet/tx/${selectedTx.tx_hash}`}
+                  href={explorerTxUrl(selectedTx.tx_hash)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="w-full flex items-center justify-center gap-2 bg-primary-500 hover:bg-primary-600 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors"

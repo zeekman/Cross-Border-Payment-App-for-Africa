@@ -1,6 +1,7 @@
 'use strict';
 
 const https = require('https');
+const { isValidEvent } = require('./webhookEvents');
 const db = require('../db');
 const { sign, buildSignatureHeader } = require('../utils/webhookSignature');
 const { validateOutboundUrl } = require('../utils/ssrf');
@@ -102,7 +103,57 @@ function activeSecrets(row) {
 }
 
 /**
+ * A failed delivery attempt. `retryable: false` marks a failure retrying cannot
+ * fix (the URL failed SSRF validation), so the queue stops retrying immediately.
+ */
+class DeliveryError extends Error {
+  constructor(message, { retryable = true } = {}) {
+    super(message);
+    this.name = 'DeliveryError';
+    this.retryable = retryable;
+  }
+}
+
+/**
+ * Make exactly one delivery attempt for a queued job (BE-217): validate the URL,
+ * sign with the webhook's current secrets, POST, and write the delivery log row.
+ * Throws a DeliveryError on any failure; retrying and backoff belong to the queue.
+ *
+ * `row` is the webhooks row loaded at send time. The decrypted secret is read here
+ * and never stored in the job payload or kept in a scheduled closure.
+ */
+async function attemptDelivery(row, payload, attempt, maxAttempts) {
+  const url = row.url;
+  const ssrfCheck = await validateOutboundUrl(url);
+  if (!ssrfCheck.valid) {
+    logger.error('Webhook delivery blocked: URL failed SSRF validation', { url, reason: ssrfCheck.error });
+    const blockedId = await safeCreateDeliveryLog(row.id, payload.event, url, attempt, maxAttempts, payload);
+    await safeUpdateDeliveryLog(blockedId, 'failed', null, null, 'SSRF validation failed');
+    throw new DeliveryError('SSRF validation failed', { retryable: false });
+  }
+
+  const body = JSON.stringify(payload);
+  const signature = buildSignatureHeader(activeSecrets(row), body);
+  const deliveryId = await safeCreateDeliveryLog(row.id, payload.event, url, attempt, maxAttempts, payload);
+  const start = Date.now();
+
+  try {
+    const statusCode = await httpsPost(url, body, signature, ssrfCheck.agent);
+    await safeUpdateDeliveryLog(deliveryId, 'delivered', statusCode, Date.now() - start, null);
+    return { statusCode };
+  } catch (err) {
+    const errMessage = err.message.includes('Error:') ? err.message.replace(/^Error:\s*/, '') : err.message;
+    await safeUpdateDeliveryLog(deliveryId, 'failed', null, Date.now() - start, errMessage);
+    throw new DeliveryError(errMessage);
+  }
+}
+
+/**
  * Deliver a webhook payload to a single subscriber URL with exponential-backoff retry.
+ *
+ * In-process fallback used only when the durable queue is unavailable (no REDIS_URL, or
+ * Redis down at enqueue time). Retries here are timers: they are lost on restart and
+ * cover about 3 seconds. The queue path (services/webhookQueue.js) is the durable one.
  *
  * On each failed attempt before the last one, logs a warning with metadata so
  * operators can track transient delivery failures.  After exhausting all attempts,
@@ -170,7 +221,7 @@ async function deliverWithRetry(webhookId, url, secrets, payload, attempt = 0) {
 async function retryDelivery(deliveryId) {
   const { rows } = await db.query(
     `SELECT wd.webhook_id, wd.target_url, wd.payload, wd.event_type,
-            w.url, w.secret, w.previous_secret, w.previous_secret_expires_at
+            w.user_id, w.active, w.url, w.secret, w.previous_secret, w.previous_secret_expires_at
      FROM webhook_deliveries wd
      JOIN webhooks w ON w.id = wd.webhook_id
      WHERE wd.id = $1 AND wd.status = 'failed'`,
@@ -179,7 +230,23 @@ async function retryDelivery(deliveryId) {
   if (!rows.length) throw new Error('Delivery not found or not failed');
   const row = rows[0];
   const parsedPayload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
-  await deliverWithRetry(row.webhook_id, row.url, activeSecrets(row), { ...parsedPayload, event: row.event_type });
+  const payload = { ...parsedPayload, event: row.event_type };
+
+  const queue = getDeliveryQueue();
+  if (queue) {
+    // A disabled endpoint's jobs are skipped by the worker, so say so instead of
+    // reporting a retry that will never be sent.
+    if (row.active === false) throw new Error('Webhook endpoint is disabled. Re-enable it before retrying.');
+    await queue.enqueueDelivery({ webhookId: row.webhook_id, userId: row.user_id, payload });
+    return;
+  }
+  await deliverWithRetry(row.webhook_id, row.url, activeSecrets(row), payload);
+}
+
+/** The durable queue module when it is running, else null (legacy in-process delivery). */
+function getDeliveryQueue() {
+  const queue = require('./webhookQueue');
+  return queue.isQueueEnabled() ? queue : null;
 }
 
 /**
@@ -188,15 +255,20 @@ async function retryDelivery(deliveryId) {
  * Wraps each delivery in a fire-and-forget pattern: errors are logged but never
  * propagate to the caller so a bad subscriber never disrupts the payment flow.
  *
- * @param {string} event - Event name, e.g. "payment.sent"
- * @param {object} data  - Arbitrary event-specific payload data
+ * @param {string} event  - Event name, e.g. "payment.sent"
+ * @param {string} userId - Owner of the event; only that user's webhooks receive it
+ * @param {object} data   - Arbitrary event-specific payload data
  * @returns {Promise<void>}
  */
-async function deliver(event, data) {
+async function deliver(event, userId, data) {
+  if (!isValidEvent(event)) {
+    throw new Error(`Unknown webhook event "${event}" — add it to services/webhookEvents.js`);
+  }
   const { rows } = await db.query(
-    `SELECT id, url, secret, previous_secret, previous_secret_expires_at
-     FROM webhooks WHERE active = true AND $1 = ANY(events)`,
-    [event]
+    `SELECT id, user_id, url, secret, previous_secret, previous_secret_expires_at
+     FROM webhooks
+     WHERE active = true AND user_id = $2 AND $1 = ANY(events)`,
+    [event, userId]
   );
 
   if (!rows.length) return;
@@ -207,9 +279,33 @@ async function deliver(event, data) {
     timestamp: Date.now(),
   };
 
+  const queue = getDeliveryQueue();
   await Promise.all(
-    rows.map((wh) => deliverWithRetry(wh.id || null, wh.url, activeSecrets(wh), payload))
+    rows.map(async (wh) => {
+      if (queue) {
+        try {
+          // One durable job per (event, subscriber). The secret is loaded by the worker.
+          await queue.enqueueDelivery({ webhookId: wh.id, userId, payload });
+          return;
+        } catch (err) {
+          // Redis is down right now: deliver in-process rather than drop the event.
+          logger.error('Failed to enqueue webhook delivery, sending in-process', {
+            webhookId: wh.id,
+            error: err.message,
+          });
+        }
+      }
+      await deliverWithRetry(wh.id || null, wh.url, activeSecrets(wh), payload);
+    })
   );
 }
 
-module.exports = { deliver, deliverWithRetry, retryDelivery, sign, MAX_ATTEMPTS };
+module.exports = {
+  deliver,
+  deliverWithRetry,
+  attemptDelivery,
+  DeliveryError,
+  retryDelivery,
+  sign,
+  MAX_ATTEMPTS,
+};

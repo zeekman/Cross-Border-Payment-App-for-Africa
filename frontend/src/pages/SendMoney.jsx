@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useReducer, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useReducer, useRef, lazy, Suspense } from 'react';
 import { useNavigate, useSearchParams, useBeforeUnload, Link } from 'react-router-dom';
 import { useMemoValidation } from '../hooks/useMemoValidation';
 import {
@@ -14,18 +14,24 @@ import {
   BookUser,
 } from 'lucide-react';
 import api from '../utils/api';
+import { useWallet } from '../context/WalletContext';
+import { useConfirm } from '../context/ConfirmContext';
 import { validateStellarAddress } from '../utils/validation';
 import { useExchangeRates } from '../hooks/useExchangeRates';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { Skeleton } from '../components/Skeleton';
-import QRScanner from '../components/QRScanner';
 import PINVerificationModal from '../components/PINVerificationModal';
 import XDRInspectorModal from '../components/XDRInspectorModal';
-import LedgerSignModal from '../components/LedgerSignModal';
 import PushNotificationPrompt from '../components/PushNotificationPrompt';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import { usePaymentStream, CONNECTION_STATE } from '../hooks/usePaymentStream';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
+
+// Lazy-loaded so react-qr-reader and @ledgerhq/* stay out of the main bundle.
+const QRScanner = lazy(() => import('../components/QRScanner'));
+const LedgerSignModal = lazy(() => import('../components/LedgerSignModal'));
+const hasWebUSB = () => typeof navigator !== 'undefined' && 'usb' in navigator;
 
 const SLIPPAGE_OPTIONS = [0.5, 1, 2];
 const DEFAULT_SLIPPAGE = 1;
@@ -53,8 +59,9 @@ function stepReducer(state, action) {
 }
 
 export default function SendMoney() {
+  const confirm = useConfirm();
   const navigate = useNavigate();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [searchParams] = useSearchParams();
   const submitButtonRef = React.useRef(null);
   const [form, setForm] = useState({
@@ -98,17 +105,21 @@ export default function SendMoney() {
   const [quoteRefreshed, setQuoteRefreshed] = useState(false);
   const [quoteRefreshing, setQuoteRefreshing] = useState(false);
   const [requestId] = useState(searchParams.get('request'));
+  const [requestError, setRequestError] = useState(null);
+  const [requestExpiry, setRequestExpiry] = useState(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [showPushPrompt, setShowPushPrompt] = useState(false);
   const { shouldShowPrompt } = usePushNotifications();
 
   // Pre-fill form from payment request when only requestId is in the URL
   useEffect(() => {
-    if (!requestId || form.recipient_address || form.amount) return;
+    if (!requestId) return;
     api
       .get(`/payment-requests/${requestId}`)
       .then((r) => {
-        const { requester_wallet, amount, asset, memo } = r.data;
+        const { requester_wallet, amount, asset, memo, expires_at, claimed } = r.data;
+        setRequestExpiry(expires_at || null);
+        if (claimed) setRequestError(t('send.request_claimed', 'This payment request has already been paid.'));
         setForm((f) => ({
           ...f,
           recipient_address: requester_wallet || f.recipient_address,
@@ -117,8 +128,17 @@ export default function SendMoney() {
           memo: memo || f.memo,
         }));
       })
-      .catch(() => {});
-  }, [requestId]); // eslint-disable-line react-hooks/exhaustive-deps
+      .catch((err) => {
+        const status = err.response?.status;
+        setRequestError(
+          status === 410
+            ? t('send.request_expired', 'This payment request has expired.')
+            : status === 404
+              ? t('send.request_not_found', 'Payment request not found.')
+              : t('send.request_load_failed', 'Could not load this payment request.'),
+        );
+      });
+  }, [requestId]); // eslint-disable-line react-hooks/exhaustive-deps -- prefill once per request id; must not overwrite later user edits
   const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
   const [pathResult, setPathResult] = useState(null);
   const [pathLoading, setPathLoading] = useState(false);
@@ -179,9 +199,10 @@ export default function SendMoney() {
     form.memo !== cleanForm.memo ||
     (form.private_note || '') !== '';
 
+  const { activeWalletId } = useWallet();
   // Multi-wallet state
   const [wallets, setWallets] = useState([]);
-  const [selectedWalletId, setSelectedWalletId] = useState(searchParams.get('wallet_id') || null);
+  const [selectedWalletId, setSelectedWalletId] = useState(searchParams.get('wallet_id') || activeWalletId || null);
   const [showWalletDropdown, setShowWalletDropdown] = useState(false);
 
   const selectedWallet = wallets.find((w) => w.id === selectedWalletId) || wallets[0] || null;
@@ -284,7 +305,7 @@ export default function SendMoney() {
 
   useEffect(() => {
     api
-      .get('/wallet/contacts')
+      .get('/contacts')
       .then((r) => setContacts(r.data.contacts || []))
       .catch(() => {});
   }, []);
@@ -299,6 +320,8 @@ export default function SendMoney() {
         contact.wallet_address.toLowerCase().includes(searchLower)
     );
   }, [contacts, contactSearch]);
+  const [error, setError] = useState('');
+  const fileInputRef = useRef(null);
 
   // Reset selected index when search changes
   useEffect(() => {
@@ -501,16 +524,16 @@ export default function SendMoney() {
 
   // Issue #998: while the user sits on the Review/Confirm screens, watch for a
   // stale quote and re-quote automatically instead of confirming the original.
-  useEffect(() => {
-    if (step < 3 || !quoteFetchedAt) return undefined;
-    const check = () => {
+  // Paused while the tab is hidden; returning to it checks straight away.
+  useVisibleInterval(
+    () => {
       if (Date.now() - quoteFetchedAt > QUOTE_FRESHNESS_MS) {
         refreshQuote();
       }
-    };
-    const timer = setInterval(check, 5000);
-    return () => clearInterval(timer);
-  }, [step, quoteFetchedAt, refreshQuote]);
+    },
+    5000,
+    { enabled: step >= 3 && Boolean(quoteFetchedAt) },
+  );
 
   const checkMemoRequired = useCallback(async (address) => {
     if (!address || address.length < 56) {
@@ -621,10 +644,23 @@ export default function SendMoney() {
     }
   };
 
+  // SEP-7 payment requests pre-fill amount/memo/asset; the user still confirms on the review step.
+  const handleQRScan = (address, payment = {}) => {
+    setForm((prev) => ({
+      ...prev,
+      recipient_address: address,
+      ...(payment.amount && { amount: payment.amount }),
+      ...(payment.memo && { memo: payment.memo }),
+      ...(payment.memo && payment.memo_type && { memo_type: payment.memo_type }),
+      ...(payment.asset_code && { asset: payment.asset_code }),
+    }));
+    if (payment.amount || payment.memo) toast(t('send.qr_prefilled'));
+  };
+
   const handleSignWithLedger = async () => {
     setLoading(true);
     try {
-      const res = await api.post('/payments/build-transaction', {
+      const res = await api.post('/ledger/build', {
         recipient_address: form.recipient_address,
         amount: parseFloat(form.amount),
         asset: form.asset,
@@ -646,13 +682,13 @@ export default function SendMoney() {
     setShowLedgerModal(false);
     setLoading(true);
     try {
-      await api.post('/payments/submit-signed', {
+      await api.post('/ledger/submit', {
         xdr: signedXDR,
         recipient_address: form.recipient_address,
         amount: parseFloat(form.amount),
         asset: form.asset,
         wallet_id: selectedWallet?.id || undefined,
-      });
+      }, { headers: { 'Idempotency-Key': crypto.randomUUID() } });
       toast.success('Payment sent via Ledger!');
       resetForm();
       navigate('/dashboard');
@@ -664,6 +700,7 @@ export default function SendMoney() {
   };
 
   const handlePINVerified = async () => {
+    if (requestError) { toast.error(requestError); return; }
     setLoading(true);
     try {
       let res;
@@ -735,7 +772,7 @@ export default function SendMoney() {
       // Offline queue — the api interceptor returns { queued: true }
       if (res.data?.queued) {
         toast.success(
-          "You're offline. Payment queued — it will send automatically when you reconnect.",
+          "You're offline. Payment queued — you'll be asked to confirm it with your PIN when you reconnect.",
           { duration: 5000 }
         );
         resetForm();
@@ -813,12 +850,12 @@ export default function SendMoney() {
     >
       <button
         type="button"
-        onClick={() => {
+        onClick={async () => {
           if (step > 1) {
             dispatchStep({ type: 'BACK' });
             return;
           }
-          if (formIsDirty && !window.confirm('You have unsaved changes. Leave this page?')) return;
+          if (formIsDirty && !(await confirm(t('confirm.leave_unsaved', 'You have unsaved changes. Leave this page?'), { title: t('confirm.leave_title', 'Discard changes?'), confirmLabel: t('confirm.leave', 'Leave') }))) return;
           navigate(-1);
         }}
         className="text-gray-400 hover:text-white mb-6 flex items-center gap-1"
@@ -827,6 +864,13 @@ export default function SendMoney() {
       </button>
 
       <h2 className="text-2xl font-bold text-white mb-4">{t('send.title')}</h2>
+      {requestId && (requestError ? (
+        <div role="alert" className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-400">{requestError}</div>
+      ) : requestExpiry && (
+        <p className="mb-4 text-xs text-gray-400">
+          {t('send.request_expires', 'Payment request expires')} {new Date(requestExpiry).toLocaleString(i18n.language)}
+        </p>
+      ))}
 
       {/* Step indicator */}
       <div className="flex items-center mb-6" aria-label="Progress">
@@ -971,6 +1015,7 @@ export default function SendMoney() {
           <input
             type="text"
             required
+            readOnly={!!requestId}
             placeholder={t('send.recipient_placeholder') || 'Wallet address or username*domain'}
             value={form.recipient_address}
             onChange={(e) => {
@@ -1131,6 +1176,7 @@ export default function SendMoney() {
                   min="0.0000001"
                   step="any"
                   placeholder="0.00"
+                  readOnly={!!requestId}
                   value={form.amount}
                   onChange={(e) => setForm({ ...form, amount: e.target.value })}
                   className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors"
@@ -1138,6 +1184,7 @@ export default function SendMoney() {
                 <div className="relative">
                   <select
                     value={form.asset}
+                    disabled={!!requestId}
                     onChange={(e) => setForm({ ...form, asset: e.target.value })}
                     className="appearance-none bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
                   >
@@ -1322,6 +1369,7 @@ export default function SendMoney() {
               <label className="text-sm text-gray-400 mb-1 block">{t('send.memo')}</label>
               <input
                 ref={memoRef}
+                readOnly={!!requestId}
                 type="text"
                 maxLength={memoMaxLen}
                 placeholder={t('send.memo_placeholder')}
@@ -1561,7 +1609,7 @@ export default function SendMoney() {
               )}
             </button>
 
-            {!isCrossAsset && (
+            {!isCrossAsset && hasWebUSB() && (
               <button
                 type="button"
                 onClick={handleSignWithLedger}
@@ -1596,6 +1644,25 @@ export default function SendMoney() {
         onClose={() => setShowScanner(false)}
         onScan={(address) => setForm({ ...form, recipient_address: address })}
       />
+      <Suspense fallback={null}>
+        {showLedgerModal && (
+          <LedgerSignModal
+            show={showLedgerModal}
+            onClose={() => setShowLedgerModal(false)}
+            xdr={unsignedXDR}
+            networkPassphrase={ledgerNetworkPassphrase}
+            onSigned={handleLedgerSigned}
+          />
+        )}
+
+        {showScanner && (
+          <QRScanner
+            isOpen={showScanner}
+            onClose={() => setShowScanner(false)}
+            onScan={handleQRScan}
+          />
+        )}
+      </Suspense>
 
       <PINVerificationModal
         isOpen={showPINVerification}
@@ -1640,6 +1707,7 @@ export default function SendMoney() {
                   if (!saveContactName.trim()) return;
                   setSaveContactLoading(true);
                   try {
+                    await api.post('/contacts', { name: saveContactName.trim(), wallet_address: showSaveContactPrompt });
                     await api.post('/wallet/contacts', { name: saveContactName.trim(), wallet_address: showSaveContactPrompt });
                     toast.success('Contact saved!');
                   } catch {

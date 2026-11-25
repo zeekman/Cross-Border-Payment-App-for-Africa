@@ -18,11 +18,14 @@ async function create(req, res, next) {
     }
 
     const id = uuidv4();
-    const nextRunAt = new Date(execute_at);
+    const nextRunAt = execute_at ? new Date(execute_at) : new Date(Date.now() + 3600000);
+    if (Number.isNaN(nextRunAt.getTime())) {
+      return res.status(400).json({ error: 'Invalid execute_at date' });
+    }
 
     await db.query(
       `INSERT INTO scheduled_payments (id, user_id, recipient_wallet, amount, asset, frequency, next_run_at, memo)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8),
       [id, userId, recipient_wallet, amount, asset, frequency, nextRunAt, memo || null]
     );
 
@@ -53,7 +56,7 @@ async function list(req, res, next) {
 async function update(req, res, next) {
   try {
     const { id } = req.params;
-    const { amount, frequency, active, recipient_wallet } = req.body;
+    const { amount, frequency, active, recipient_wallet, execute_at } = req.body;
     const userId = req.user.userId;
 
     if (frequency !== undefined && frequency !== null && !['daily', 'weekly', 'monthly'].includes(frequency)) {
@@ -63,14 +66,23 @@ async function update(req, res, next) {
       return res.status(400).json({ error: 'Invalid recipient wallet address' });
     }
 
+    let nextRunAt = null;
+    if (execute_at !== undefined && execute_at !== null) {
+      nextRunAt = new Date(execute_at);
+      if (Number.isNaN(nextRunAt.getTime())) {
+        return res.status(400).json({ error: 'Invalid execute_at date' });
+      }
+    }
+
     const result = await db.query(
       `UPDATE scheduled_payments
        SET amount = COALESCE($1, amount),
            frequency = COALESCE($2, frequency),
            active = COALESCE($3, active),
-           recipient_wallet = COALESCE($4, recipient_wallet)
+           recipient_wallet = COALESCE($4, recipient_wallet),
+           next_run_at = COALESCE($7, next_run_at)
        WHERE id = $5 AND user_id = $6`,
-      [amount, frequency, active, recipient_wallet, id, userId]
+      [amount, frequency, active, recipient_wallet, id, userId, nextRunAt]
     );
 
     if (result.rowCount === 0) {

@@ -8,12 +8,18 @@ const { persistAndBroadcast } = require('../services/notificationInbox');
 const { withLock } = require('../utils/distributedLock');
 
 const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || '0.11');
+const MIN_PAYMENT_XLM_EQUIVALENT = parseFloat(process.env.MIN_LOYALTY_PAYMENT_XLM || '1.0');
 
 function estimateXlmEquivalent(amount, asset) {
   const num = parseFloat(amount);
   if (asset === 'XLM') return num;
   if (asset === 'USDC' || asset === 'USD') return num / XLM_USD_RATE;
-  return 0;
+  
+  // For unsupported assets, use conservative 1:1 USD estimate to prevent
+  // point farming with worthless tokens (Issue #1162).
+  // In production, integrate a live price feed for NGN, GHS, KES, etc.
+  logger.warn('estimateXlmEquivalent: unsupported asset, using 1:1 USD fallback', { asset, amount });
+  return num / XLM_USD_RATE;
 }
 
 /**
@@ -86,10 +92,27 @@ async function processLoyaltyMintQueue() {
         const job = await claimNextJob(client);
         if (!job) return; // queue empty for this slot
 
-        const points = Math.max(
-          1,
-          Math.floor(estimateXlmEquivalent(job.amount, job.asset)),
-        );
+        const xlmEquivalent = estimateXlmEquivalent(job.amount, job.asset);
+        
+        // Issue #1162: Prevent point farming with dust payments by enforcing
+        // a minimum payment threshold. Skip minting if payment is below minimum.
+        if (xlmEquivalent < MIN_PAYMENT_XLM_EQUIVALENT) {
+          await db.query(
+            `UPDATE loyalty_mint_queue
+             SET    status = 'completed',
+                    completed_at = NOW()
+             WHERE  id = $1`,
+            [job.id],
+          );
+          logger.info('Loyalty mint skipped: payment below minimum threshold', {
+            jobId: job.id,
+            xlmEquivalent,
+            minRequired: MIN_PAYMENT_XLM_EQUIVALENT,
+          });
+          return;
+        }
+
+        const points = Math.floor(xlmEquivalent);
 
         try {
           const result = await mintPoints({

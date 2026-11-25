@@ -1,4 +1,5 @@
 const geoip = require('geoip-lite');
+const { redactUrl } = require('../utils/redactUrl');
 const logger = require('../utils/logger');
 const { auditLog } = require('../services/audit');
 const { geoDenialsTotal } = require('../utils/metrics');
@@ -130,7 +131,7 @@ function geoRestriction(req, res, next) {
       ipFromHeader,
       country,
       method: req.method,
-      path: req.originalUrl,
+      path: redactUrl(req.originalUrl),
     });
 
     recordDenial(country);

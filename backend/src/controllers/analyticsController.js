@@ -9,6 +9,11 @@
  * the data is — see backend/src/services/analyticsRefresh.js for details.
  * `summary` and `fees` always query the live transactions table, so their
  * `refreshed_at` is just the request time.
+ *
+ * SC-196: the fee-distributor's `deposit_fee` event carries a caller-supplied
+ * `source` field that is NOT authenticated (only `depositor` is). It must not
+ * be treated as fee provenance. The `fees` endpoint therefore aggregates fees
+ * by asset only and never attributes fees to a source address.
  */
 const db = require('../db');
 const { refreshDailyAggregates, getLastRefreshedAt } = require('../services/analyticsRefresh');
@@ -235,6 +240,9 @@ exports.fees = async (req, res, next) => {
       return res.status(400).json({ error: rangeError });
     }
 
+    // SC-196: fees are aggregated by asset only. The fee-distributor's
+    // `source` field is caller-supplied and unauthenticated, so it is never
+    // used to attribute fees to an address here.
     const [totals, byAsset] = await Promise.all([
       db.query(
         `SELECT COALESCE(SUM(fee_amount), 0) AS total_fees,
@@ -261,6 +269,9 @@ exports.fees = async (req, res, next) => {
       total_fees: totals.rows[0].total_fees,
       transaction_count: totals.rows[0].transaction_count,
       by_asset: byAsset.rows,
+      // Note: no per-source fee attribution is provided. The on-chain
+      // `source` field is unauthenticated (SC-196) and must not be used as
+      // fee provenance.
       refreshed_at: new Date().toISOString(), // live query — always current
     });
   } catch (err) {

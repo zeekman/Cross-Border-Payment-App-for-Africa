@@ -1,7 +1,9 @@
 const router = require('express').Router();
 const { query, body, validationResult } = require('express-validator');
 const authMiddleware = require('../middleware/auth');
+const { requireStepUp } = require('../middleware/requireStepUp');
 const db = require('../db');
+const idempotency = require('../middleware/idempotency');
 const cache = require('../utils/cache');
 const { parseAssetParam, getOrderbook, executeSwap, getTradeHistory } = require('../services/dex');
 
@@ -68,6 +70,10 @@ router.get('/orderbook',
 /**
  * POST /api/dex/swap
  * @protected — accesses and signs with the authenticated user's wallet.
+ * Body: sell_asset, sell_amount, buy_asset, plus either
+ *   - min_received (decimal string): binding destMin for the path payment, or
+ *   - slippage_pct (0–50, default 1): used to derive destMin from the server quote.
+ * Supports the Idempotency-Key header.
  */
 router.post('/swap',
   authMiddleware,
@@ -76,19 +82,47 @@ router.post('/swap',
     body('sell_amount').isFloat({ gt: 0 }).withMessage('sell_amount must be > 0'),
     body('buy_asset').matches(ASSET_PARAM_RE).withMessage('Invalid buy_asset'),
     body('slippage_pct').optional().isFloat({ min: 0, max: 50 }).withMessage('slippage_pct must be 0–50'),
+    body('min_received').optional().matches(/^\d+(\.\d{1,7})?$/).withMessage('min_received must be a decimal string with up to 7 decimals')
+      .bail().custom((v) => parseFloat(v) > 0).withMessage('min_received must be > 0'),
   ],
   validate,
+  idempotency,
+  requireStepUp,
   async (req, res, next) => {
     try {
-      const { sell_asset, sell_amount, buy_asset, slippage_pct } = req.body;
+      const { sell_asset, sell_amount, buy_asset, slippage_pct, min_received } = req.body;
 
       const walletResult = await db.query(
-        'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
+        'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
         [req.user.userId]
       );
       if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
 
       const { public_key, encrypted_secret_key } = walletResult.rows[0];
+
+      // Issue #1156: Apply compliance checks to DEX swaps (value-moving endpoint)
+      const { ensureKycIfNeeded, amlRescreenForPayment, dailyLimitExceeded, checkFraud, logFraudBlock } = require('../controllers/paymentController');
+      const { estimateUSDValue } = require('../controllers/paymentController');
+      
+      // Use sell_asset for compliance thresholds
+      await ensureKycIfNeeded(req.user.userId, sell_amount, sell_asset);
+      
+      const estimatedUSD = estimateUSDValue(sell_amount, sell_asset);
+      await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD);
+      
+      const overLimit = await dailyLimitExceeded(public_key, sell_amount);
+      if (overLimit) {
+        return res.status(400).json({
+          error: 'Daily send limit reached. Try again tomorrow.',
+          code: 'DAILY_LIMIT_EXCEEDED',
+        });
+      }
+      
+      const fraudCheck = await checkFraud(public_key, sell_amount, sell_asset);
+      if (fraudCheck.blocked) {
+        await logFraudBlock(public_key, fraudCheck.reason, sell_amount, sell_asset);
+        return res.status(429).json({ error: fraudCheck.reason });
+      }
 
       const result = await executeSwap({
         publicKey: public_key,
@@ -97,7 +131,10 @@ router.post('/swap',
         sellAmount: sell_amount,
         buyAsset: buy_asset,
         slippagePct: slippage_pct,
+        minReceived: min_received,
       });
+
+      await db.query('UPDATE wallets SET has_dex_activity = TRUE WHERE public_key = $1', [public_key]);
 
       res.json(result);
     } catch (err) {

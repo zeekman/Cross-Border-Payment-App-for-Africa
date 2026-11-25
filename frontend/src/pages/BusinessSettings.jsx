@@ -3,11 +3,15 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, ShieldCheck, Building2, Webhook, RefreshCw, Eye, EyeOff, Copy, CheckCheck, Lock } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
+import { useConfirm } from '../context/ConfirmContext';
+import { useTranslation } from 'react-i18next';
 import { truncateAddress } from '../utils/currency';
 import ConfirmModal from '../components/ConfirmModal';
 import toast from 'react-hot-toast';
 
 export default function BusinessSettings() {
+  const confirm = useConfirm();
+  const { t } = useTranslation();
   const { user, updateUser } = useAuth();
   const navigate = useNavigate();
   const [signers, setSigners] = useState([]);
@@ -87,7 +91,7 @@ export default function BusinessSettings() {
   };
 
   const handleUpgrade = async () => {
-    if (!window.confirm('Upgrade to a Business account? This enables multisig on your Stellar wallet.')) return;
+    if (!(await confirm(t('confirm.business_upgrade', 'Upgrade to a Business account? This enables multisig on your Stellar wallet.'), { title: t('confirm.business_upgrade_title', 'Upgrade account'), confirmLabel: t('confirm.upgrade', 'Upgrade') }))) return;
     setUpgrading(true);
     try {
       await api.post('/wallet/upgrade-business');
@@ -147,6 +151,7 @@ export default function BusinessSettings() {
   };
 
   const handleRemoveSigner = async (signerPublicKey) => {
+    if (!(await confirm(t('confirm.remove_signer_business', 'Remove this signer? If no signers remain, the account reverts to personal.'), { title: t('confirm.remove_signer_title', 'Remove signer'), confirmLabel: t('confirm.remove', 'Remove') }))) return;
     setRemoving(signerPublicKey);
     try {
       await api.delete(`/wallet/signers/${signerPublicKey}`);

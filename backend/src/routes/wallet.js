@@ -2,10 +2,13 @@ const router = require('express').Router();
 const { body, param, query, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
+const { requireStepUp } = require('../middleware/requireStepUp');
+const { readLimiter, exportKeyLimiter } = require('../middleware/rateLimiter');
 const {
   getWallet,
   listWallets,
   createWalletHandler,
+  setDefaultWallet,
   getQRCode,
   getWalletTransactions,
   exportKey,
@@ -25,7 +28,6 @@ const {
   getWalletFlags,
   importTransactionHistory,
 } = require('../controllers/walletController');
-const { getContacts, addContact, deleteContact } = require('../controllers/contactsController');
 const { getStatus } = require('../services/horizonRateLimit');
 const isAdminOrOwner = require('../middleware/isAdminOrOwner');
 
@@ -36,6 +38,7 @@ const validate = (req, res, next) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 // Multi-wallet endpoints
 router.get('/list', listWallets);
@@ -44,6 +47,12 @@ router.post(
   [body('label').optional().trim().isLength({ max: 100 }).withMessage('Label must be at most 100 characters')],
   validate,
   createWalletHandler,
+);
+router.put(
+  '/default',
+  [body('wallet_id').notEmpty().isUUID().withMessage('wallet_id must be a valid UUID')],
+  validate,
+  setDefaultWallet,
 );
 
 // Single-wallet endpoints (support optional ?wallet_id query param)
@@ -54,18 +63,17 @@ router.get('/qr', getQRCode);
  * @swagger
  * /api/wallet/transactions:
  *   get:
- *     summary: "[DEPRECATED] Get wallet transactions"
+ *     summary: "[REMOVED] Get wallet transactions"
  *     description: >
- *       **Deprecated.** Use `GET /api/payments/history` instead, which
- *       supports pagination, filtering, and a consistent response shape.
- *       This endpoint will be removed in a future release.
+ *       **Removed** (sunset 2026-01-01). Always responds `410 Gone`.
+ *       Use `GET /api/payments/history` instead.
  *     deprecated: true
  *     tags: [Wallet]
  *     security:
  *       - bearerAuth: []
  *     responses:
- *       200:
- *         description: Transaction list (deprecated response shape)
+ *       410:
+ *         description: Endpoint removed; see the `Link` header for the successor
  *       401:
  *         description: Unauthorized
  */
@@ -73,6 +81,7 @@ router.get('/transactions', getWalletTransactions);
 
 router.post(
   '/export-key',
+  exportKeyLimiter,
   [
     body('password').notEmpty().withMessage('Password is required'),
     body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID'),
@@ -80,42 +89,10 @@ router.post(
     body('pin').optional().matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits'),
   ],
   validate,
+  requireStepUp,
   exportKey,
 );
 
-// Contacts
-router.get('/contacts', getContacts);
-router.post(
-  '/contacts',
-  [
-    body('name')
-      .trim()
-      .notEmpty()
-      .withMessage('Name is required')
-      .isLength({ min: 1, max: 100 })
-      .withMessage('Name must be between 1 and 100 characters'),
-    body('wallet_address')
-      .notEmpty()
-      .withMessage('Wallet address is required')
-      .custom((value) => {
-        if (!value.includes('*') && !StellarSdk.StrKey.isValidEd25519PublicKey(value))
-          throw new Error('Invalid Stellar wallet address');
-        return true;
-      }),
-    body('notes').optional({ nullable: true }).isLength({ max: 500 }).withMessage('Notes max 500 characters'),
-    body('memo_required').optional().isBoolean().withMessage('memo_required must be boolean'),
-    body('default_memo').optional({ nullable: true }).isLength({ max: 64 }).withMessage('default_memo max 64 characters'),
-    body('tags')
-      .optional()
-      .isArray()
-      .withMessage('tags must be an array')
-      .custom((arr) => arr.every((t) => typeof t === 'string' && t.length <= 50))
-      .withMessage('Each tag must be a string ≤ 50 chars'),
-  ],
-  validate,
-  addContact,
-);
-router.delete('/contacts/:id', deleteContact);
 
 // Trustline routes
 router.get('/trustlines', listTrustlines);
@@ -167,6 +144,7 @@ router.post(
     body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID'),
   ],
   validate,
+  requireStepUp,
   mergeWallet,
 );
 

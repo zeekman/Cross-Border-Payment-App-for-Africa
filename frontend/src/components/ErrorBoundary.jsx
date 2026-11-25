@@ -1,6 +1,7 @@
 import * as Sentry from '@sentry/react';
 import React, { useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
+import { withTranslation } from 'react-i18next';
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -50,33 +51,34 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.hasError) {
       const { feedbackSubmitted, feedbackSubmitting, feedbackText } = this.state;
+      const { t } = this.props;
       return (
         <div className="min-h-screen flex items-center justify-center bg-gray-950 text-white p-4">
           <div className="max-w-md w-full text-center">
-            <h1 className="text-2xl font-bold mb-2">Something went wrong.</h1>
-            <p className="text-gray-400 mb-6">An unexpected error occurred. Our team has been notified.</p>
+            <h1 className="text-2xl font-bold mb-2">{t('shared.somethingWrong', 'Something went wrong.')}</h1>
+            <p className="text-gray-400 mb-6">{t('shared.unexpectedError', 'An unexpected error occurred. Our team has been notified.')}</p>
 
             {feedbackSubmitted ? (
               <div className="bg-gray-900 rounded-2xl p-6">
-                <p className="text-primary-400 font-semibold">Thank you for your feedback!</p>
-                <p className="text-gray-400 text-sm mt-1">Your report helps us improve AfriPay.</p>
+                <p className="text-primary-400 font-semibold">{t('shared.thankYou', 'Thank you for your feedback!')}</p>
+                <p className="text-gray-400 text-sm mt-1">{t('shared.thankYouSub', 'Your report helps us improve AfriPay.')}</p>
                 <button
                   onClick={this.handleRefresh}
                   className="mt-4 bg-primary-500 hover:bg-primary-600 text-white font-semibold py-2.5 px-6 rounded-xl text-sm transition-colors"
                 >
-                  Refresh Page
+                  {t('shared.refresh', 'Refresh Page')}
                 </button>
               </div>
             ) : (
               <div className="bg-gray-900 rounded-2xl p-6 text-left">
                 <label htmlFor="feedback-textarea" className="text-sm text-gray-400 font-medium">
-                  What were you doing when this happened? (optional)
+                  {t('shared.feedbackLabel', 'What were you doing when this happened? (optional)')}
                 </label>
                 <textarea
                   id="feedback-textarea"
                   value={feedbackText}
                   onChange={this.handleFeedbackChange}
-                  placeholder="Describe what led to this error..."
+                  placeholder={t('shared.feedbackPlaceholder', 'Describe what led to this error...')}
                   className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 mt-2 resize-none"
                   rows={3}
                   maxLength={500}
@@ -86,14 +88,14 @@ class ErrorBoundary extends React.Component {
                     onClick={this.handleRefresh}
                     className="flex-1 py-2.5 rounded-xl bg-gray-800 text-gray-400 text-sm hover:text-white transition-colors"
                   >
-                    Refresh Page
+                    {t('shared.refresh', 'Refresh Page')}
                   </button>
                   <button
                     onClick={this.handleFeedbackSubmit}
                     disabled={feedbackSubmitting}
                     className="flex-1 py-2.5 rounded-xl bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white text-sm font-semibold transition-colors"
                   >
-                    {feedbackSubmitting ? 'Sending...' : 'Send Report'}
+                    {feedbackSubmitting ? t('shared.sending', 'Sending...') : t('shared.sendReport', 'Send Report')}
                   </button>
                 </div>
               </div>
@@ -119,4 +121,4 @@ function ErrorBoundaryWrapper({ children }) {
   return children;
 }
 
-export default ErrorBoundary;
+export default withTranslation()(ErrorBoundary);

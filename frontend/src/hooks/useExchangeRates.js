@@ -4,8 +4,10 @@ import {
   buildCurrencies,
   convertFromXLM as convertFromXLMUtil,
 } from '../utils/currency';
+import api from '../utils/api';
+import { useVisibleInterval } from './useVisibleInterval';
 
-const PRICES_URL = '/api/prices/xlm';
+const PRICES_PATH = '/prices/xlm';
 const TTL_MS = 60_000;
 const LS_KEY = 'afripay_xlm_fiat_rates_v1';
 
@@ -56,7 +58,8 @@ function mergeWithFallback(partial) {
 }
 
 /**
- * Live XLM fiat rates from CoinGecko, 60s TTL + localStorage fallback.
+ * Live XLM fiat rates from the backend `/prices/xlm` endpoint, 60s TTL +
+ * localStorage fallback (`usingApproximateRates` is true while on fallback).
  */
 export function useExchangeRates() {
   const stored = readStoredRates();
@@ -81,10 +84,8 @@ export function useExchangeRates() {
     }
 
     try {
-      const res = await fetch(PRICES_URL);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const mapped = mapPricesPayload(data);
+      const res = await api.get(PRICES_PATH);
+      const mapped = mapPricesPayload(res.data);
       if (!mapped) throw new Error('Invalid price payload');
 
       lastGoodRef.current = mapped;
@@ -103,9 +104,10 @@ export function useExchangeRates() {
 
   useEffect(() => {
     fetchRates();
-    const id = setInterval(fetchRates, TTL_MS);
-    return () => clearInterval(id);
   }, [fetchRates]);
+
+  // Refresh on a timer, but not while the tab is hidden (and straight away on return).
+  useVisibleInterval(fetchRates, TTL_MS);
 
   const convertFromXLM = useCallback(
     (xlmAmount, targetCurrency) =>

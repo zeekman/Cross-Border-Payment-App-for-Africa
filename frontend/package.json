@@ -2,6 +2,9 @@
   "name": "cbpa-frontend",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@headlessui/react": "^1.7.17",
     "@ledgerhq/hw-app-str": "^7.7.1",
@@ -36,7 +39,8 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "build": "DISABLE_ESLINT_PLUGIN=true react-scripts build",
+    "build": "npm run lint:build && DISABLE_ESLINT_PLUGIN=true react-scripts build",
+    "lint:build": "eslint src --ext .js,.jsx --no-eslintrc -c .eslintrc.build.js --max-warnings=0",
     "test": "react-scripts test",
     "lint": "eslint src/**/*.{js,jsx}",
     "lint:fix": "eslint src/**/*.{js,jsx} --fix",

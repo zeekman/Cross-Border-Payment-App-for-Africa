@@ -35,6 +35,8 @@ export default function Analytics() {
   const [pdfLoading, setPdfLoading] = useState(false);
   const abortRef = useRef(null);
 
+  const isAdmin = user?.role === 'admin';
+
   const fetchAnalytics = useCallback(async () => {
     // Cancel any in-flight request to prevent stale responses overwriting newer ones
     if (abortRef.current) abortRef.current.abort();
@@ -61,13 +63,12 @@ export default function Analytics() {
   /**
    * Trigger a server-side materialized-view refresh (BE-021 admin endpoint),
    * then re-fetch the analytics data.  Admin-only; the backend enforces the role
-   * check — this button is surfaced for all users but will receive 403 for non-admins.
-   * The UI gracefully surfaces the error so the button doesn't appear broken.
+   * check and the control is only rendered for admins.
    */
   const handleManualRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await api.post('/admin/analytics/refresh');
+      await api.post('/analytics/refresh');
       toast.success('Analytics data refreshed');
       // Re-fetch with fresh data
       await fetchAnalytics();
@@ -211,179 +212,110 @@ export default function Analytics() {
             className={`flex items-center justify-between gap-3 rounded-xl px-4 py-3 mb-4 border ${
               (Date.now() - refreshedAt.getTime()) / 60000 > STALE_THRESHOLD_MINUTES
                 ? 'bg-yellow-500/10 border-yellow-500/30'
-                : 'bg-gray-800 border-gray-700'
+                : 'bg-gray-800/50 border-gray-700'
             }`}
-            data-testid="analytics-timestamp-banner"
           >
-            <div className="flex items-center gap-2 min-w-0">
-              {(Date.now() - refreshedAt.getTime()) / 60000 > STALE_THRESHOLD_MINUTES && (
-                <AlertCircle
-                  size={15}
-                  className="text-yellow-400 shrink-0"
-                  aria-label="Stale data"
-                  data-testid="analytics-stale-indicator"
-                />
+            <div className="flex items-center gap-2 text-sm">
+              {(Date.now() - refreshedAt.getTime()) / 60000 > STALE_THRESHOLD_MINUTES ? (
+                <AlertCircle size={16} className="text-yellow-400 shrink-0" />
+              ) : (
+                <RefreshCw size={16} className="text-gray-400 shrink-0" />
               )}
-              <p className="text-xs text-gray-400 truncate" data-testid="analytics-refreshed-at">
-                Data as of{' '}
-                <span className="text-gray-200 font-medium">
-                  {refreshedAt.toLocaleString()}
-                </span>
-                {(Date.now() - refreshedAt.getTime()) / 60000 > STALE_THRESHOLD_MINUTES && (
-                  <span className="ml-2 text-yellow-400 font-medium">— data may be stale</span>
+              <span className="text-gray-300">
+                Data as of {refreshedAt.toLocaleString()}
+              </span>
+            </div>
+            {isAdmin && (
+              <button
+                onClick={handleManualRefresh}
+                disabled={refreshing}
+                className="flex items-center gap-1 text-xs font-medium text-primary-400 hover:text-primary-300 disabled:opacity-50"
+              >
+                {refreshing ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <RefreshCw size={14} />
                 )}
-              </p>
-            </div>
-            <button
-              onClick={handleManualRefresh}
-              disabled={refreshing || loading}
-              className="flex items-center gap-1.5 text-xs text-primary-400 hover:text-primary-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
-              title="Trigger a server-side analytics refresh (admin only)"
-              data-testid="analytics-refresh-button"
-            >
-              <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
-              {refreshing ? 'Refreshing…' : 'Refresh'}
-            </button>
+                Refresh
+              </button>
+            )}
           </div>
         )}
 
-        {/* Date range */}
-        <div className="flex gap-3 mb-6 items-end">
-          <div className="flex-1">
-            <label className="text-xs text-gray-400 mb-1 block">From</label>
-            <input
-              type="date"
-              value={range.from}
-              max={range.to}
-              onChange={(e) => setRange((r) => ({ ...r, from: e.target.value }))}
-              className="w-full bg-gray-800 text-white rounded-lg px-3 py-2 text-sm border border-gray-700 focus:outline-none focus:border-primary-500"
-            />
+        {/* ── Date range selector ── */}
+        <div className="flex items-center gap-2 mb-4">
+          <input
+            type="date"
+            value={range.from}
+            max={range.to}
+            onChange={(e) => setRange((r) => ({ ...r, from: e.target.value }))}
+            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"
+          />
+          <span className="text-gray-500">—</span>
+          <input
+            type="date"
+            value={range.to}
+            min={range.from}
+            onChange={(e) => setRange((r) => ({ ...r, to: e.target.value }))}
+            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"
+          />
+        </div>
+
+        {/* ── Summary cards ── */}
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="bg-gray-800/50 border border-gray-700 rounded-xl p-4">
+            <p className="text-xs text-gray-400 mb-1">Total Spent</p>
+            <p className="text-lg font-bold text-white">{totalSpent.toFixed(2)}</p>
           </div>
-          <div className="flex-1">
-            <label className="text-xs text-gray-400 mb-1 block">To</label>
-            <input
-              type="date"
-              value={range.to}
-              min={range.from}
-              max={toDateInput(new Date())}
-              onChange={(e) => setRange((r) => ({ ...r, to: e.target.value }))}
-              className="w-full bg-gray-800 text-white rounded-lg px-3 py-2 text-sm border border-gray-700 focus:outline-none focus:border-primary-500"
-            />
+          <div className="bg-gray-800/50 border border-gray-700 rounded-xl p-4">
+            <p className="text-xs text-gray-400 mb-1">Transactions</p>
+            <p className="text-lg font-bold text-white">{totalTransactions}</p>
           </div>
         </div>
 
-        {/* Export buttons */}
-        <div className="flex gap-3 mb-6">
-          <div title={noData ? 'No transactions in the selected range.' : undefined} className="flex-1">
-            <button
-              onClick={handleExportCSV}
-              disabled={noData || csvLoading}
-              className="w-full flex items-center justify-center gap-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium rounded-xl py-2.5 transition-colors"
-            >
-              {csvLoading
-                ? <Loader2 size={16} className="animate-spin" />
-                : <Download size={16} />}
-              Export CSV
-            </button>
-          </div>
-          <div title={noData ? 'No transactions in the selected range.' : undefined} className="flex-1">
-            <button
-              onClick={handleExportPDF}
-              disabled={noData || pdfLoading}
-              className="w-full flex items-center justify-center gap-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium rounded-xl py-2.5 transition-colors"
-            >
-              {pdfLoading
-                ? <Loader2 size={16} className="animate-spin" />
-                : <FileText size={16} />}
-              Export PDF
-            </button>
-          </div>
-        </div>
-
-        {/* Summary Cards */}
-        <div className="grid grid-cols-2 gap-3 mb-6">
-          <div className="bg-gray-800 rounded-xl p-4">
-            <p className="text-gray-400 text-xs mb-1">{t('analytics.total_spent') || 'Total Spent'}</p>
-            <p className="text-white text-lg font-bold">{totalSpent.toFixed(2)}</p>
-          </div>
-          <div className="bg-gray-800 rounded-xl p-4">
-            <p className="text-gray-400 text-xs mb-1">{t('analytics.transactions') || 'Transactions'}</p>
-            <p className="text-white text-lg font-bold">{totalTransactions}</p>
-          </div>
-        </div>
-
-        {/* Asset Breakdown */}
-        {data?.asset_breakdown && data.asset_breakdown.length > 0 && (
-          <div className="bg-gray-800 rounded-xl p-4 mb-6">
-            <h3 className="text-white font-semibold mb-3">{t('analytics.asset_breakdown') || 'Asset Breakdown'}</h3>
+        {/* ── Asset breakdown ── */}
+        {data?.asset_breakdown?.length > 0 && (
+          <div className="bg-gray-800/50 border border-gray-700 rounded-xl p-4 mb-4">
+            <h3 className="text-sm font-semibold text-white mb-3">Asset Breakdown</h3>
             <div className="space-y-2">
-              {data.asset_breakdown.map(item => (
-                <div key={item.asset} className="flex items-center justify-between">
-                  <div className="flex-1">
-                    <p className="text-sm text-gray-300">{item.asset}</p>
-                    <div className="w-full bg-gray-700 rounded-full h-2 mt-1">
-                      <div
-                        className="bg-primary-500 h-2 rounded-full"
-                        style={{ width: `${(parseFloat(item.total) / totalSpent) * 100}%` }}
-                      />
-                    </div>
-                  </div>
-                  <p className="text-sm text-white font-mono ml-2">{parseFloat(item.total).toFixed(2)}</p>
+              {data.asset_breakdown.map((item, i) => (
+                <div key={i} className="flex items-center justify-between text-sm">
+                  <span className="text-gray-300">{item.asset}</span>
+                  <span className="text-white font-medium">
+                    {parseFloat(item.total || 0).toFixed(2)} ({item.count})
+                  </span>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        {/* Top Recipients */}
-        {data?.top_recipients && data.top_recipients.length > 0 && (
-          <div className="bg-gray-800 rounded-xl p-4 mb-6">
-            <h3 className="text-white font-semibold mb-3">{t('analytics.top_recipients') || 'Top Recipients'}</h3>
-            <div className="space-y-2">
-              {data.top_recipients.map((recipient, idx) => (
-                <div key={recipient.recipient_address} className="flex items-center justify-between py-2 border-b border-gray-700 last:border-0">
-                  <div>
-                    <p className="text-xs text-gray-400">#{idx + 1}</p>
-                    <p className="text-xs text-gray-300 font-mono">{recipient.recipient_address.slice(0, 16)}...</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm text-white font-semibold">{parseFloat(recipient.total_amount).toFixed(2)}</p>
-                    <p className="text-xs text-gray-400">{recipient.count} {t('analytics.transactions_label') || 'txs'}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
+        {noData && (
+          <div className="text-center py-12 text-gray-500">
+            <FileText size={32} className="mx-auto mb-2 opacity-50" />
+            <p className="text-sm">No transaction data in selected range</p>
           </div>
         )}
 
-        {/* Monthly Activity */}
-        {data?.transaction_frequency && data.transaction_frequency.length > 0 && (
-          <div className="bg-gray-800 rounded-xl p-4">
-            <h3 className="text-white font-semibold mb-3">{t('analytics.monthly_activity') || 'Monthly Activity'}</h3>
-            <div className="space-y-2">
-              {data.transaction_frequency.slice(0, 10).map(item => (
-                <div key={item.date} className="flex items-center justify-between">
-                  <p className="text-xs text-gray-400">{new Date(item.date).toLocaleDateString()}</p>
-                  <div className="flex items-center gap-2">
-                    <div className="w-24 bg-gray-700 rounded h-1.5">
-                      <div
-                        className="bg-primary-500 h-1.5 rounded"
-                        style={{ width: `${Math.min((item.count / 10) * 100, 100)}%` }}
-                      />
-                    </div>
-                    <p className="text-xs text-gray-300 w-6 text-right">{item.count}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {(!data || (data.asset_breakdown?.length === 0 && data.top_recipients?.length === 0)) && (
-          <div className="text-center py-12">
-            <p className="text-gray-400">{t('analytics.no_data') || 'No analytics data available'}</p>
-          </div>
-        )}
+        {/* ── Export actions ── */}
+        <div className="flex gap-3 mt-6">
+          <button
+            onClick={handleExportCSV}
+            disabled={csvLoading || noData}
+            className="flex-1 flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 border border-gray-700 rounded-lg px-4 py-2.5 text-sm text-white"
+          >
+            {csvLoading ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+            CSV
+          </button>
+          <button
+            onClick={handleExportPDF}
+            disabled={pdfLoading || noData}
+            className="flex-1 flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 border border-gray-700 rounded-lg px-4 py-2.5 text-sm text-white"
+          >
+            {pdfLoading ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
+            PDF
+          </button>
+        </div>
       </div>
     </>
   );

@@ -7,12 +7,13 @@ const {
   refresh,
   logout,
   verifyEmail,
+  resendVerification,
   verifyPhone,
-  getMe,
   updateProfile,
   changeEmail,
   verifyEmailChange,
   getActivity,
+  getMe,
   uploadAvatar,
   setPIN,
   verifyPIN,
@@ -107,7 +108,17 @@ router.get('/reset-password/validate', validateResetToken);
 router.post('/refresh', verifyCsrf, refresh);
 router.post('/logout', verifyCsrf, logout);
 
-router.get('/verify-email', verifyEmail);
+// Token-bearing endpoints: POST is preferred; GET variants are deprecated.
+const noReferrer = (_req, res, next) => { res.set('Referrer-Policy', 'no-referrer'); next(); };
+const deprecatedGet = (_req, res, next) => { res.set('Deprecation', 'true'); next(); };
+router.post('/verify-email', noReferrer, [body('token').trim().notEmpty()], validate, verifyEmail);
+router.get('/verify-email', noReferrer, deprecatedGet, verifyEmail);
+router.post(
+  '/resend-verification',
+  [body('email').isEmail().normalizeEmail()],
+  validate,
+  resendVerification
+);
 router.post(
   '/verify-phone',
   authMiddleware,
@@ -127,7 +138,8 @@ router.post(
   validate,
   changeEmail
 );
-router.get('/verify-email-change', verifyEmailChange);
+router.post('/verify-email-change', noReferrer, [body('token').trim().notEmpty()], validate, verifyEmailChange);
+router.get('/verify-email-change', noReferrer, deprecatedGet, verifyEmailChange);
 router.get('/activity', authMiddleware, getActivity);
 router.post('/onboarding-completed', authMiddleware, completeOnboarding);
 

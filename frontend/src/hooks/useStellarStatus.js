@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import * as Sentry from '@sentry/react';
+import { useVisibleInterval } from './useVisibleInterval';
 
 const STATUS_API_URL = 'https://status.stellar.org/api/v2/status.json';
 const POLL_INTERVAL = 5 * 60 * 1000; // 5 minutes
@@ -42,7 +43,6 @@ export function useStellarStatus() {
   const [error, setError] = useState(null);
   const [isDegraded, setIsDegraded] = useState(false);
   const [isStale, setIsStale] = useState(false);
-  const intervalRef = useRef(null);
 
   const checkStatus = async (skipCache = false) => {
     try {
@@ -131,18 +131,11 @@ export function useStellarStatus() {
   useEffect(() => {
     // Initial check — use cache if available and fresh
     checkStatus();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- check once on mount; the fetcher reads refs
 
-    // Set up polling — always skip cache so the interval always fetches fresh
-    intervalRef.current = setInterval(() => {
-      checkStatus(true);
-    }, POLL_INTERVAL);
-
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Poll for fresh status (always skipping the cache), but not while the tab is hidden;
+  // coming back to the tab refreshes straight away.
+  useVisibleInterval(() => checkStatus(true), POLL_INTERVAL);
 
   return { status, loading, error, isDegraded, isStale, refetch: () => checkStatus(true) };
 }

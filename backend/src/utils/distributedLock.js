@@ -1,25 +1,10 @@
-const Redis = require('ioredis');
 const crypto = require('crypto');
 const logger = require('./logger');
+const { getRedisClient } = require('./redisClient');
 const { distributedLockRenewalFailuresTotal, distributedLockLostTotal } = require('./metrics');
 
-let client = null;
-
 function getClient() {
-  if (client) return client;
-  if (!process.env.REDIS_URL) return null;
-
-  client = new Redis(process.env.REDIS_URL, {
-    lazyConnect: true,
-    enableOfflineQueue: false,
-    maxRetriesPerRequest: 1,
-  });
-
-  client.on('error', (err) => {
-    logger.warn('Redis error in distributed lock', { error: err.message });
-  });
-
-  return client;
+  return getRedisClient(); // null in single-instance mode (no REDIS_URL)
 }
 
 // Lua script: only delete the key if the value matches (atomic check-and-delete)
@@ -40,7 +25,7 @@ const RENEW_SCRIPT = `
   end
 `;
 
-async function acquireLock(lockKey, ttlSeconds, lockValue) {
+async function acquireLock(lockKey, ttlSeconds, lockValue, { throwOnError = false } = {}) {
   const redis = getClient();
   if (!redis) return true; // single-instance mode: no lock needed
   try {
@@ -48,6 +33,13 @@ async function acquireLock(lockKey, ttlSeconds, lockValue) {
     return result === 'OK';
   } catch (err) {
     logger.warn('Failed to acquire distributed lock', { lockKey, error: err.message });
+    // BE-173: let callers distinguish "Redis unavailable" from "lock held".
+    if (throwOnError) {
+      throw Object.assign(new Error('Payment lock service is temporarily unavailable. Please try again.'), {
+        status: 503,
+        payload: { code: 'LOCK_UNAVAILABLE' },
+      });
+    }
     return false;
   }
 }
@@ -93,11 +85,13 @@ async function renewLock(lockKey, lockValue, ttlSeconds) {
  * @param {string} lockKey
  * @param {number} ttlSeconds - initial TTL and the value each renewal re-applies
  * @param {(ctx: { isLockLost: () => boolean }) => Promise<any>} fn
+ * @param {{ throwOnError?: boolean }} [options] - throwOnError: throw a 503
+ *   LOCK_UNAVAILABLE error instead of returning false when Redis fails
  * @returns {Promise<boolean>} true if the lock was acquired and fn ran
  */
-async function withLock(lockKey, ttlSeconds, fn) {
+async function withLock(lockKey, ttlSeconds, fn, options = {}) {
   const lockValue = crypto.randomBytes(16).toString('hex');
-  const acquired = await acquireLock(lockKey, ttlSeconds, lockValue);
+  const acquired = await acquireLock(lockKey, ttlSeconds, lockValue, options);
   if (!acquired) return false;
 
   let lockLost = false;

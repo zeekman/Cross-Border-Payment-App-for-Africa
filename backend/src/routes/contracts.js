@@ -62,6 +62,56 @@ async function getContractEventsHandler(req, res, next) {
 router.get('/:contractId/events', getContractEventsHandler);
 
 /**
+ * GET /api/contracts/:contractId/state
+ * Returns a curated contract status (version, admin, paused flag) for the
+ * dashboard contract-state inspector. Values are derived from the indexed
+ * contract events so the endpoint works without a live Soroban RPC call.
+ *
+ * @param {string} contractId - The Soroban contract ID
+ */
+async function getContractStateHandler(req, res, next) {
+  try {
+    const { contractId } = req.params;
+
+    if (!contractId.match(/^C[A-Z0-9]{55}$/)) {
+      return res.status(400).json({ error: 'Invalid contract ID format' });
+    }
+
+    const result = await getContractEvents(contractId, {
+      eventType: null,
+      limit: 500,
+      offset: 0,
+      from: null,
+      to: null,
+    });
+
+    const events = result.events || [];
+    const latest = events[0] || null;
+
+    const versionEvent = events.find((e) => e.event_type === 'version' || e.eventType === 'version');
+    const adminEvent = events.find((e) => e.event_type === 'admin' || e.eventType === 'admin');
+    const pauseEvent = events.find(
+      (e) => e.event_type === 'paused' || e.eventType === 'paused' || e.event_type === 'unpaused' || e.eventType === 'unpaused'
+    );
+
+    const pausedType = pauseEvent ? pauseEvent.event_type || pauseEvent.eventType : null;
+
+    res.json({
+      contract_id: contractId,
+      version: versionEvent ? versionEvent.data && versionEvent.data.version : null,
+      admin: adminEvent ? adminEvent.data && adminEvent.data.admin : null,
+      paused: pausedType === 'paused',
+      last_event_at: latest ? latest.created_at || latest.createdAt || null : null,
+      event_count: result.total,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+router.get('/:contractId/state', getContractStateHandler);
+
+/**
  * POST /api/contracts/escrow/:id/partial-release
  * Releases part of a pending agent escrow to the agent (issue #657).
  */

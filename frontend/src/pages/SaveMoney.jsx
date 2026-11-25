@@ -4,6 +4,8 @@ import { ArrowLeft, PiggyBank, Clock, Unlock } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import useStepUp from '../hooks/useStepUp';
+import { useVisibleInterval } from '../hooks/useVisibleInterval';
 
 /** Calculate remaining seconds from now until unlockTimestamp (unix seconds). */
 function secondsUntil(unlockTimestamp) {
@@ -27,18 +29,16 @@ function formatCountdown(secs) {
 
 /**
  * Per-vault countdown component.
- * Ticks every second; cleans up on unmount.
+ * Ticks every second while the tab is visible; each tick recomputes from the unlock
+ * time, so it shows the right value as soon as the tab is visible again.
  */
 function VaultCountdown({ unlockTimestamp, balance }) {
   const [secs, setSecs] = useState(() => secondsUntil(unlockTimestamp));
 
-  useEffect(() => {
-    if (secs <= 0) return;
-    const id = setInterval(() => {
-      setSecs(secondsUntil(unlockTimestamp));
-    }, 1000);
-    return () => clearInterval(id);
-  }, [unlockTimestamp]); // eslint-disable-line react-hooks/exhaustive-deps
+  useVisibleInterval(() => setSecs(secondsUntil(unlockTimestamp)), 1000, {
+    enabled: secs > 0,
+    resetKey: unlockTimestamp,
+  });
 
   const unlocked = secs <= 0;
   const penalty = (parseFloat(balance) * 0.1).toFixed(7);
@@ -86,6 +86,7 @@ function VaultCountdown({ unlockTimestamp, balance }) {
 }
 
 export default function SaveMoney() {
+  const { requestStepUp, stepUpModal } = useStepUp();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const [form, setForm] = useState({ amount: '', lock_period_days: '30' });
@@ -125,13 +126,15 @@ export default function SaveMoney() {
       return;
     }
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     setLoading(true);
     try {
       await api.post('/savings', {
         amount: amountXLM,
         asset: 'XLM',
         lock_period_days: parseInt(form.lock_period_days, 10),
-      });
+      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success(`Savings vault created! ${form.amount} XLM locked for ${form.lock_period_days} days`);
       setForm({ amount: '', lock_period_days: '30' });
       fetchVaults();
@@ -271,6 +274,7 @@ export default function SaveMoney() {
           </button>
         </form>
       </div>
+      {stepUpModal}
     </div>
   );
 }

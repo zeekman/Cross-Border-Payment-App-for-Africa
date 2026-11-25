@@ -20,15 +20,26 @@ exports.up = (pgm) => {
     asset: { type: 'varchar(12)', notNull: true, default: "'XLM'" },
     memo: { type: 'varchar(128)' },
     memo_type: { type: 'varchar(10)' },
-    // When the payment should be executed
-    scheduled_at: { type: 'timestamptz', notNull: true },
-    // Lifecycle: pending -> processing -> completed | failed
+    // When the payment should be executed (first run, set by the user)
+    execute_at: { type: 'timestamptz', notNull: true },
+    // Recurrence: none | daily | weekly | monthly
+    frequency: {
+      type: 'varchar(20)',
+      notNull: true,
+      default: "'none'",
+      check: "frequency IN ('none','daily','weekly','monthly')",
+    },
+    // Authoritative next run time for the job runner (BE-126)
+    next_run_at: { type: 'timestamptz', notNull: true },
+    // Lifecycle: pending -> processing -> completed | failed | cancelled
     status: {
       type: 'varchar(20)',
       notNull: true,
       default: "'pending'",
-      check: "status IN ('pending','processing','completed','failed')",
+      check: "status IN ('pending','processing','completed','failed','cancelled')",
     },
+    // Whether the schedule is active (not paused/cancelled)
+    active: { type: 'boolean', notNull: true, default: true },
     // Retry tracking
     retry_count: { type: 'int', notNull: true, default: 0 },
     last_error: { type: 'text' },
@@ -41,13 +52,13 @@ exports.up = (pgm) => {
   pgm.createIndex('scheduled_payments', 'user_id', {
     name: 'idx_scheduled_payments_user',
   });
-  pgm.createIndex('scheduled_payments', ['status', 'scheduled_at'], {
+  pgm.createIndex('scheduled_payments', ['status', 'next_run_at'], {
     name: 'idx_scheduled_payments_due',
   });
 };
 
 exports.down = (pgm) => {
-  pgm.dropIndex('scheduled_payments', ['status', 'scheduled_at'], {
+  pgm.dropIndex('scheduled_payments', ['status', 'next_run_at'], {
     name: 'idx_scheduled_payments_due',
   });
   pgm.dropIndex('scheduled_payments', 'user_id', {

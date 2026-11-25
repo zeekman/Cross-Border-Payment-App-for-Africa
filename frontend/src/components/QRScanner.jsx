@@ -3,6 +3,7 @@ import { QrReader } from 'react-qr-reader';
 import { X, AlertCircle, Camera, Smartphone } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import { parseScannedPayment } from '../utils/parseScannedPayment';
 
 /**
  * Detect the current browser/platform context.
@@ -98,15 +99,16 @@ export default function QRScanner({ isOpen, onClose, onScan }) {
 
   const handleScan = (result) => {
     if (result?.text) {
-      // Validate it looks like a Stellar address (starts with 'G' and is 56 chars)
-      const address = result.text.trim();
-      if (address.startsWith('G') && address.length === 56) {
+      try {
+        const payment = parseScannedPayment(result.text);
         toast.success(t('send.qr_scanned'));
-        onScan(address);
+        // Second argument carries any SEP-7 amount/memo/asset fields.
+        onScan(payment.destination, payment);
         onClose();
-      } else {
-        setError(t('send.qr_invalid'));
-        toast.error(t('send.qr_invalid'));
+      } catch (err) {
+        const message = err.code === 'unsupported_uri' ? t('send.qr_unsupported_uri') : t('send.qr_invalid');
+        setError(message);
+        toast.error(message);
       }
     }
   };

@@ -1,14 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Code, Copy, Check, ExternalLink } from 'lucide-react';
-import { TransactionBuilder, Networks } from '@stellar/stellar-sdk';
+import { useTranslation } from 'react-i18next';
+import { TransactionBuilder } from '@stellar/stellar-sdk';
+// FE-129: Import from the shared network config instead of deriving inline.
+import { NETWORK_PASSPHRASE, NETWORK_LABEL } from '../config/network';
 
-const NETWORK = process.env.REACT_APP_STELLAR_NETWORK === 'mainnet'
-  ? 'public'
-  : 'testnet';
-
-const NETWORK_PASSPHRASE = NETWORK === 'public'
-  ? Networks.PUBLIC
-  : Networks.TESTNET;
+// Keep a local alias so the rest of this file reads naturally.
+const NETWORK = NETWORK_LABEL;
 
 function formatMemo(memo) {
   if (!memo || memo.type === 'none') return null;
@@ -107,6 +105,7 @@ function decodeXdr(xdr) {
 }
 
 export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState('decoded');
   const [decoded, setDecoded] = useState(null);
   const [decodeError, setDecodeError] = useState(null);
@@ -191,13 +190,13 @@ export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
           <div className="flex items-center gap-2">
             <Code size={20} className="text-primary-400" />
             <h3 id="xdr-modal-title" className="text-lg font-bold text-white">
-              Transaction XDR Inspector
+              {t('shared.xdrTitle', 'Transaction XDR Inspector')}
             </h3>
           </div>
           <button
             ref={closeButtonRef}
             onClick={onClose}
-            aria-label="Close modal"
+            aria-label={t('shared.closeModal', 'Close modal')}
             className="text-gray-400 hover:text-white transition-colors"
           >
             <X size={20} />
@@ -214,7 +213,7 @@ export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
                 : 'text-gray-400 hover:text-white'
             }`}
           >
-            Decoded
+            {t('shared.decoded', 'Decoded')}
           </button>
           <button
             onClick={() => setActiveTab('raw')}
@@ -224,7 +223,7 @@ export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
                 : 'text-gray-400 hover:text-white'
             }`}
           >
-            Raw XDR
+            {t('shared.rawXdr', 'Raw XDR')}
           </button>
         </div>
 
@@ -239,27 +238,27 @@ export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
           {activeTab === 'decoded' && decoded && (
             <div className="space-y-4">
               <div className="bg-gray-800 rounded-lg p-4">
-                <p className="text-xs text-gray-400 mb-1">Source Account</p>
+                <p className="text-xs text-gray-400 mb-1">{t('shared.sourceAccount', 'Source Account')}</p>
                 <p className="text-sm text-white font-mono break-all">{decoded.sourceAccount}</p>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-gray-800 rounded-lg p-4">
-                  <p className="text-xs text-gray-400 mb-1">Fee</p>
+                  <p className="text-xs text-gray-400 mb-1">{t('shared.fee', 'Fee')}</p>
                   <p className="text-sm text-white font-mono">
                     {decoded.fee} stroops
                     <span className="text-gray-400 ml-1">({decoded.feeXlm} XLM)</span>
                   </p>
                 </div>
                 <div className="bg-gray-800 rounded-lg p-4">
-                  <p className="text-xs text-gray-400 mb-1">Sequence Number</p>
+                  <p className="text-xs text-gray-400 mb-1">{t('shared.sequence', 'Sequence Number')}</p>
                   <p className="text-sm text-white font-mono">{decoded.sequence}</p>
                 </div>
               </div>
 
               {decoded.memo && (
                 <div className="bg-gray-800 rounded-lg p-4">
-                  <p className="text-xs text-gray-400 mb-1">Memo</p>
+                  <p className="text-xs text-gray-400 mb-1">{t('shared.memo', 'Memo')}</p>
                   <p className="text-sm text-white">{decoded.memo}</p>
                 </div>
               )}
@@ -289,7 +288,7 @@ export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
 
               {decoded.hash && (
                 <div className="bg-gray-800 rounded-lg p-4">
-                  <p className="text-xs text-gray-400 mb-1">Transaction Hash</p>
+                  <p className="text-xs text-gray-400 mb-1">{t('shared.txHash', 'Transaction Hash')}</p>
                   <p className="text-xs text-white font-mono break-all">{decoded.hash}</p>
                 </div>
               )}
@@ -302,7 +301,7 @@ export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
                   className="flex items-center gap-2 text-sm text-primary-400 hover:text-primary-300 transition-colors"
                 >
                   <ExternalLink size={14} />
-                  View on Stellar Expert
+                  {t('shared.viewExplorer', 'View on Stellar Expert')}
                 </a>
               )}
             </div>
@@ -311,7 +310,7 @@ export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
           {activeTab === 'raw' && (
             <div>
               {!xdr ? (
-                <p className="text-center text-gray-500 py-8">No XDR data available</p>
+                <p className="text-center text-gray-500 py-8">{t('shared.noXdr', 'No XDR data available')}</p>
               ) : (
                 <pre className="text-xs text-gray-300 bg-gray-800 rounded-lg p-4 overflow-x-auto whitespace-pre-wrap break-all">
                   {xdr}
@@ -321,7 +320,7 @@ export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
           )}
 
           {activeTab === 'decoded' && !decoded && !decodeError && (
-            <p className="text-center text-gray-500 py-8">No XDR data available</p>
+            <p className="text-center text-gray-500 py-8">{t('shared.noXdr', 'No XDR data available')}</p>
           )}
         </div>
 
@@ -333,13 +332,13 @@ export default function XDRInspectorModal({ isOpen, onClose, xdr, txHash }) {
             className="flex items-center gap-2 px-4 py-2.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl transition-colors text-sm"
           >
             {copied ? <Check size={16} className="text-green-400" /> : <Copy size={16} />}
-            {copied ? 'Copied!' : 'Copy XDR'}
+            {copied ? t('shared.copied', 'Copied!') : t('shared.copyXdr', 'Copy XDR')}
           </button>
           <button
             onClick={onClose}
             className="flex-1 py-2.5 bg-gray-800 hover:bg-gray-700 text-white rounded-xl transition-colors"
           >
-            Close
+            {t('shared.close', 'Close')}
           </button>
         </div>
       </div>

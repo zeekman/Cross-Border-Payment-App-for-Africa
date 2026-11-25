@@ -2,6 +2,8 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const { PENALTY_BPS, calculateEarlyWithdrawalPenalty } = require('../utils/savingsPenalty');
 
+const SUPPORTED_ASSETS = ['XLM', 'USDC'];
+
 async function create(req, res, next) {
   try {
     const { amount, asset = 'XLM', lock_period_days } = req.body;
@@ -11,9 +13,40 @@ async function create(req, res, next) {
       return res.status(400).json({ error: 'Amount must be greater than 0' });
     }
 
+    if (!SUPPORTED_ASSETS.includes(asset)) {
+      return res.status(400).json({ error: `Asset must be one of ${SUPPORTED_ASSETS.join(', ')}` });
+    }
+
     const lockPeriodDays = parseInt(lock_period_days, 10);
     if (![7, 30, 90, 180, 365].includes(lockPeriodDays)) {
       return res.status(400).json({ error: 'Invalid lock period' });
+    }
+
+    // Vault amount plus funds already locked in other vaults must not exceed the wallet balance.
+    const wallet = await db.query(
+      'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
+      [userId]
+    );
+    if (!wallet.rows[0]) {
+      return res.status(404).json({ error: 'Wallet not found' });
+    }
+    const locked = await db.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM savings_vaults
+       WHERE user_id = $1 AND asset = $2 AND status = 'locked'`,
+      [userId, asset]
+    );
+    const { checkSufficientBalance } = require('./paymentController');
+    try {
+      await checkSufficientBalance(
+        wallet.rows[0].public_key,
+        parseFloat(amount) + parseFloat(locked.rows[0].total),
+        asset
+      );
+    } catch (balanceErr) {
+      if (balanceErr.status === 400) {
+        return res.status(400).json({ error: balanceErr.message, ...balanceErr.payload });
+      }
+      throw balanceErr;
     }
 
     const id = uuidv4();
@@ -120,13 +153,20 @@ async function withdraw(req, res, next) {
     const penalty = isEarly ? calculateEarlyWithdrawalPenalty(v.amount) : 0;
     const payout = parseFloat(v.amount) - penalty;
 
-    await db.query(
-      `UPDATE savings_vaults SET status = 'withdrawn', withdrawn_at = NOW(), early_withdrawal = $1, penalty_amount = $2 WHERE id = $3`,
+    // Conditional update so concurrent withdrawals can't both succeed.
+    const updated = await db.query(
+      `UPDATE savings_vaults SET status = 'withdrawn', withdrawn_at = NOW(), early_withdrawal = $1, penalty_amount = $2
+       WHERE id = $3 AND status = 'locked' RETURNING id`,
       [isEarly, penalty, id]
     );
+    if (!updated.rows.length) {
+      return res.status(400).json({ error: 'Vault already withdrawn' });
+    }
 
     res.json({
-      message: isEarly ? 'Early withdrawal processed with 10% penalty' : 'Vault withdrawn successfully',
+      message: isEarly
+        ? `Early withdrawal processed with ${PENALTY_BPS / 100}% penalty`
+        : 'Vault withdrawn successfully',
       vault: {
         id: v.id,
         amount: v.amount,

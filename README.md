@@ -171,7 +171,11 @@ Sender → [approve USDC transfer] → Backend → [sign with keypair]
 
 ---
 
+## Getting Started
 
+### Prerequisites
+
+- Node.js 22 LTS or newer (pinned in `.nvmrc` — run `nvm use`)
 - A Stellar testnet account (auto-created on registration)
 
 ### 1. Database
@@ -503,3 +507,29 @@ MIT
 
 <!-- handsoff-issue-1130 -->
 - #1130: [SC-125] dispute-resolution: panel quorum is computed against the *current* panel size, so adding/removing arbitrators mid-dispute changes outcomes
+
+<!-- handsoff-issue-1198 -->
+- #1198: [FE-110] Batch payments poll `/payments/batch/:id/status` and call `/payments/batch/:id/retry`, neither of which exist — polling runs forever
+<!-- handsoff-issue-1203 -->
+- #1203: [FE-115] Contract-address (C…) simulation in Send Money calls `/payments/build` and `/contracts/simulate`, which don't exist — and the branch is unreachable
+
+<!-- handsoff-issue-1204 -->
+- #1204: [FE-116] Online payments are sent without an `Idempotency-Key`, so retrying after a timeout can send money twice
+
+<!-- handsoff-issue-1205 -->
+- #1205: [FE-117] Federation addresses (`name*domain`) are resolved only after PIN confirmation — the user never sees the G-address they're paying
+<!-- handsoff-issue-1192 -->
+- #1192: [FE-104] "Back up secret key" in Profile always fails: it sends only the password, but the backend requires a PIN or TOTP
+
+<!-- handsoff-issue-1193 -->
+- #1193: [FE-105] 2FA setup shows backup codes that don't work; the real codes returned by `/2fa/verify` are discarded
+<!-- handsoff-issue-1202 -->
+- #1202: [FE-114] Send Money's trustline pre-check calls a non-existent endpoint and silently hides the "no trustline" warning
+<!-- handsoff-issue-1140 -->
+- #1140: [SC-135] loyalty-token: `redeem` burns points but records no entitlement or event, so the backend cannot verify a discount was paid for
+
+<!-- handsoff-issue-1178 -->
+- #1178: [BE-132] `POST /api/auth/2fa/disable` only requires the password — no TOTP confirmation and no notification
+
+<!-- handsoff-issue-1280 -->
+- #1280: [BE-148] `POST /api/auth/refresh` always returns 500 — malformed SELECT list (`u.role` followed by a duplicated column line without a comma)

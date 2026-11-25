@@ -27,6 +27,7 @@ The escrow lifecycle is:
 - `Pending` → `Released` when the assigned agent calls `release_escrow` or fully settles the escrow with `partial_release`
 - `Pending` → `Cancelled` when the original sender calls `cancel_escrow`
 - `Pending` → `UnderDispute` when the sender or recipient calls `dispute_escrow`, handing the full balance to the dispute-resolution contract for arbitration
+- `UnderDispute` → `Cancelled` (sender won) or `Released` (agent or recipient won) when the dispute contract settles the dispute and calls `close_disputed_escrow` (#1367)
 
 Completed or cancelled escrow records may be archived after a configurable retention period to limit persistent storage growth.
 
@@ -103,20 +104,23 @@ fn create_escrow(
     recipient: Address,
     agent: Address,
     amount: i128,
-    release_fee_bps: u32,
+    max_fee_bps: u32,
 ) -> u64
 ```
 
 Description:
 - Creates a new escrow entry and transfers USDC from the sender to the contract.
 - Stores sender, recipient, agent, amount, fee, status, timestamps, and expiry.
+- The escrow's `release_fee_bps` is always the admin-configured platform fee
+  (`get_fee_bps`). The caller cannot choose it (#1364).
 
 Parameters:
 - `sender` (`Address`) - originator who must authorize the transfer.
 - `recipient` (`Address`) - the intended final beneficiary.
 - `agent` (`Address`) - the account that can release the escrow.
 - `amount` (`i128`) - USDC amount in stroops (`1 USDC = 10^7 stroops`).
-- `release_fee_bps` (`u32`) - release fee in basis points (max 5000).
+- `max_fee_bps` (`u32`) - slippage guard: the highest platform fee the sender
+  accepts. The call fails if the configured fee is higher.
 
 Returns:
 - `u64` - the newly created escrow ID.
@@ -126,13 +130,27 @@ Authorization:
 
 Panics / Errors:
 - `Amount below minimum (100 stroops)` if `amount < 100`.
-- `Fee cannot be 100%` if `release_fee_bps == 10000`.
-- `Fee exceeds maximum of 5000 bps (50%)` if `release_fee_bps > 5000`.
+- `Platform fee exceeds max_fee_bps` if the configured fee is above `max_fee_bps`.
 - `Sender, recipient, and agent must be distinct addresses` if any two roles overlap.
 - Panics from the underlying USDC token transfer if the sender has insufficient allowance or balance.
 
 Events:
 - `EscrowCreated`
+
+---
+
+### `set_fee_bps` / `get_fee_bps`
+
+```rust
+fn set_fee_bps(env: Env, admin: Address, fee_bps: u32)
+fn get_fee_bps(env: Env) -> u32
+```
+
+- Admin-only setter for the platform fee applied to **new** escrows. Defaults
+  to 250 bps (2.5%) at `initialize`.
+- Panics with `Fee exceeds maximum of 1000 bps (10%)` if `fee_bps > 1000`.
+- Existing escrows keep the fee they were created with.
+- Emits `PlatformFeeUpdated { old_fee_bps, new_fee_bps }`.
 
 ---
 
@@ -491,12 +509,23 @@ Signature:
 fn dispute_escrow(env: Env, caller: Address, escrow_id: u64) -> u64
 ```
 
-Escalates a pending escrow to the configured dispute-resolution contract. Only
-the **sender** or **recipient** may call (auth required). The full remaining
+Escalates a pending escrow to the configured dispute-resolution contract. The
+**sender** or **recipient** may call (auth required) — but once the agent has
+called `confirm_delivery`, only the **recipient** may, which stops a sender from
+reclaiming funds after the agent has paid out fiat (#1366). The full remaining
 balance is transferred to the dispute-resolution contract, which records a
 dispute and takes custody of the funds; the escrow is marked `UnderDispute`
 and can no longer be released, cancelled, deposited into, or expired. The
 adjudicated winner is paid directly by the dispute-resolution contract.
+
+The caller also pays the dispute-resolution contract's **filing fee**
+(default 50 USDC) from their own balance — not from the escrowed funds. The
+fee is refunded if they win, forfeited to the fee distributor if they lose,
+and refunded if the dispute expires unresolved. This deters frivolous
+disputes.
+The agent is registered as a dispute party: it can submit evidence, appeal, and
+be awarded the funds. If the agent had confirmed delivery and the dispute
+expires unresolved, the agent (not the sender) claims the funds.
 
 Returns the dispute ID assigned by the dispute-resolution contract.
 
@@ -505,9 +534,31 @@ Panics / Errors:
 - `Escrow {id} not found` if the escrow does not exist.
 - `Only the sender or recipient can dispute escrow` if the caller is neither.
 - `Escrow is not in pending state` if the escrow is no longer pending.
+- `Insufficient balance for dispute filing fee` if the caller cannot pay the fee.
+- `Delivery confirmed: only the recipient can dispute` if the sender calls after `confirm_delivery`.
 
 Events:
 - `EscrowDisputed`
+
+### `close_disputed_escrow` / `get_escrow_dispute` / `get_escrow_dispute_winner`
+
+```rust
+fn close_disputed_escrow(env: Env, escrow_id: u64, winner: Address)
+fn get_escrow_dispute(env: Env, escrow_id: u64) -> Option<EscrowDispute>
+fn get_escrow_dispute_winner(env: Env, escrow_id: u64) -> Option<Address>
+```
+
+- `dispute_escrow` stores an `EscrowDispute { dispute_contract, dispute_id }`
+  record for the escrow.
+- When the dispute is settled (finalized, appeal resolved, panel quorum, or
+  expired), the dispute contract pays the winner and calls
+  `close_disputed_escrow`. Only that dispute contract may call it
+  (`dispute_contract.require_auth()`).
+- The escrow moves to `Cancelled` if the winner is the sender, otherwise
+  `Released`, and the winner is stored. Emits `EscrowDisputeClosed
+  { escrow_id, dispute_id, winner, status }`.
+- The escrow is then eligible for `cleanup_escrow`, which also removes the
+  dispute record.
 
 ### Dispute-resolution setup
 
@@ -578,7 +629,9 @@ Fields:
 - `escrow_id` (`u64`) - escrow identifier.
 - `dispute_id` (`u64`) - dispute ID assigned by the dispute-resolution contract.
 - `opener` (`Address`) - sender or recipient who escalated the escrow.
+- `agent` (`Address`) - payout agent, registered as a dispute party.
 - `amount` (`i128`) - balance handed over to the dispute-resolution contract.
+- `payout_confirmed` (`bool`) - whether the agent had confirmed delivery.
 
 ### `PartialRelease`
 
@@ -609,6 +662,9 @@ This contract stores state under the following `DataKey` variants in persistent 
 - `DataKey::Escrow(u64)` -> `Escrow`
 - `DataKey::DisputeContractAddress` -> `Address` (dispute-resolution contract used by `dispute_escrow`)
 - `DataKey::ContractVersion` -> `u32`
+- `DataKey::PlatformFeeBps` -> `u32` (fee applied to new escrows; see `set_fee_bps`)
+- `DataKey::EscrowDispute(u64)` -> `EscrowDispute` (dispute contract + dispute ID of a disputed escrow)
+- `DataKey::EscrowDisputeWinner(u64)` -> `Address` (party paid by the dispute, once settled)
 
 ### `Escrow` struct layout
 
@@ -685,13 +741,15 @@ function addressToScVal(address) {
   return xdr.ScVal.scvAddress(xdr.ScAddress.publicKeyTypeEd25519(address));
 }
 
-async function createEscrow(senderKeypair, recipientAddress, agentAddress, amountStroops, feeBps) {
+// maxFeeBps is a guard, not the fee: the contract applies its configured
+// platform fee (get_fee_bps) and rejects the call if that is above maxFeeBps.
+async function createEscrow(senderKeypair, recipientAddress, agentAddress, amountStroops, maxFeeBps) {
   const args = [
     addressToScVal(senderKeypair.publicKey()),
     addressToScVal(recipientAddress),
     addressToScVal(agentAddress),
     xdr.ScVal.scvI128(amountStroops.toString()),
-    xdr.ScVal.scvU32(feeBps),
+    xdr.ScVal.scvU32(maxFeeBps),
   ];
 
   return invokeContract(senderKeypair, 'create_escrow', args);
@@ -701,7 +759,7 @@ async function createEscrow(senderKeypair, recipientAddress, agentAddress, amoun
 ### Recommended call flow
 
 1. Deploy and initialize the contract with `initialize(admin, usdc_address)`.
-2. Call `create_escrow(sender, recipient, agent, amount, release_fee_bps)`.
+2. Call `create_escrow(sender, recipient, agent, amount, max_fee_bps)`.
 3. Optionally call `deposit(sender, escrow_id, amount)` to add funds.
 4. Call `confirm_delivery(agent, escrow_id)` after the agent confirms off-chain payout.
 5. Call `partial_release(agent, escrow_id, amount)` to release funds in installments, or `release_escrow(agent, escrow_id)` to release the remaining balance.
@@ -782,8 +840,8 @@ soroban contract deploy \
 - `cancel_escrow`: `sender.require_auth()` + sender address match.
 - `withdraw_fees`: `admin.require_auth()` + stored admin match.
 - `dispute_escrow`: `require_auth()` + caller must be the escrow sender or recipient.
-- `upgrade`, `migrate`, `set_retention_period`, `cleanup_escrow`, `update_fee`, `set_kyc_contract`, `set_dispute_contract`: admin-only.
-- `upgrade`, `migrate`, `set_retention_period`, `update_fee`, `set_kyc_contract`: admin-only.
+- `upgrade`, `migrate`, `set_retention_period`, `cleanup_escrow`, `update_fee`, `set_kyc_contract`, `clear_kyc_contract`, `set_dispute_contract`: admin-only.
+- `upgrade`, `migrate`, `set_retention_period`, `update_fee`, `set_kyc_contract`, `clear_kyc_contract`: admin-only.
 - `expire_escrow`, `cleanup_escrow`: permissionless (anyone may call once eligible).
 
 ### Event Emission Completeness
@@ -797,7 +855,7 @@ soroban contract deploy \
 - `EscrowArchived` on `cleanup_escrow`.
 - `FeesWithdrawn` on `withdraw_fees`.
 - `EscrowDisputed` on `dispute_escrow`.
-- `FeeUpdated` on `update_fee`.
+- `FeeUpdated` on `update_fee` (admin may only lower an existing escrow's fee).
 - `Upgraded` on `upgrade`.
 - `Migrated` on `migrate`.
 

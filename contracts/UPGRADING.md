@@ -2,205 +2,163 @@
 
 ## Overview
 
-Soroban smart contracts are immutable once deployed, but the WASM bytecode can be upgraded via the `uploadContractWasm` and `updateContractInstance` functions. This document outlines the process for safely upgrading AfriPay's Soroban contracts with a 48-hour timelock mechanism to allow the community to review pending upgrades.
+Every AfriPay Soroban contract (all 9) uses the shared `afripay-governance`
+crate (`contracts/afripay-governance`), which adds **on-chain timelocked** WASM
+upgrades and versioned migrations (SC-172 / SC-173). The fund-holding contracts
+also get an emergency pause (SC-174).
+
+The crate exports `GovKey`, `PendingUpgrade`, `UPGRADE_TIMELOCK_SECS`, the free
+functions (`propose_upgrade`, `cancel_upgrade`, `execute_upgrade`, `migrate`,
+`pause`, `unpause`, `paused`, `require_not_paused`) generic over the
+`AdminStore` trait, and the `governance_impl!(ContractType, version)` macro.
+Each contract implements `AdminStore` for its own storage layout (instance or
+persistent) and expands the exported entry points with a single line:
+
+```rust
+afripay_governance::governance_impl!(Contract, CONTRACT_VERSION);
+```
+
+Fixes to governance (TTL bumps, admin rotation, event changes) are made once in
+the shared crate instead of in nine copies.
 
 ## Upgrade Mechanism
 
-### How Contract Upgrades Work
+### Entry points (every contract)
 
-1. **Upload new WASM**: Call `uploadContractWasm` to upload the new contract bytecode to the Stellar ledger
-2. **Update Contract Instance**: Call `updateContractInstance` with the new WASM hash to activate the upgrade
-3. **Emit Event**: An on-chain event is emitted with the new WASM hash, recording the upgrade on the ledger
+| Function | Auth | Description |
+|---|---|---|
+| `propose_upgrade(admin, new_wasm_hash) -> u64` | admin | Stores `(hash, eta)` with `eta = now + 48h`; emits `UpgradeProposed(hash, eta)`. Returns `eta`. Panics with `Upgrade already pending; cancel it first` if a proposal is already pending, and rejects a hash equal to the pending hash. |
+| `upgrade(admin, new_wasm_hash) -> u64` | admin | Alias of `propose_upgrade`. Upgrades are **never** applied instantly. |
+| `cancel_upgrade(admin)` | admin | Removes the pending upgrade; emits `UpgradeCancelled(hash)`. |
+| `execute_upgrade(admin)` | admin | Panics with `Upgrade timelock has not expired` before `eta`; afterwards swaps the WASM and emits `Upgraded(hash)` — the event carries **only the new WASM hash**, never a version (the running code is still the old binary, so any version it reported would be wrong). |
+| `cancel_upgrade(admin)` | admin | Removes the pending upgrade; emits `UpgradeCancelled(hash)`. Required before a new proposal can replace an existing one. |
+| `execute_upgrade(admin)` | admin | Panics with `Upgrade timelock has not expired` before `eta`; afterwards swaps the WASM and emits `Upgraded(hash, CONTRACT_VERSION)`. |
+| `get_pending_upgrade() -> Option<PendingUpgrade>` | — | The pending `{ new_wasm_hash, eta }`, if any. |
+| `migrate(admin)` | admin | Idempotent; runs every intermediate migration step exactly once and bumps the stored version to the new WASM's `CONTRACT_VERSION`; emits `Migrated { from_version, to_version }`. |
+| `get_contract_version() -> u32` | — | Stored contract version (`0` before the first `migrate`). |
 
-### Timelock Protection
+### `execute_upgrade` must be followed by `migrate`
 
-All contract upgrades go through a 48-hour timelock mechanism:
+`execute_upgrade` only schedules the WASM swap: `update_current_contract_wasm`
+takes effect **after** the invocation ends, so the call runs in the *old*
+binary. The new code's `migrate` is what actually brings storage up to date.
+**Always call `migrate` immediately after `execute_upgrade`, in the same
+deployment run** — an upgraded contract that has not been migrated is running
+new code against old storage. `scripts/upgrade.sh execute <contract>` performs
+both calls for you.
 
-- **Announcement Phase**: When an upgrade is initiated, it is announced with the new WASM hash
-- **Waiting Period**: The upgrade cannot be executed for 48 hours
-- **Execution Phase**: After 48 hours, the upgrade can be executed
-- **Event Logging**: The upgrade is recorded as an on-chain event with the WASM hash
+`migrate` is structured as a loop over versions:
 
-This ensures that the community has time to review and react to proposed upgrades before they are finalized.
+```rust
+while current < CONTRACT_VERSION {
+    match current {
+        1 => migrate_v1_to_v2(&env),
+        // ... one arm per version bump
+        _ => {}
+    }
+    current += 1;
+}
+```
+
+so a v1 → v3 jump runs the v2 step and then the v3 step, each exactly once,
+and re-running `migrate` is a no-op. The emitted `Migrated { from_version,
+to_version }` event records which migrations ran on-chain.
+
+The timelock (`UPGRADE_TIMELOCK_SECS = 48h`) is enforced by the contract
+itself, so a compromised admin key cannot replace contract code without giving
+users a 48-hour on-chain window to exit. For extra safety, set the admin to the
+`multisig-approval` contract.
+
+### Replacement rule (SC-185)
+
+A pending upgrade can only be replaced by an explicit `cancel_upgrade` followed
+by a fresh `propose_upgrade`. `propose_upgrade` panics with
+`Upgrade already pending; cancel it first` while a proposal is pending, so
+watchers never see a silently swapped hash: every withdrawal is announced by an
+`UpgradeCancelled` event before the new `UpgradeProposed`. A proposal whose hash
+equals the pending hash is rejected, so a no-op proposal cannot restart the
+48-hour clock.
 
 ## Upgrade Process
 
-### Prerequisites
-
-- Access to the Soroban contract admin keypair
-- Compiled and tested WASM binary for the new contract version
-- Updated contract source code
-- Test suite passing on the new contract version
-
-### Step 1: Build New Contract
+Use [`scripts/upgrade.sh`](scripts/upgrade.sh), which works for every contract
+name. It needs `SOROBAN_ADMIN_KEYPAIR`, `ADMIN_ADDRESS` and the contract ID in
+`<NAME>_CONTRACT_ID` (env or `contracts/.env`, as written by `deploy.sh`).
 
 ```bash
-cd contracts/<contract-name>
-cargo build --target wasm32-unknown-unknown --release
+./scripts/upgrade.sh build    <contract>   # cargo build the WASM
+./scripts/upgrade.sh propose  <contract>   # upload WASM + propose_upgrade (starts 48h timelock)
+./scripts/upgrade.sh status   <contract>   # get_pending_upgrade + get_contract_version
+./scripts/upgrade.sh execute  <contract>   # execute_upgrade + migrate (after eta)
+./scripts/upgrade.sh cancel   <contract>   # cancel_upgrade
 ```
 
-This produces the compiled WASM binary at `target/wasm32-unknown-unknown/release/<contract-name>.wasm`.
+1. **Build & test** the new version on testnet; bump `CONTRACT_VERSION` in
+   `src/governance.rs` and add a `migrate_vN_to_vN+1` step (plus its arm in
+   `migrate`) for every version you skip over.
+1. **Build & test** the new version on testnet; bump the version passed to
+   `governance_impl!` in the contract's `lib.rs` and add any migration logic to
+   `migrate`.
+2. **Propose**: `upgrade.sh propose <contract>`. Announce the hash and `eta`
+   publicly (indexed `UpgradeProposed` event). If a proposal is already
+   pending, run `upgrade.sh cancel <contract>` first — `propose_upgrade` will
+   panic otherwise.
+3. **Wait 48 hours** for community review. Cancel with `upgrade.sh cancel` if a
+   problem is found.
+4. **Execute**: `upgrade.sh execute <contract>` (calls `execute_upgrade`, then
+   `migrate` in the same run — never run one without the other).
+5. **Verify**: `upgrade.sh status <contract>` shows no pending upgrade and the
+   new version, and the `Migrated { from_version, to_version }` event shows the
+   expected version jump.
 
-### Step 2: Generate WASM Hash
+## Emergency Pause (SC-174)
 
-```bash
-sha256sum target/wasm32-unknown-unknown/release/<contract-name>.wasm
-```
+`escrow`, `agent-escrow`, `savings-vault`, `dispute-resolution` and
+`loyalty-token` expose `pause(admin)`, `unpause(admin)` and `is_paused()`
+(events `Paused` / `Unpaused`). `fee-distributor` and `recurring-payments`
+keep their existing pause.
 
-Record this hash for the upgrade announcement.
+**Exit-path policy:** while paused, entry points that move funds *into* the
+contract (or mint/transfer value) panic with `Contract is paused`. Exit paths
+stay available so users can always recover funds:
 
-### Step 3: Announce Upgrade
+| Contract | Blocked while paused | Still available |
+|---|---|---|
+| escrow | `create_escrow`, `batch_create_escrow`, `deposit` | release, partial release, cancel, expire, dispute (already-open escrows) |
+| agent-escrow | `create_escrow` | confirm/partial payout, cancel, admin release |
+| savings-vault | `deposit` | `withdraw`, emergency withdraw/return, `claim_yield` |
+| dispute-resolution | `open_dispute`, `open_escrow_dispute` | evidence, voting, resolution, appeals, `claim_expired` |
+| loyalty-token | `mint`, `transfer`, `transfer_from` | `burn`, `burn_from`, `redeem`, approvals |
 
-Use the AfriPay admin API to announce the upgrade:
+## Per-contract Migration Notes
 
-```bash
-POST /api/admin/contracts/:contractId/upgrade
-Content-Type: application/json
-Authorization: Bearer <admin-jwt-token>
+| Contract | `CONTRACT_VERSION` | Notes |
+|---|---|---|
+| escrow | 4 | Previously had an *instant* `upgrade`; now timelocked. `ContractVersion` storage key is unchanged (v3 deployments read correctly). Run `migrate` after upgrading to v4. |
+| agent-escrow | 1 | First upgradeable version. Existing deployments must be redeployed once (no upgrade entry point before this release); funds migrated manually. |
+| dispute-resolution | 1 | As above. Pause blocks escrow disputes too (escrow's `dispute_escrow` reverts atomically). |
+| fee-distributor | 1 | As above. Uses its existing `pause`. |
+| kyc-attestation | 1 | As above. Attestations must be re-issued on the new deployment. |
+| loyalty-token | 1 | As above. Balances must be snapshotted and re-minted on the new deployment. |
+| multisig-approval | 1 | As above. Admin is read from instance storage; governance keys live in persistent storage. |
+| recurring-payments | 1 | As above. Uses its existing `pause`. |
+| savings-vault | 1 | As above. |
 
-{
-  "wasmHash": "<sha256-hash-of-new-wasm>",
-  "description": "Fixes XYZ vulnerability, improves gas efficiency"
-}
-```
-
-The API will:
-- Record the upgrade announcement in the database
-- Set the execution time to current_time + 48 hours
-- Emit an on-chain event with the WASM hash
-- Return the scheduled upgrade details
-
-### Step 4: Wait 48 Hours
-
-The 48-hour window allows the community to:
-- Review the proposed upgrade
-- Audit the new contract code
-- Raise concerns or objections
-- Plan for any necessary changes
-
-### Step 5: Execute Upgrade
-
-After 48 hours have passed, execute the upgrade via the admin API or direct contract invocation:
-
-```bash
-POST /api/admin/contracts/:contractId/upgrade/execute
-Content-Type: application/json
-Authorization: Bearer <admin-jwt-token>
-
-{
-  "wasmHash": "<sha256-hash-of-new-wasm>"
-}
-```
-
-Or directly via Soroban CLI:
-
-```bash
-soroban contract invoke \
-  --source <admin-keypair> \
-  --network <network> \
-  --contract-id <contract-id> \
-  -- \
-  updateContractInstance \
-  --new_wasm_hash <wasm-hash>
-```
-
-### Step 6: Run Post-Upgrade Migration
-
-The escrow contract now includes an idempotent migration helper so versioned state changes can be applied after a WASM upgrade. After the upgrade is activated, invoke the migration with the contract admin:
-
-```bash
-soroban contract invoke \
-  --source <admin-keypair> \
-  --network <network> \
-  --contract-id <contract-id> \
-  -- \
-  migrate \
-  --admin <admin-address>
-```
-
-The helper records the current contract version in storage and will no-op once the contract is already at the latest version. The deployment helper in [contracts/deploy.sh](contracts/deploy.sh) also runs this migration automatically for escrow deployments.
-
-### Step 7: Verify Upgrade
-
-Verify the contract has been upgraded:
-
-```bash
-soroban contract read \
-  --network <network> \
-  --contract-id <contract-id>
-```
-
-Check that the contract code hash matches the new WASM hash.
-
-## Contract Upgrade Events
-
-When an upgrade is executed, the contract emits an event on the Stellar ledger:
-
-```
-Event Type: ContractUpgrade
-Data:
-  - previous_wasm_hash: <old-hash>
-  - new_wasm_hash: <new-hash>
-  - upgrade_time: <timestamp>
-  - admin: <admin-address>
-```
-
-These events are indexed by the Soroban Contract Event Indexer and available via:
-
-```
-GET /api/contracts/:contractId/events?type=ContractUpgrade
-```
+Governance storage keys (`ContractVersion`, `PendingUpgrade`, `Paused`) are the
+shared `GovKey` enum from `afripay-governance`; they encode identically to
+same-named `DataKey` variants, so never add a `DataKey` variant with one of
+those names for a different purpose. The encoding is byte-identical to the
+pre-extraction copies, so already-deployed contracts keep reading their stored
+`ContractVersion`.
 
 ## Safety Considerations
 
-1. **Always Test First**: Test the new contract on testnet before mainnet deployment
-2. **Backup State**: Export contract state before upgrading
-3. **Announce Early**: Announce upgrades well in advance when possible
-4. **Monitor**: Watch the indexed events and logs after deployment
-5. **Rollback Plan**: Have a plan to rapidly deploy a fix if the upgrade causes issues
-
-## Rollback
-
-If a critical issue is discovered with an upgraded contract:
-
-1. Deploy a fixed version of the contract
-2. Announce and schedule the rollback upgrade following the same process
-3. Document the incident
-
-## Contracts Subject to Upgrade
-
-The following AfriPay contracts support upgrades:
-
-- `escrow` - Payment escrow mechanism
-- `fee-distributor` - Fee collection and distribution
-- `kyc-attestation` - KYC verification records
-- `loyalty-token` - Loyalty rewards token
-- `recurring-payments` - Recurring payment scheduling
-- `savings-vault` - User savings accounts
-- `multisig-approval` - Multi-signature approvals
-- `dispute-resolution` - Dispute handling
-- `agent-escrow` - Agent-specific escrow
-
-## Version Management
-
-Track contract versions by:
-
-1. Git tags: `contract-<name>-v<version>`
-2. WASM hash: Store in version history table
-3. Event log: All upgrades recorded on-chain
-
-Example version record:
-
-```json
-{
-  "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
-  "version": "1.2.0",
-  "wasm_hash": "a1b2c3d4e5f6...",
-  "deployed_at": "2026-04-26T10:30:00Z",
-  "upgraded_from": "1.1.0",
-  "release_notes": "Security fix for XYZ"
-}
-```
+1. **Always test first** on testnet before mainnet.
+2. **Back up state** (export contract storage) before upgrading.
+3. **Monitor** `UpgradeProposed` events — an unexpected proposal is a signal
+   to pause and investigate; users have 48 h to exit.
+4. Upgrades are **irreversible**; a rollback is a new proposal of the old
+   WASM hash, subject to the same timelock.
 
 ## Further Reading
 

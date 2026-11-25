@@ -32,21 +32,28 @@ const webpush = require('./services/webpush');
 
 const db = require('./db');
 const app = require('./app');
-const { initStreams } = require('./services/horizonWorker');
-const { detectTestnetReset, startFallbackDurationMonitor } = require('./services/stellar');
+const { detectTestnetReset, startFallbackDurationMonitor, stopFallbackDurationMonitor } = require('./services/stellar');
 const { initEmailQueue, drainEmailQueue } = require('./services/email');
-const { startPriceRefreshJob } = require('./services/priceOracle');
-const { syncOfferEvents } = require('./jobs/syncOfferEvents');
+const { initWebhookQueue, drainWebhookQueue } = require('./services/webhookQueue');
+const { startPriceRefreshJob, stopPriceRefreshJob } = require('./services/priceOracle');
 const ledgerListener = require('./services/ledgerListener');
 const { Server: SocketIOServer } = require('socket.io');
 const jwt = require('jsonwebtoken');
-const { startScheduler } = require('./scheduler');
+const { startScheduler, stopScheduler } = require('./scheduler');
 const { setSocketIO } = require('./services/notificationInbox');
+const { isJtiBlacklisted } = require('./controllers/sessionController');
+const socketRegistry = require('./services/socketRegistry');
+
+// Sentry v8: register the Express error handler after all routes are mounted
+// so thrown route errors are reported. Must run before app.listen().
+Sentry.setupExpressErrorHandler(app);
 
 const PORT = process.env.PORT || 5000;
-const SHUTDOWN_TIMEOUT_MS = 30_000;
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 initEmailQueue();
+// Durable webhook delivery worker; like the other background workers it never runs under Jest.
+if (process.env.NODE_ENV !== 'test') initWebhookQueue();
 startPriceRefreshJob();
 
 const server = app.listen(PORT, () => {
@@ -54,7 +61,7 @@ const server = app.listen(PORT, () => {
   // Background workers (Horizon streams, cron scheduler, monitors) never run
   // under Jest: they outlive the test environment and crash the runner.
   if (process.env.NODE_ENV === 'test') return;
-  initStreams();
+  ledgerListener.initStreams();
   startScheduler();
   startFallbackDurationMonitor(); // BE-036: alert if Horizon fallback stays active too long
 
@@ -73,12 +80,37 @@ const io = new SocketIOServer(server, {
   cors: { origin: process.env.FRONTEND_URL, credentials: true },
 });
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   const token = socket.handshake.auth?.token;
   if (!token) return next(new Error('Authentication required'));
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
+    
+    // Check if JTI is blacklisted (token revoked via session management)
+    if (payload.jti) {
+      const blacklisted = await isJtiBlacklisted(payload.jti);
+      if (blacklisted) {
+        return next(new Error('Token has been revoked'));
+      }
+    }
+    
+    // Check if user account is suspended
+    const { rows } = await db.query(
+      'SELECT is_suspended FROM users WHERE id = $1',
+      [payload.userId]
+    );
+    
+    if (rows.length === 0) {
+      return next(new Error('User not found'));
+    }
+    
+    if (rows[0].is_suspended) {
+      return next(new Error('Account suspended'));
+    }
+    
     socket.userId = payload.userId;
+    socket.data.jti = payload.jti;
+    socket.data.exp = payload.exp;
     next();
   } catch {
     next(new Error('Invalid token'));
@@ -86,15 +118,27 @@ io.use((socket, next) => {
 });
 
 io.on('connection', async (socket) => {
+  // User-scoped room: user-level events (e.g. notification:new) are emitted
+  // here once, instead of once per wallet room (which duplicated them).
+  socket.join(`user:${socket.userId}`);
+  socket.join(socketRegistry.userRoom(socket.userId));
+  // Force reconnect with a fresh token once the access token expires (#1302)
+  const expiryTimer = socket.data.exp
+    ? setTimeout(() => socket.disconnect(true), Math.min(2 ** 31 - 1, Math.max(0, socket.data.exp * 1000 - Date.now())))
+    : null;
+
   try {
     const { rows } = await db.query(
       `SELECT w.public_key FROM wallets w WHERE w.user_id = $1`,
       [socket.userId]
     );
-    for (const row of rows) {
-      socket.join(row.public_key);
-      ledgerListener.startStreamForAccount(row.public_key);
-      ledgerListener.startPaymentStream(row.public_key);
+    // Socket may have disconnected while we were querying.
+    if (socket.disconnected) return;
+    socket.walletKeys = rows.map((r) => r.public_key);
+    for (const key of socket.walletKeys) {
+      socket.join(key);
+      // Ref-counted: streams exist only while a socket for the wallet is connected.
+      ledgerListener.acquireAccount(key);
     }
     logger.info('Socket connected', { userId: socket.userId });
   } catch (err) {
@@ -102,15 +146,22 @@ io.on('connection', async (socket) => {
   }
 
   socket.on('disconnect', () => {
+    if (expiryTimer) clearTimeout(expiryTimer);
+    for (const key of socket.walletKeys || []) ledgerListener.releaseAccount(key);
+    socket.walletKeys = [];
     logger.info('Socket disconnected', { userId: socket.userId });
   });
 });
 
 ledgerListener.setSocketIO(io);
-ledgerListener.initStreams();
 setSocketIO(io);
+socketRegistry.setSocketIO(io);
+
+let shuttingDown = false;
 
 async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   logger.info(`${signal} received — shutting down gracefully`);
 
   const forceExit = setTimeout(() => {
@@ -118,8 +169,23 @@ async function shutdown(signal) {
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS).unref();
 
-  server.close(async () => {
+  // Stop everything that keeps the event loop or connections alive, otherwise
+  // server.close() never completes while clients are connected.
+  stopScheduler();
+  stopPriceRefreshJob();
+  stopFallbackDurationMonitor();
+  ledgerListener.stopAll();
+
+  // io.close() disconnects all sockets and closes the underlying HTTP server.
+  io.close(async () => {
     clearTimeout(forceExit);
+    try {
+      // Before the DB pool closes: an in-flight delivery still needs the database.
+      await drainWebhookQueue();
+      logger.info('Webhook queue drained');
+    } catch (err) {
+      logger.error('Error draining webhook queue', { message: err.message });
+    }
     try {
       await drainEmailQueue();
       logger.info('Email queue drained');
@@ -134,6 +200,8 @@ async function shutdown(signal) {
     }
     process.exit(0);
   });
+  // Drop idle keep-alive HTTP connections so the server can close promptly.
+  if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -142,8 +210,15 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('unhandledRejection', (reason) => {
   Sentry.captureException(reason);
 });
-process.on('uncaughtException', (error) => {
+// The process is in an undefined state after an uncaught exception: report,
+// flush Sentry, then exit non-zero and let the orchestrator restart us.
+process.on('uncaughtException', async (error) => {
+  logger.error('Uncaught exception — exiting', { message: error.message, stack: error.stack });
   Sentry.captureException(error);
+  try {
+    await Sentry.close(2000);
+  } catch {}
+  process.exit(1);
 });
 
 module.exports = { app, server, shutdown };

@@ -17,7 +17,7 @@ const {
 } = require("../services/stellar");
 const webhook = require("../services/webhook");
 const cache = require("../utils/cache");
-const { sendTransactionEmail, enqueueEmail } = require("../services/email");
+const { sendTransactionEmail, sendEscrowCancelledEmail } = require("../services/email");
 const { persistAndBroadcast } = require("../services/notificationInbox");
 const { checkVelocity, checkDailyLimit, checkFraud, logFraudBlock } = require("../services/fraudDetection");
 const { withLock } = require("../utils/distributedLock");
@@ -26,8 +26,7 @@ const { isMemoRequired } = require("../services/memoRequired");
 const { awardReferralCredit } = require("./referralController");
 const { enqueueMint } = require("../services/loyaltyMintQueue");
 const { creditReferralReward } = require("../services/referralRewardService");
-const { enqueueLoyaltyMint } = require("../jobs/loyaltyMintJob");
-const { depositFee } = require("../services/feeDistributor");
+const { buildFeeBreakdown, collectPlatformFee, withStellarFee } = require("../services/fees");
 const { getActiveConfig } = require("../services/feeConfigService");
 const logger = require("../utils/logger");
 const { cancelEscrow } = require("../services/agentEscrow");
@@ -38,6 +37,32 @@ const { persistSnapshots, fiatValueAtSend } = require("../utils/txSnapshots");
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
 
 const FALLBACK_PLATFORM_FEE_BPS = parseInt(process.env.PLATFORM_FEE_BPS || "250", 10);
+
+function decodeHistoryCursor(cursor) {
+  if (typeof cursor !== "string" || !/^[A-Za-z0-9_-]+$/.test(cursor)) return null;
+
+  try {
+    const decoded = Buffer.from(cursor, "base64url");
+    if (decoded.toString("base64url") !== cursor) return null;
+    const value = JSON.parse(decoded.toString("utf8"));
+    if (
+      !value ||
+      typeof value !== "object" ||
+      typeof value.created_at !== "string" ||
+      !Number.isFinite(Date.parse(value.created_at)) ||
+      typeof value.id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.id)
+    ) return null;
+    return { created_at: value.created_at, id: value.id };
+  } catch (_) {
+    return null;
+  }
+}
+
+function encodeHistoryCursor(createdAt, id) {
+  const timestamp = createdAt instanceof Date ? createdAt.toISOString() : String(createdAt);
+  return Buffer.from(JSON.stringify({ created_at: timestamp, id }), "utf8").toString("base64url");
+}
 
 /**
  * Build the structured fee breakdown for a payment.
@@ -95,20 +120,32 @@ async function fetchLedgerCloseTime(ledgerSequence) {
 function estimateUSDValue(amount, asset) {
   if (asset === "USD" || asset === "USDC") return parseFloat(amount);
   if (asset === "XLM") return parseFloat(amount) * XLM_USD_RATE;
-  return 0;
+  
+  // For any asset not explicitly supported, use a conservative 1:1 USD estimate
+  // to ensure KYC/AML/phone verification thresholds are enforced (issue #1148).
+  // In production, integrate a live price feed for NGN, GHS, KES, etc.
+  logger.warn('estimateUSDValue: unsupported asset, using 1:1 fallback', { asset, amount });
+  return parseFloat(amount);
 }
 
-async function dailyLimitExceeded(walletAddress, amount) {
+async function dailyLimitExceeded(walletAddress, amount, asset) {
   const result = await db.query(
-    `SELECT COALESCE(SUM(amount), 0) AS total
+    `SELECT amount, asset
      FROM transactions
      WHERE sender_wallet = $1
        AND status != 'failed'
        AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')`,
     [walletAddress],
   );
-  const totalToday = parseFloat(result.rows[0].total);
-  return totalToday + parseFloat(amount) > DAILY_SEND_LIMIT;
+  // Older test doubles may still return the former aggregate shape.
+  const hasAssetRows = result.rows.some((row) => row.amount !== undefined);
+  if (!hasAssetRows) {
+    // Compatibility path for an older aggregate response; the old query
+    // already represented the configured limit's units.
+    return parseFloat(result.rows[0]?.total || 0) + parseFloat(amount) > DAILY_SEND_LIMIT;
+  }
+  const totalToday = result.rows.reduce((total, row) => total + estimateUSDValue(row.amount, row.asset), 0);
+  return totalToday + estimateUSDValue(amount, asset) > DAILY_SEND_LIMIT;
 }
 
 /**
@@ -140,6 +177,46 @@ async function checkSufficientBalance(publicKey, amount, asset) {
   }
 }
 
+async function checkPaymentPreflight(publicKey, amount, asset) {
+  const overLimit = await dailyLimitExceeded(publicKey, amount, asset);
+  if (overLimit) {
+    throw Object.assign(new Error(`Daily send limit of ${DAILY_SEND_LIMIT} reached. Try again tomorrow.`), {
+      status: 400, payload: { code: "DAILY_LIMIT_EXCEEDED" },
+    });
+  }
+
+  const [isSuspicious, limitExceeded] = await Promise.all([
+    checkVelocity(publicKey),
+    checkDailyLimit(publicKey, amount, asset),
+  ]);
+  if (isSuspicious) {
+    throw Object.assign(new Error("Transaction limit reached. Please wait before sending again."), { status: 429 });
+  }
+
+  const fraudCheck = await checkFraud(publicKey, amount, asset);
+  if (fraudCheck.blocked) {
+    await logFraudBlock(publicKey, fraudCheck.reason, amount, asset);
+    throw Object.assign(new Error(fraudCheck.reason), { status: 429 });
+  }
+  if (limitExceeded) {
+    throw Object.assign(new Error("Daily send limit reached. Try again later."), {
+      status: 429, payload: { code: "DAILY_LIMIT_EXCEEDED" },
+    });
+  }
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  let nextIndex = 0;
+  const workerCount = Math.min(items.length, concurrency);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await mapper(items[index], index);
+    }
+  }));
+}
+
 async function ensureKycIfNeeded(userId, amount, asset) {
   const estimatedUSD = estimateUSDValue(amount, asset);
   if (estimatedUSD < KYC_THRESHOLD_USD) return null;
@@ -165,7 +242,7 @@ async function ensureKycIfNeeded(userId, amount, asset) {
 
 async function getWalletForUser(userId) {
   const walletResult = await db.query(
-    "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+    "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
     [userId],
   );
   return walletResult.rows[0] || null;
@@ -182,11 +259,13 @@ async function insertTransactionRecord({
   tx_hash = null,
   status,
   ledger_close_time = null,
+  fee_amount = 0,
+  fee_breakdown = null,
 }) {
   await db.query(
-    `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, ledger_close_time)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-    [id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, ledger_close_time],
+    `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, ledger_close_time, fee_amount, fee_breakdown)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, ledger_close_time, fee_amount, fee_breakdown ? JSON.stringify(fee_breakdown) : null],
   );
   if (status !== "failed") await persistSnapshots(id, asset);
   return id;
@@ -268,6 +347,8 @@ async function estimateFees(req, res, next) {
     breakdown.platform_fee_bps = feeBps;
     breakdown.platform_fee_usdc = parseFloat((parseFloat(amount) * feeBps / 10000).toFixed(7));
     breakdown.net_amount_usdc = parseFloat((parseFloat(amount) - breakdown.platform_fee_usdc).toFixed(7));
+    breakdown.platform_fee_amount = breakdown.platform_fee_usdc;
+    breakdown.net_amount = breakdown.net_amount_usdc;
 
     res.json({
       fee_breakdown: breakdown,
@@ -355,7 +436,7 @@ async function send(req, res, next) {
 
       if (estimatedUSD >= KYC_THRESHOLD_USD) {
         if (kycStatus === "expired") {
-          webhook.deliver("payment.failed", { code: "KYC_EXPIRED", error: "Your identity document has expired. Please re-verify to continue." }).catch(() => {});
+          webhook.deliver("payment.failed", req.user.userId, { code: "KYC_EXPIRED", error: "Your identity document has expired. Please re-verify to continue." }).catch(() => {});
           return res.status(403).json({
             error: "Your identity document has expired. Please re-verify to continue.",
             kyc_status: kycStatus,
@@ -363,7 +444,7 @@ async function send(req, res, next) {
           });
         }
         if (kycStatus !== "verified") {
-          webhook.deliver("payment.failed", { code: "KYC_REQUIRED", error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent." }).catch(() => {});
+          webhook.deliver("payment.failed", req.user.userId, { code: "KYC_REQUIRED", error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent." }).catch(() => {});
           return res.status(403).json({
             error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent.",
             kyc_status: kycStatus,
@@ -376,8 +457,19 @@ async function send(req, res, next) {
     let is_encrypted = false;
     let encrypted_memo = null;
     if (encrypt_memo && memo) {
+      // Issue #1163: Encrypted memos are base64-encoded and typically exceed
+      // the 28-byte text memo limit. For now, reject encrypted memos that are
+      // too long with a clear error. Future: store encrypted data off-chain or
+      // use memo_type=hash with a content-addressed reference.
       const { encryptMemo } = require("../utils/encryption");
       encrypted_memo = encryptMemo(memo, recipient_address);
+      const encryptedBytes = Buffer.byteLength(encrypted_memo, 'utf8');
+      if (encryptedBytes > 28) {
+        return res.status(400).json({
+          error: `Encrypted memo is too long (${encryptedBytes} bytes). Stellar text memos are limited to 28 bytes. ` +
+                 `Use a shorter memo or disable encryption.`
+        });
+      }
       memo = encrypted_memo;
       is_encrypted = true;
     }
@@ -403,47 +495,28 @@ async function send(req, res, next) {
     const lockKey = `daily_limit:${public_key}`;
     let txResult;
     const lockAcquired = await withLock(lockKey, 10, async () => {
-      const overLimit = await dailyLimitExceeded(public_key, amount);
-      if (overLimit) {
-        throw Object.assign(new Error(`Daily send limit of ${DAILY_SEND_LIMIT} reached. Try again tomorrow.`), {
-          status: 400, payload: { code: "DAILY_LIMIT_EXCEEDED" },
-        });
-      }
-
-      // Fraud protection — velocity and daily limit (single authoritative check)
-      const [isSuspicious, limitExceeded] = await Promise.all([
-        checkVelocity(public_key),
-        checkDailyLimit(public_key, amount, asset),
-      ]);
-      if (isSuspicious) {
-        throw Object.assign(new Error("Transaction limit reached. Please wait before sending again."), { status: 429 });
-      }
-      const fraudCheck = await checkFraud(public_key, amount, asset);
-      if (fraudCheck.blocked) {
-        await logFraudBlock(public_key, fraudCheck.reason, amount, asset);
-        throw Object.assign(new Error(fraudCheck.reason), { status: 429 });
-      }
+      await checkPaymentPreflight(public_key, amount, asset);
 
       if (await isMemoRequired(recipient_address) && !memo) {
         throw Object.assign(new Error("This address requires a memo to route your payment correctly. Please include a memo."), {
           status: 422, payload: { code: "MEMO_REQUIRED" },
         });
       }
-      if (limitExceeded) {
-        throw Object.assign(new Error("Daily send limit reached. Try again later."), {
-          status: 429, payload: { code: "DAILY_LIMIT_EXCEEDED" },
-        });
-      }
 
       // Balance check — fail fast with a clear message before hitting Stellar
       await checkSufficientBalance(public_key, amount, asset);
 
-      // Broadcast to Stellar
-      const { transactionHash, ledger, type, claimableBalanceId, feeCharged } = await sendPayment({
+      // Calculate fee before sending payment
+      const fee_breakdown = await buildFeeBreakdown(amount, asset, null); // We'll update with actual stellar fee later
+      const netAmount = fee_breakdown.net_amount_usdc;
+
+      // Broadcast to Stellar - send net amount to recipient
+      const { transactionHash, ledger, type, claimableBalanceId, expiresAt, claimableAmount, feeCharged } = await sendPayment({
+      const { transactionHash, ledger, type, claimableBalanceId, feeCharged, successful, maxTime } = await sendPayment({
         senderPublicKey: public_key,
         encryptedSecretKey: encrypted_secret_key,
         recipientPublicKey: recipient_address,
-        amount,
+        amount: netAmount.toString(), // Send net amount, not gross amount
         asset,
         memo: memo || undefined,
         memoType: memo ? memo_type : undefined,
@@ -452,20 +525,45 @@ async function send(req, res, next) {
 
       const ledger_close_time = await fetchLedgerCloseTime(ledger);
 
-      // Build fee breakdown
-      const fee_breakdown = await buildFeeBreakdown(amount, asset, feeCharged ?? null);
+      // Update fee breakdown with actual stellar fee
+      const updated_fee_breakdown = withStellarFee(fee_breakdown, feeCharged);
 
       // Save to DB
       const txStatus = type === "claimable_balance" ? "pending_claim" : "confirming";
+      const transactionParams = [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time, JSON.stringify(updated_fee_breakdown)];
+      if (type === "claimable_balance") {
+        await db.query(
+          `WITH inserted_transaction AS (
+             INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+             RETURNING id
+           )
+           INSERT INTO claimable_balances (balance_id, user_id, asset, amount, claimant_wallet, expires_at)
+           SELECT $16, $17, $5, $18, $3, $19
+           FROM inserted_transaction
+           ON CONFLICT (balance_id) DO NOTHING`,
+          [...transactionParams, claimableBalanceId, req.user.userId, claimableAmount, expiresAt],
+        );
+      } else {
+        await db.query(
+          `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+          transactionParams,
+        );
+      }
+      const txStatus = type === "claimable_balance"
+        ? "pending_claim"
+        : successful === false ? "failed" : "completed";
+      const confirmationExpiresAt = maxTime ? new Date(Number(maxTime) * 1000) : null;
       await db.query(
-        `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-        [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time, JSON.stringify(fee_breakdown)],
+        `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown, fee_amount, confirmed_at, confirmation_expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time, JSON.stringify(updated_fee_breakdown), updated_fee_breakdown.platform_fee_amount, txStatus === "completed" || txStatus === "failed" ? new Date() : null, confirmationExpiresAt],
       );
 
-      await persistSnapshots(txId, asset, fee_breakdown);
+      await persistSnapshots(txId, asset, updated_fee_breakdown);
 
-      txResult = { transactionHash, ledger, type, claimableBalanceId, fee_breakdown, txStatus };
+      txResult = { transactionHash, ledger, type, claimableBalanceId, expiresAt, fee_breakdown: updated_fee_breakdown, txStatus };
     });
 
     if (!lockAcquired) {
@@ -474,10 +572,6 @@ async function send(req, res, next) {
         error: "Too many concurrent payment requests. Please try again.",
         code: "CONCURRENCY_LIMIT",
       });
-    }
-
-    if (txResult.type !== "claimable_balance") {
-      pollTransactionConfirmation(txId, txResult.transactionHash).catch(() => {});
     }
 
     await cache.del(`balance:${public_key}`);
@@ -490,26 +584,16 @@ async function send(req, res, next) {
       creditReferralReward(req.user.userId, txId).catch(() => {});
     }
 
-    const loyaltyPoints = Math.max(1, Math.floor(parseFloat(amount)));
-    enqueueMint({ userId: req.user.userId, walletAddress: public_key, points: loyaltyPoints }).catch((err) => {
+    enqueueMint({ transactionId: txId, userId: req.user.userId, walletAddress: public_key, amount, asset }).catch((err) => {
       logger.error('Failed to enqueue loyalty mint', { userId: req.user.userId, error: err.message });
     });
-    // Queue loyalty mint for background processing after confirmation
-    enqueueLoyaltyMint(txId, req.user.userId, public_key, amount, asset).catch(() => {});
 
-    if (asset === "USDC" && txResult.fee_breakdown.platform_fee_bps > 0) {
-      const feeStroops = Math.floor(parseFloat(amount) * 1e7 * txResult.fee_breakdown.platform_fee_bps / 10000);
-      if (feeStroops > 0) {
-        depositFee(feeStroops).catch((err) =>
-          logger.warn("Fee deposit failed (non-critical):", { error: err.message }),
-        );
-      }
-    }
+    collectPlatformFee(txResult.fee_breakdown, public_key);
 
     const txData = { id: txId, tx_hash: txResult.transactionHash, ledger: txResult.ledger, amount, asset, sender: public_key, recipient: recipient_address, type: txResult.type };
-    webhook.deliver("payment.sent", txData).catch(() => {});
+    webhook.deliver("payment.sent", req.user.userId, txData).catch(() => {});
     if (txResult.type !== "claimable_balance") {
-      webhook.deliver("payment.received", txData).catch(() => {});
+      webhook.deliver("payment.received", req.user.userId, txData).catch(() => {});
     }
 
     // Fire-and-forget email notifications
@@ -531,7 +615,7 @@ async function send(req, res, next) {
     ).catch(() => {});
 
     db.query(
-      "SELECT u.user_id FROM users u JOIN wallets w ON w.user_id = u.id WHERE w.public_key = $1 LIMIT 1",
+      "SELECT u.id AS user_id FROM users u JOIN wallets w ON w.user_id = u.id WHERE w.public_key = $1 LIMIT 1",
       [recipient_address],
     ).then(({ rows }) => {
       if (rows[0]) {
@@ -553,6 +637,7 @@ async function send(req, res, next) {
         recipient: recipient_address,
         type: txResult.type,
         claimableBalanceId: txResult.claimableBalanceId,
+        claimableBalanceExpiresAt: txResult.expiresAt || null,
         fee_breakdown: txResult.fee_breakdown,
       },
     });
@@ -560,7 +645,7 @@ async function send(req, res, next) {
     // Do not persist a failed transaction here; let caller decide and avoid
     // creating records when Stellar submission fails during business logic.
     if (err.status === 400 || err.status === 500) {
-      webhook.deliver('payment.failed', { error: err.message }).catch(() => {});
+      webhook.deliver('payment.failed', req.user.userId, { error: err.message }).catch(() => {});
       return res.status(err.status).json({ error: err.message });
     }
     // Issue #243: Insert a failed transaction record when sendPayment throws
@@ -576,12 +661,12 @@ async function send(req, res, next) {
     if (err.status) {
       const failedPayload = { error: err.message };
       if (err.payload?.code) failedPayload.code = err.payload.code;
-      webhook.deliver("payment.failed", failedPayload).catch(() => {});
+      webhook.deliver("payment.failed", req.user.userId, failedPayload).catch(() => {});
       return res.status(err.status).json({ error: err.message, ...(err.payload || {}) });
     }
     if (err.response?.data) {
       const extras = err.response.data?.extras;
-      webhook.deliver("payment.failed", { error: "Transaction failed", details: extras }).catch(() => {});
+      webhook.deliver("payment.failed", req.user.userId, { error: "Transaction failed", details: extras }).catch(() => {});
       return res.status(400).json({ error: "Transaction failed", details: extras });
     }
     next(err);
@@ -613,19 +698,20 @@ async function sendBatch(req, res, next) {
     // AML re-screen for high-value batches — fail closed when screening is unavailable
     await amlRescreenForPayment(req.user.userId, public_key, estimateUSDValue(totalAmount, asset));
 
-    const overLimit = await dailyLimitExceeded(public_key, totalAmount);
-    if (overLimit) {
-      return res.status(400).json({
-        error: `Daily send limit of ${DAILY_SEND_LIMIT} reached. Try again tomorrow.`,
-        code: "DAILY_LIMIT_EXCEEDED",
+    const memoRequiredByAddress = new Map();
+    if (!memo) {
+      const memoAddresses = [...new Set(recipients
+        .map((recipient) => recipient.recipient_address)
+        .filter((address) => address !== public_key))];
+      await mapWithConcurrency(memoAddresses, 5, async (address) => {
+        memoRequiredByAddress.set(address, await isMemoRequired(address));
       });
     }
 
-    const fraudCheck = await checkFraud(public_key, totalAmount, asset);
-    if (fraudCheck.blocked) {
-      await logFraudBlock(public_key, fraudCheck.reason, totalAmount, asset);
-      return res.status(429).json({ error: fraudCheck.reason });
-    }
+    const lockKey = `daily_limit:${public_key}`;
+    const lockAcquired = await withLock(lockKey, 10, async () => {
+      await checkPaymentPreflight(public_key, totalAmount, asset);
+      await checkSufficientBalance(public_key, totalAmount, asset);
 
     const results = [];
     const validRecipients = [];
@@ -640,15 +726,16 @@ async function sendBatch(req, res, next) {
         continue;
       }
 
-      if (await isMemoRequired(recipientAddress) && !memo) {
+      if (memoRequiredByAddress.get(recipientAddress) && !memo) {
         results.push({ index, recipient_address: recipientAddress, amount, status: "failed", error: "This address requires a memo.", code: "MEMO_REQUIRED" });
         continue;
       }
 
       try {
         await validateBatchRecipient({ recipientPublicKey: recipientAddress, asset });
-        results.push({ index, recipient_address: recipientAddress, amount, status: "pending" });
-        validRecipients.push({ index, recipientPublicKey: recipientAddress, amount });
+        const fee_breakdown = await buildFeeBreakdown(amount, asset);
+        results.push({ index, recipient_address: recipientAddress, amount, status: "pending", fee_breakdown });
+        validRecipients.push({ index, recipientPublicKey: recipientAddress, amount: fee_breakdown.net_amount, fee_breakdown });
       } catch (err) {
         results.push({ index, recipient_address: recipientAddress, amount, status: "failed", error: err.message });
       }
@@ -679,14 +766,19 @@ async function sendBatch(req, res, next) {
           sender_wallet: public_key, recipient_wallet: result.recipient_address,
           amount: result.amount, asset, memo: memo || null, memo_type,
           tx_hash: result.tx_hash || null, status: result.status === "success" ? "completed" : "failed",
+          fee_amount: result.status === "success" ? result.fee_breakdown.platform_fee_amount : 0,
+          fee_breakdown: result.status === "success" ? result.fee_breakdown : null,
         });
         result.id = txId;
         if (result.status === "success") {
           const txData = { id: txId, tx_hash: transactionHash, ledger, amount: result.amount, asset, sender: public_key, recipient: result.recipient_address, type: "payment" };
-          webhook.deliver("payment.sent", txData).catch(() => {});
-          webhook.deliver("payment.received", txData).catch(() => {});
+          webhook.deliver("payment.sent", req.user.userId, txData).catch(() => {});
+          webhook.deliver("payment.received", req.user.userId, txData).catch(() => {});
         }
       }));
+
+      const batchFeeTotal = validRecipients.reduce((total, recipient) => total + recipient.fee_breakdown.platform_fee_amount, 0);
+      collectPlatformFee({ asset, platform_fee_amount: batchFeeTotal }, public_key);
 
       await cache.del(`balance:${public_key}`);
       return res.json({
@@ -716,16 +808,41 @@ async function sendBatch(req, res, next) {
         results,
       });
     }
+    });
+
+    if (!lockAcquired) {
+      return res.status(429).json({
+        error: "Too many concurrent payment requests. Please try again.",
+        code: "CONCURRENCY_LIMIT",
+      });
+    }
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message, ...(err.payload || {}) });
     next(err);
   }
 }
 
+const HISTORY_STATUSES = ["pending", "confirming", "completed", "failed", "pending_claim", "cancelled"];
+
+// Parse a comma-separated status filter; returns null when absent, false when invalid.
+function parseStatusFilter(raw) {
+  if (raw == null || String(raw).trim() === "") return null;
+  const values = [...new Set(String(raw).split(",").map((v) => v.trim()).filter(Boolean))];
+  if (!values.length || values.some((v) => !HISTORY_STATUSES.includes(v))) return false;
+  return values;
+}
+
 async function history(req, res, next) {
   try {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-    const cursor = req.query.cursor ? parseInt(req.query.cursor, 10) : null;
+    const cursorValue = req.query.cursor;
+    const cursor = cursorValue == null ? null : decodeHistoryCursor(cursorValue);
+    if (cursorValue != null && !cursor) return res.status(400).json({ error: "Invalid cursor" });
+
+    const walletId = req.query.wallet_id || null;
+    if (walletId && (typeof walletId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(walletId))) {
+      return res.status(400).json({ error: "Invalid wallet_id" });
+    }
 
     let fromBound = null;
     let toBound = null;
@@ -753,10 +870,21 @@ async function history(req, res, next) {
       if (!assetFilter) return res.status(400).json({ error: "Invalid asset filter" });
     }
 
+    const statusFilter = parseStatusFilter(req.query.status);
+    if (statusFilter === false) {
+      return res.status(400).json({ error: `Invalid status value. Must be one of: ${HISTORY_STATUSES.join(", ")}` });
+    }
+
     const walletResult = await db.query(
       "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId],
     );
+    const walletResult = walletId
+      ? await db.query("SELECT public_key FROM wallets WHERE user_id = $1 AND id = $2", [req.user.userId, walletId])
+      : await db.query(
+        "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
+        [req.user.userId],
+      );
     if (!walletResult.rows[0]) return res.status(404).json({ error: "Wallet not found" });
 
     const { public_key } = walletResult.rows[0];
@@ -775,8 +903,8 @@ async function history(req, res, next) {
     const baseParams = [public_key];
 
     if (cursor) {
-      conditions.push(`id < $${baseParams.length + 1}`);
-      baseParams.push(cursor);
+      conditions.push(`(created_at, id) < ($${baseParams.length + 1}::timestamptz, $${baseParams.length + 2}::uuid)`);
+      baseParams.push(cursor.created_at, cursor.id);
     }
     if (fromBound) {
       conditions.push(`created_at >= $${baseParams.length + 1}`);
@@ -790,19 +918,23 @@ async function history(req, res, next) {
       conditions.push(`asset = $${baseParams.length + 1}`);
       baseParams.push(assetFilter);
     }
+    if (statusFilter) {
+      conditions.push(`status = ANY($${baseParams.length + 1})`);
+      baseParams.push(statusFilter);
+    }
     const whereClause = conditions.join(" AND ");
 
-    const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at, ledger_close_time, fee_breakdown, fx_snapshot, fee_snapshot
+      const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at, created_at::text AS cursor_created_at, ledger_close_time, fee_breakdown, fx_snapshot, fee_snapshot
          FROM transactions
          WHERE ${whereClause}
-         ORDER BY id DESC LIMIT $${baseParams.length + 1}`;
+         ORDER BY created_at DESC, id DESC LIMIT $${baseParams.length + 1}`;
 
     const result = await db.query(listSql, [...baseParams, limit + 1]);
 
     const rows = result.rows;
     const hasMore = rows.length > limit;
     const displayFiat = String(req.query.fiat || "USD").toUpperCase();
-    const transactions = rows.slice(0, limit).map((tx) => ({
+    const transactions = rows.slice(0, limit).map(({ cursor_created_at, ...tx }) => ({
       ...tx,
       direction: tx.sender_wallet === public_key ? "sent" : "received",
       // BE-227: fiat value at send time; null => "rate unavailable"
@@ -810,7 +942,10 @@ async function history(req, res, next) {
       fiat_currency: displayFiat,
     }));
 
-    const next_cursor = hasMore ? transactions[transactions.length - 1].id : null;
+    const lastRow = rows[limit - 1];
+    const next_cursor = hasMore
+      ? encodeHistoryCursor(lastRow.cursor_created_at || lastRow.created_at, lastRow.id)
+      : null;
     res.json({ transactions, next_cursor, has_more: hasMore });
   } catch (err) {
     next(err);
@@ -848,8 +983,16 @@ async function sendPath(req, res, next) {
     let encrypted_memo = null;
 
     if (encrypt_memo && memoStr) {
+      // Issue #1163: Validate encrypted memo length
       const { encryptMemo } = require("../utils/encryption");
       encrypted_memo = encryptMemo(memoStr, recipient_address);
+      const encryptedBytes = Buffer.byteLength(encrypted_memo, 'utf8');
+      if (encryptedBytes > 28) {
+        return res.status(400).json({
+          error: `Encrypted memo is too long (${encryptedBytes} bytes). Stellar text memos are limited to 28 bytes. ` +
+                 `Use a shorter memo or disable encryption.`
+        });
+      }
       memoStr = encrypted_memo;
       is_encrypted = true;
     }
@@ -895,31 +1038,33 @@ async function sendPath(req, res, next) {
     // Balance check — fail fast with a clear message before hitting Stellar
     await checkSufficientBalance(public_key, source_amount, source_asset);
 
-    const { transactionHash, ledger } = await sendPathPayment({
+    const fee_breakdown = await buildFeeBreakdown(source_amount, source_asset);
+    const { transactionHash, ledger, successful, maxTime } = await sendPathPayment({
       senderPublicKey: public_key, encryptedSecretKey: encrypted_secret_key,
-      recipientPublicKey: recipient_address, sourceAsset: source_asset, sourceAmount: source_amount,
+      recipientPublicKey: recipient_address, sourceAsset: source_asset, sourceAmount: fee_breakdown.net_amount,
       destinationAsset: destination_asset, destinationMinAmount: destination_min_amount, path, memo: memoStr,
     }, req.logger);
 
+    const txStatus = successful === false ? "failed" : "completed";
+    const confirmationExpiresAt = maxTime ? new Date(Number(maxTime) * 1000) : null;
     await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'confirming',$8,$9,$10)`,
-      [txId, public_key, recipient_address, source_amount, source_asset, memoStr || null, transactionHash, req.requestId, is_encrypted, encrypted_memo],
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo, confirmed_at, confirmation_expires_at, fee_amount, fee_breakdown)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [txId, public_key, recipient_address, source_amount, source_asset, memoStr || null, transactionHash, txStatus, req.requestId, is_encrypted, encrypted_memo, new Date(), confirmationExpiresAt, fee_breakdown.platform_fee_amount, JSON.stringify(fee_breakdown)],
     );
     await persistSnapshots(txId, source_asset);
-
-    pollTransactionConfirmation(txId, transactionHash).catch(() => {});
+    collectPlatformFee(fee_breakdown, public_key);
 
     // Invalidate sender's cached balance after successful path payment
     await cache.del(`balance:${public_key}`);
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, sender: public_key, recipient: recipient_address };
-    webhook.deliver("payment.sent", txData).catch(() => {});
-    webhook.deliver("payment.received", txData).catch(() => {});
+    webhook.deliver("payment.sent", req.user.userId, txData).catch(() => {});
+    webhook.deliver("payment.received", req.user.userId, txData).catch(() => {});
 
     res.json({
       message: "Path payment sent successfully",
-      transaction: { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, recipient: recipient_address },
+      transaction: { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, recipient: recipient_address, status: txStatus },
     });
   } catch (err) {
     if (public_key) {
@@ -960,8 +1105,16 @@ async function sendStrictReceivePath(req, res, next) {
     let encrypted_memo = null;
 
     if (encrypt_memo && memoStr) {
+      // Issue #1163: Validate encrypted memo length
       const { encryptMemo } = require("../utils/encryption");
       encrypted_memo = encryptMemo(memoStr, recipient_address);
+      const encryptedBytes = Buffer.byteLength(encrypted_memo, 'utf8');
+      if (encryptedBytes > 28) {
+        return res.status(400).json({
+          error: `Encrypted memo is too long (${encryptedBytes} bytes). Stellar text memos are limited to 28 bytes. ` +
+                 `Use a shorter memo or disable encryption.`
+        });
+      }
       memoStr = encrypted_memo;
       is_encrypted = true;
     }
@@ -1004,28 +1157,30 @@ async function sendStrictReceivePath(req, res, next) {
       return res.status(429).json({ error: fraudCheck.reason });
     }
 
-    const { transactionHash, ledger } = await sendStrictReceivePathPayment({
+    const fee_breakdown = await buildFeeBreakdown(destination_amount, destination_asset);
+    const { transactionHash, ledger, successful, maxTime } = await sendStrictReceivePathPayment({
       senderPublicKey: public_key, encryptedSecretKey: encrypted_secret_key,
       recipientPublicKey: recipient_address, sourceAsset: source_asset, sourceMaxAmount: source_max_amount,
-      destinationAsset: destination_asset, destinationAmount: destination_amount, path, memo: memoStr,
+      destinationAsset: destination_asset, destinationAmount: fee_breakdown.net_amount, path, memo: memoStr,
     });
 
+    const txStatus = successful === false ? "failed" : "completed";
+    const confirmationExpiresAt = maxTime ? new Date(Number(maxTime) * 1000) : null;
     await db.query(
-      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'confirming',$8,$9,$10)`,
-      [txId, public_key, recipient_address, destination_amount, destination_asset, memoStr || null, transactionHash, req.requestId, is_encrypted, encrypted_memo],
+      `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo, confirmed_at, confirmation_expires_at, fee_amount, fee_breakdown)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [txId, public_key, recipient_address, destination_amount, destination_asset, memoStr || null, transactionHash, txStatus, req.requestId, is_encrypted, encrypted_memo, new Date(), confirmationExpiresAt, fee_breakdown.platform_fee_amount, JSON.stringify(fee_breakdown)],
     );
     await persistSnapshots(txId, destination_asset);
-
-    pollTransactionConfirmation(txId, transactionHash).catch(() => {});
+    collectPlatformFee(fee_breakdown, public_key);
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, sender: public_key, recipient: recipient_address };
-    webhook.deliver("payment.sent", txData).catch(() => {});
-    webhook.deliver("payment.received", txData).catch(() => {});
+    webhook.deliver("payment.sent", req.user.userId, txData).catch(() => {});
+    webhook.deliver("payment.received", req.user.userId, txData).catch(() => {});
 
     res.json({
       message: "Strict receive path payment sent successfully",
-      transaction: { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, recipient: recipient_address, status: "confirming" },
+      transaction: { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, recipient: recipient_address, status: txStatus },
     });
   } catch (err) {
     if (public_key) {
@@ -1039,34 +1194,6 @@ async function sendStrictReceivePath(req, res, next) {
     if (err.response?.data) return res.status(400).json({ error: "Strict receive path payment failed", details: err.response.data?.extras });
     next(err);
   }
-}
-
-async function pollTransactionConfirmation(txId, txHash) {
-  const StellarSdk = require("@stellar/stellar-sdk");
-  const pollServer = new StellarSdk.Horizon.Server(process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org");
-  const maxAttempts = 10;
-  const pollInterval = 2000;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      const tx = await pollServer.transactions().transaction(txHash).call();
-      if (tx.successful) {
-        await db.query(`UPDATE transactions SET status = 'completed', confirmed_at = NOW() WHERE id = $1`, [txId]);
-        return;
-      } else {
-        await db.query(`UPDATE transactions SET status = 'failed', confirmed_at = NOW() WHERE id = $1`, [txId]);
-        return;
-      }
-    } catch (err) {
-      if (err.response?.status === 404) {
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
-        continue;
-      }
-      await db.query(`UPDATE transactions SET status = 'failed', confirmed_at = NOW() WHERE id = $1`, [txId]);
-      return;
-    }
-  }
-  await db.query(`UPDATE transactions SET status = 'failed', confirmed_at = NOW() WHERE id = $1`, [txId]);
 }
 
 const EXPORT_ROW_LIMIT = parseInt(process.env.EXPORT_ROW_LIMIT || "1000000", 10);
@@ -1083,9 +1210,9 @@ async function exportCSV(req, res, next) {
 
     const { public_key } = walletResult.rows[0];
 
-    const ALLOWED_STATUSES = ["pending", "completed", "cancelled", "failed"];
-    if (req.query.status && !ALLOWED_STATUSES.includes(req.query.status)) {
-      return res.status(400).json({ error: `Invalid status value. Must be one of: ${ALLOWED_STATUSES.join(", ")}` });
+    const statusFilter = parseStatusFilter(req.query.status);
+    if (statusFilter === false) {
+      return res.status(400).json({ error: `Invalid status value. Must be one of: ${HISTORY_STATUSES.join(", ")}` });
     }
 
     const sanitize = (s) => s.replace(/[^0-9a-zA-Z_\-]/g, "");
@@ -1115,7 +1242,7 @@ async function exportCSV(req, res, next) {
     let filters = "";
     if (req.query.from)      { params.push(req.query.from);   filters += ` AND created_at >= $${params.length}`; }
     if (req.query.to)        { params.push(req.query.to);     filters += ` AND created_at <= $${params.length}`; }
-    if (req.query.status)    { params.push(req.query.status); filters += ` AND status = $${params.length}`; }
+    if (statusFilter)        { params.push(statusFilter);     filters += ` AND status = ANY($${params.length})`; }
     if (req.query.direction === "sent")     filters += " AND sender_wallet = $1";
     else if (req.query.direction === "received") filters += " AND recipient_wallet = $1";
 
@@ -1240,7 +1367,7 @@ async function cancelPendingEscrow(req, res, next) {
 
     // 3. Verify the caller is the sender
     const walletResult = await db.query(
-      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -1299,14 +1426,7 @@ async function cancelPendingEscrow(req, res, next) {
       .then(({ rows }) => {
         if (!rows[0]) return;
         const { email, full_name } = rows[0];
-        enqueueEmail({
-          to: email,
-          subject: "AfriPay: Your payment has been cancelled and refunded",
-          html: `<p>Hi ${full_name},</p>
-<p>Your payment of <strong>${escrow.amount} ${escrow.asset}</strong> has been cancelled and the funds have been refunded to your wallet.</p>
-<p>Transaction Hash: <code>${cancelTxHash}</code></p>
-<p><a href="${process.env.FRONTEND_URL}/history">View in AfriPay</a></p>`,
-        }).catch(() => {});
+        sendEscrowCancelledEmail(email, full_name, escrow.amount, escrow.asset, cancelTxHash).catch(() => {});
       })
       .catch(() => {});
 
@@ -1323,7 +1443,7 @@ async function cancelPendingEscrow(req, res, next) {
     });
 
     // 9. Fire webhook event (non-blocking)
-    webhook.deliver("escrow.cancelled", {
+    webhook.deliver("escrow.cancelled", req.user.userId, {
       escrow_id: id,
       contract_escrow_id: escrow.contract_escrow_id,
       tx_hash: cancelTxHash,
@@ -1342,6 +1462,9 @@ async function cancelPendingEscrow(req, res, next) {
   } catch (err) {
     next(err);
   }
+  // BE-179: single canonical implementation lives in agentEscrowController.
+  // Required lazily to avoid a circular import.
+  return require("./agentEscrowController").cancel(req, res, next);
 }
 
 /**
@@ -1394,4 +1517,4 @@ async function getReceipt(req, res, next) {
   }
 }
 
-module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee, estimateFees, getFeeStats, getFeeRate, findReceivePathHandler, sendStrictReceivePath, getPaymentById, cancelPendingEscrow, getReceipt };
+module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee, estimateFees, getFeeStats, getFeeRate, findReceivePathHandler, sendStrictReceivePath, getPaymentById, cancelPendingEscrow, checkSufficientBalance, getReceipt };

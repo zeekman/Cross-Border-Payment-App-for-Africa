@@ -2,6 +2,7 @@ const router = require("express").Router();
 const { body, param, validationResult } = require("express-validator");
 const StellarSdk = require("@stellar/stellar-sdk");
 const authMiddleware = require("../middleware/auth");
+const { readLimiter } = require("../middleware/rateLimiter");
 const isAdmin = require("../middleware/isAdmin");
 const { disputeEvidenceMiddleware } = require("../middleware/disputeEvidenceUpload");
 const {
@@ -27,6 +28,7 @@ const isValidAddress = (v) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger

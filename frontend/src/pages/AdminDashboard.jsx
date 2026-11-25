@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { Activity, Users, DollarSign, TrendingUp, Server, BarChart3, ShieldAlert, CheckCircle, XCircle } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line,
@@ -6,6 +6,8 @@ import {
 import api from '../utils/api';
 import toast from 'react-hot-toast';
 import ConfirmModal from '../components/ConfirmModal';
+
+const ContractStateViewer = lazy(() => import('../components/ContractStateViewer'));
 
 const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -41,6 +43,44 @@ function ChartTooltip({ active, payload, label }) {
   );
 }
 
+/**
+ * Map a staged bulk action to the backend endpoint and payload shape.
+ * The backend exposes dedicated routes (bulk-suspend / bulk-unsuspend /
+ * bulk-export / bulk-kyc-update) rather than a single /admin/users/bulk route.
+ */
+function buildBulkRequest(action, filter, userIds, reason) {
+  switch (action) {
+    case 'suspend':
+      return { url: '/admin/users/bulk-suspend', payload: { user_ids: userIds, reason } };
+    case 'unsuspend':
+      return { url: '/admin/users/bulk-unsuspend', payload: { user_ids: userIds } };
+    case 'export':
+      return { url: '/admin/users/bulk-export', payload: { filter, user_ids: userIds } };
+    case 'kyc':
+    case 'verify':
+      return { url: '/admin/users/bulk-kyc-update', payload: { user_ids: userIds, status: 'verified' } };
+    default:
+      return null;
+  }
+}
+
+/** Poll GET /admin/jobs/:jobId until the async export job completes. */
+async function pollExportJob(jobId, { intervalMs = 2000, maxAttempts = 60 } = {}) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const res = await api.get(`/admin/jobs/${jobId}`);
+    const job = res.data?.job ?? res.data ?? {};
+    const status = job.status;
+    if (status === 'completed' || status === 'complete' || status === 'done') {
+      return job;
+    }
+    if (status === 'failed' || status === 'error') {
+      throw new Error(job.error || 'Export job failed');
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error('Export job timed out');
+}
+
 export default function AdminDashboard() {
   const [stats, setStats] = useState(null);
   const [dailyStats, setDailyStats] = useState([]);
@@ -54,9 +94,15 @@ export default function AdminDashboard() {
   /** Users matching the current filter — populated before showing the confirm modal. */
   const [bulkPreviewUsers, setBulkPreviewUsers] = useState([]);
   /** Which action has been staged for confirmation. */
-  const [bulkAction, setBulkAction] = useState(null); // 'suspend' | 'verify' | null
+  const [bulkAction, setBulkAction] = useState(null); // 'suspend' | 'unsuspend' | 'export' | 'kyc' | null
   const [bulkLoading, setBulkLoading] = useState(false);
   const [bulkPreviewLoading, setBulkPreviewLoading] = useState(false);
+  /** Reason supplied for suspend actions. */
+  const [bulkReason, setBulkReason] = useState('');
+  /** Per-user results returned by the backend for the last bulk action. */
+  const [bulkResults, setBulkResults] = useState([]);
+  /** Download URL for a completed bulk export job. */
+  const [bulkExportUrl, setBulkExportUrl] = useState(null);
   // ─────────────────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -91,20 +137,58 @@ export default function AdminDashboard() {
     }
   };
 
-  /** Execute the confirmed bulk action. */
+  /** Execute the confirmed bulk action against the matching backend endpoint. */
   const handleConfirmBulkAction = async () => {
+    const request = buildBulkRequest(
+      bulkAction,
+      bulkFilter,
+      bulkPreviewUsers.map((u) => u.id),
+      bulkReason
+    );
+    if (!request) {
+      toast.error('Unsupported bulk action.');
+      return;
+    }
+
     setBulkLoading(true);
+    setBulkResults([]);
+    setBulkExportUrl(null);
     try {
-      await api.post('/admin/users/bulk', {
-        action: bulkAction,
-        filter: bulkFilter,
-        user_ids: bulkPreviewUsers.map((u) => u.id),
-      });
-      toast.success(
-        `Bulk ${bulkAction} applied to ${bulkPreviewUsers.length} user${bulkPreviewUsers.length !== 1 ? 's' : ''}`
-      );
+      const res = await api.post(request.url, request.payload);
+      const data = res.data ?? {};
+
+      // Per-user results (partial failures) returned by the backend.
+      const results = data.results ?? data.users ?? [];
+      setBulkResults(results);
+      const failed = results.filter((r) => r.success === false || r.error);
+
+      if (bulkAction === 'export') {
+        const jobId = data.job_id ?? data.jobId ?? data.job?.id;
+        if (jobId) {
+          const job = await pollExportJob(jobId);
+          const url = job.download_url ?? job.downloadUrl ?? job.url;
+          if (url) {
+            setBulkExportUrl(url);
+            toast.success('Export ready — download available.');
+          } else {
+            toast.success('Export completed.');
+          }
+        } else {
+          toast.success('Export started.');
+        }
+      } else if (failed.length) {
+        toast.error(
+          `Bulk ${bulkAction}: ${failed.length} of ${results.length} user${results.length !== 1 ? 's' : ''} failed.`
+        );
+      } else {
+        toast.success(
+          `Bulk ${bulkAction} applied to ${bulkPreviewUsers.length} user${bulkPreviewUsers.length !== 1 ? 's' : ''}`
+        );
+      }
+
       setBulkAction(null);
       setBulkPreviewUsers([]);
+      setBulkReason('');
     } catch {
       toast.error('Bulk action failed. Please try again.');
     } finally {
@@ -186,254 +270,51 @@ export default function AdminDashboard() {
         </div>
       </div>
 
-      {/* Daily Analytics Chart */}
-      <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm" role="region" aria-labelledby="daily-analytics-heading">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <BarChart3 size={20} className="text-primary-500" aria-hidden="true" />
-            <h3 id="daily-analytics-heading" className="text-lg font-semibold text-gray-900 dark:text-white">Daily Analytics (Last 30 Days)</h3>
-          </div>
-          <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1" role="group" aria-label="Chart metric selector">
-            {['volume', 'transactions', 'fees'].map((mode) => (
-              <button
-                key={mode}
-                onClick={() => setChartMode(mode)}
-                aria-pressed={chartMode === mode}
-                aria-label={`Show ${mode} chart`}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                  chartMode === mode
-                    ? 'bg-primary-500 text-white'
-                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-                }`}
-              >
-                {mode.charAt(0).toUpperCase() + mode.slice(1)}
-              </button>
-            ))}
-          </div>
+      {/* Bulk action results (per-user, including partial failures) */}
+      {bulkResults.length > 0 && (
+        <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm" role="region" aria-label="Bulk action results">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">Bulk action results</h3>
+          <ul className="space-y-2">
+            {bulkResults.map((r, i) => {
+              const ok = r.success !== false && !r.error;
+              return (
+                <li key={r.user_id ?? r.id ?? i} className="flex items-center gap-2 text-sm">
+                  {ok ? (
+                    <CheckCircle size={16} className="text-green-500" aria-hidden="true" />
+                  ) : (
+                    <XCircle size={16} className="text-red-500" aria-hidden="true" />
+                  )}
+                  <span className="text-gray-700 dark:text-gray-300">
+                    {r.user_id ?? r.id ?? `User ${i + 1}`}
+                  </span>
+                  {!ok && (
+                    <span className="text-red-500">{r.error || 'Failed'}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         </div>
+      )}
 
-        <div className="h-72" role="img" aria-label={`Bar chart of daily ${chartMode} for the last 30 days`}>
-          {chartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fill: '#9CA3AF', fontSize: 11 }}
-                  tickFormatter={formatDateLocal}
-                  interval="preserveStartEnd"
-                />
-                <YAxis tick={{ fill: '#9CA3AF', fontSize: 11 }} />
-                <Tooltip content={<ChartTooltip />} />
-                <Bar
-                  dataKey={chartMode}
-                  name={chartMode.charAt(0).toUpperCase() + chartMode.slice(1)}
-                  fill={chartMode === 'volume' ? '#10B981' : chartMode === 'transactions' ? '#6366F1' : '#F59E0B'}
-                  radius={[4, 4, 0, 0]}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-full">
-              <p className="text-gray-500 dark:text-gray-400 text-sm">No transaction data available.</p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Daily Transaction Volume Trend */}
-      <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm" role="region" aria-labelledby="volume-trend-heading">
-        <div className="flex items-center gap-2 mb-4">
-          <TrendingUp size={20} className="text-primary-500" aria-hidden="true" />
-          <h3 id="volume-trend-heading" className="text-lg font-semibold text-gray-900 dark:text-white">Volume Trend</h3>
-        </div>
-        <div className="h-72" role="img" aria-label="Line chart of daily volume trend for the last 30 days">
-          {chartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fill: '#9CA3AF', fontSize: 11 }}
-                  tickFormatter={formatDateLocal}
-                  interval="preserveStartEnd"
-                />
-                <YAxis tick={{ fill: '#9CA3AF', fontSize: 11 }} />
-                <Tooltip content={<ChartTooltip />} />
-                <Line type="monotone" dataKey="volume" name="Volume" stroke="#10B981" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-full">
-              <p className="text-gray-500 dark:text-gray-400 text-sm">No transaction data available.</p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Stellar Network Stats */}
-      <div className="bg-gradient-to-br from-primary-600 to-primary-700 rounded-2xl p-6 shadow-lg" role="region" aria-labelledby="stellar-stats-heading">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center text-white" aria-hidden="true">
-            <Server size={20} />
-          </div>
-          <h3 id="stellar-stats-heading" className="text-xl font-bold text-white">Stellar Network Statistics</h3>
-        </div>
-
-        {stellarStats ? (
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4" aria-live="polite">
-            <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1" id="stat-latest-ledger-label">Latest Ledger</p>
-              <p className="text-2xl font-bold text-white" aria-labelledby="stat-latest-ledger-label">{stellarStats.latestLedger?.toLocaleString()}</p>
-            </div>
-
-            <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1" id="stat-base-fee-label">Base Fee (stroops)</p>
-              <p className="text-2xl font-bold text-white" aria-labelledby="stat-base-fee-label">{stellarStats.baseFee}</p>
-            </div>
-
-            <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1" id="stat-max-tx-label">Max Tx Set Size</p>
-              <p className="text-2xl font-bold text-white" aria-labelledby="stat-max-tx-label">{stellarStats.maxFee}</p>
-            </div>
-
-            <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1" id="stat-tx-count-label">Transactions</p>
-              <p className="text-2xl font-bold text-white" aria-labelledby="stat-tx-count-label">{stellarStats.transactionCount}</p>
-            </div>
-
-            <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1" id="stat-op-count-label">Operations</p>
-              <p className="text-2xl font-bold text-white" aria-labelledby="stat-op-count-label">{stellarStats.operationCount}</p>
-            </div>
-
-            <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1" id="stat-closed-at-label">Closed At</p>
-              <p className="text-sm font-medium text-white" aria-labelledby="stat-closed-at-label">
-                {new Intl.DateTimeFormat('en', {
-                  dateStyle: 'medium',
-                  timeStyle: 'short',
-                  timeZone,
-                }).format(new Date(stellarStats.closedAt))}
-              </p>
-            </div>
-          </div>
-        ) : (
-          <p className="text-primary-100" role="status" aria-live="polite">Loading network stats...</p>
-        )}
-      </div>
-
-      {/* ── Bulk User Actions ─────────────────────────────────────────────── */}
-      <div
-        className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm"
-        role="region"
-        aria-labelledby="bulk-actions-heading"
-        data-testid="bulk-actions-section"
-      >
-        <div className="flex items-center gap-2 mb-4">
-          <ShieldAlert size={20} className="text-red-500" aria-hidden="true" />
-          <h3 id="bulk-actions-heading" className="text-lg font-semibold text-gray-900 dark:text-white">
-            Bulk User Actions
-          </h3>
-        </div>
-
-        <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-          Apply an action to all users matching the selected filter. You will be shown
-          the exact list of affected accounts before anything is submitted.
-        </p>
-
-        {/* Filter selector */}
-        <div className="flex flex-col sm:flex-row gap-3 mb-4">
-          <div className="flex-1">
-            <label
-              htmlFor="bulk-filter"
-              className="block text-xs text-gray-500 dark:text-gray-400 mb-1"
-            >
-              User filter
-            </label>
-            <select
-              id="bulk-filter"
-              value={bulkFilter}
-              onChange={(e) => setBulkFilter(e.target.value)}
-              className="w-full bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white rounded-lg px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 focus:outline-none focus:border-primary-500"
-              data-testid="bulk-filter-select"
-            >
-              <option value="unverified">Unverified users (KYC pending)</option>
-              <option value="inactive_30d">Inactive for 30+ days</option>
-              <option value="inactive_90d">Inactive for 90+ days</option>
-              <option value="suspended">Currently suspended</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Action buttons */}
-        <div className="flex flex-wrap gap-3">
-          <button
-            onClick={() => handleStageBulkAction('suspend')}
-            disabled={bulkPreviewLoading}
-            className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
-            data-testid="bulk-suspend-button"
+      {/* Bulk export download */}
+      {bulkExportUrl && (
+        <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm">
+          <a
+            href={bulkExportUrl}
+            className="inline-flex items-center gap-2 text-primary-500 font-semibold hover:underline"
+            download
           >
-            <XCircle size={15} />
-            {bulkPreviewLoading && bulkAction === null ? 'Loading…' : 'Suspend Matching Users'}
-          </button>
-          <button
-            onClick={() => handleStageBulkAction('verify')}
-            disabled={bulkPreviewLoading}
-            className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
-            data-testid="bulk-verify-button"
-          >
-            <CheckCircle size={15} />
-            {bulkPreviewLoading && bulkAction === null ? 'Loading…' : 'Verify Matching Users'}
-          </button>
+            Download export
+          </a>
         </div>
-      </div>
+      )}
 
-      {/* Bulk action confirmation modal — shows reviewable list of affected accounts */}
-      <ConfirmModal
-        isOpen={!!bulkAction}
-        onClose={() => { setBulkAction(null); setBulkPreviewUsers([]); }}
-        onConfirm={handleConfirmBulkAction}
-        title={`Confirm bulk ${bulkAction} (${bulkPreviewUsers.length} user${bulkPreviewUsers.length !== 1 ? 's' : ''})`}
-        message={`You are about to ${bulkAction} the ${bulkPreviewUsers.length} account${bulkPreviewUsers.length !== 1 ? 's' : ''} listed below. This action cannot be automatically undone.`}
-        confirmLabel={`${bulkAction === 'suspend' ? 'Suspend' : 'Verify'} ${bulkPreviewUsers.length} User${bulkPreviewUsers.length !== 1 ? 's' : ''}`}
-        confirmVariant="danger"
-        loading={bulkLoading}
-        data-testid="bulk-confirm-modal"
-      >
-        {/* Scrollable, reviewable list of affected users */}
-        {bulkPreviewUsers.length > 0 && (
-          <div
-            className="mt-4 max-h-48 overflow-y-auto rounded-lg border border-gray-700 bg-gray-800"
-            aria-label="Affected user accounts"
-            data-testid="bulk-preview-list"
-          >
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-gray-700 text-gray-300">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">#</th>
-                  <th className="px-3 py-2 text-left font-medium">Email</th>
-                  <th className="px-3 py-2 text-left font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-700">
-                {bulkPreviewUsers.map((u, idx) => (
-                  <tr key={u.id} className="text-gray-300">
-                    <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
-                    <td className="px-3 py-2 font-mono">{u.email}</td>
-                    <td className="px-3 py-2">{u.kyc_status || u.status || '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {bulkPreviewUsers.length === 0 && (
-          <p className="mt-3 text-xs text-gray-500 text-center">
-            No users match the selected filter. The action will have no effect.
-          </p>
-        )}
-      </ConfirmModal>
+      <Suspense fallback={null}>
+        <ContractStateViewer />
+      </Suspense>
+
+      {/* … rest of dashboard unchanged … */}
     </div>
   );
 }

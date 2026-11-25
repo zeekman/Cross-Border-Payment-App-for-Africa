@@ -1,50 +1,45 @@
-const nodemailer = require('nodemailer');
 const db = require('../db');
 const webhook = require('../services/webhook');
 const logger = require('../utils/logger');
 const { persistAndBroadcast } = require('../services/notificationInbox');
+const { sendClaimableBalanceExpiringEmail } = require('../services/email');
 
 const WARN_HOURS = parseInt(process.env.CLAIMABLE_BALANCE_WARN_HOURS || '24', 10);
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT || '587'),
-  secure: process.env.SMTP_SECURE === 'true',
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-});
-
 async function notifyUser(userId, balanceId, expiresAt) {
-  if (!process.env.SMTP_HOST) return;
   try {
     const { rows } = await db.query('SELECT email, full_name FROM users WHERE id = $1', [userId]);
     if (!rows[0]) return;
     const { email, full_name } = rows[0];
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
-      to: email,
-      subject: 'AfriPay: Claimable balance expiring soon',
-      html: `<p>Hi ${full_name},</p>
-             <p>Your claimable balance <strong>${balanceId}</strong> will expire on
-             <strong>${new Date(expiresAt).toUTCString()}</strong>.</p>
-             <p>Please claim it before it expires to avoid losing the funds.</p>`,
-    });
+    await sendClaimableBalanceExpiringEmail(email, full_name, balanceId, expiresAt);
     logger.info('Expiry notification sent', { userId, balanceId });
   } catch (err) {
     logger.warn('Failed to send expiry notification email', { userId, balanceId, error: err.message });
   }
 }
 
-async function checkClaimableBalanceExpiry() {
+async function checkClaimableBalanceExpiry(now = new Date()) {
   const { rows: expired } = await db.query(
-    `UPDATE claimable_balances
-     SET status = 'expired', updated_at = NOW()
-     WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= NOW()
-     RETURNING id, balance_id, user_id, asset, amount`
+    `WITH expired_balances AS (
+       UPDATE claimable_balances
+       SET status = 'expired', updated_at = NOW()
+      WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= $1
+       RETURNING id, balance_id, user_id, asset, amount
+     ), expired_transactions AS (
+       UPDATE transactions AS tx
+      SET status = 'expired', confirmed_at = $1
+       FROM expired_balances AS balance
+       WHERE tx.claimable_balance_id = balance.balance_id
+         AND tx.status = 'pending_claim'
+       RETURNING tx.id
+     )
+    SELECT balance.* FROM expired_balances AS balance`,
+      [now],
   );
 
   for (const row of expired) {
     logger.info('Claimable balance expired', { balanceId: row.balance_id });
-    webhook.deliver('claimable_balance.expired', {
+    webhook.deliver('claimable_balance.expired', row.user_id, {
       id: row.id,
       balance_id: row.balance_id,
       asset: row.asset,
@@ -59,18 +54,21 @@ async function checkClaimableBalanceExpiry() {
     }
   }
 
+  // Claim each warning exactly once: mark and return in the same statement
   const { rows: expiringSoon } = await db.query(
-    `SELECT id, balance_id, user_id, asset, amount, expires_at
-     FROM claimable_balances
+    `UPDATE claimable_balances
+     SET warning_sent_at = $1, updated_at = $1
      WHERE status = 'active'
+       AND warning_sent_at IS NULL
        AND expires_at IS NOT NULL
-       AND expires_at > NOW()
-       AND expires_at <= NOW() + ($1 || ' hours')::interval`,
-    [WARN_HOURS]
+       AND expires_at > $1
+       AND expires_at <= $1 + ($2::int * interval '1 hour')
+     RETURNING id, balance_id, user_id, asset, amount, expires_at`,
+     [now, WARN_HOURS]
   );
 
   for (const row of expiringSoon) {
-    webhook.deliver('claimable_balance.expiring_soon', {
+    webhook.deliver('claimable_balance.expiring_soon', row.user_id, {
       id: row.id,
       balance_id: row.balance_id,
       asset: row.asset,

@@ -15,6 +15,28 @@ const transporter = nodemailer.createTransport({
 let emailQueue = null;
 let emailWorker = null;
 
+/** Escape a value for safe interpolation into HTML email templates. */
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Crude HTML → plain-text fallback for the text/plain alternative part. */
+function htmlToText(html) {
+  return String(html || '')
+    .replace(/<br\s*\/?>(\s*)/gi, '\n')
+    .replace(/<\/(p|tr|h1|div)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*/g, '\n')
+    .trim();
+}
+
 const RETRY_DELAYS = [60_000, 300_000, 1_800_000];
 
 function getRedisConnection() {
@@ -82,6 +104,7 @@ async function enqueueEmail(jobData) {
     to: jobData.to,
     subject: jobData.subject,
     html: jobData.html,
+    text: jobData.text || htmlToText(jobData.html),
   });
 }
 
@@ -121,13 +144,13 @@ async function sendExpiryNotification(email, name, recipientWallet, amount, asse
     : `You have unclaimed funds expiring in ${daysLeft} day${daysLeft > 1 ? 's' : ''}`;
 
   const html = type === 'sender'
-    ? `<p>Hi ${name},</p>
-       <p>Your claimable balance of <strong>${amount} ${asset}</strong> sent to <code>${recipientWallet}</code> will expire in <strong>${daysLeft} day${daysLeft > 1 ? 's' : ''}</strong>.</p>
+    ? `<p>Hi ${escapeHtml(name)},</p>
+       <p>Your claimable balance of <strong>${escapeHtml(amount)} ${escapeHtml(asset)}</strong> sent to <code>${escapeHtml(recipientWallet)}</code> will expire in <strong>${escapeHtml(daysLeft)} day${daysLeft > 1 ? 's' : ''}</strong>.</p>
        <p>If the recipient doesn't claim the funds before expiry, they will be automatically returned to your account.</p>
        <p><a href="${process.env.FRONTEND_URL}/history">View in AfriPay</a></p>`
-    : `<p>Hi ${name},</p>
-       <p>You have unclaimed funds of <strong>${amount} ${asset}</strong> waiting for you!</p>
-       <p>These funds will expire in <strong>${daysLeft} day${daysLeft > 1 ? 's' : ''}</strong> if not claimed.</p>
+    : `<p>Hi ${escapeHtml(name)},</p>
+       <p>You have unclaimed funds of <strong>${escapeHtml(amount)} ${escapeHtml(asset)}</strong> waiting for you!</p>
+       <p>These funds will expire in <strong>${escapeHtml(daysLeft)} day${daysLeft > 1 ? 's' : ''}</strong> if not claimed.</p>
        <p><a href="${process.env.FRONTEND_URL}/dashboard">Claim your funds now</a></p>`;
 
   return enqueueEmail({ to: email, subject, html });
@@ -157,26 +180,26 @@ async function sendTransactionEmail(email, type, tx) {
       <div style="background:#f9fafb;padding:32px;border-radius:0 0 8px 8px;border:1px solid #e5e7eb">
         <p style="margin:0 0 24px">
           ${isSent
-            ? `Your payment of <strong>${tx.amount} ${tx.asset}</strong> has been sent successfully.`
-            : `You have received <strong>${tx.amount} ${tx.asset}</strong>.`}
+            ? `Your payment of <strong>${escapeHtml(tx.amount)} ${escapeHtml(tx.asset)}</strong> has been sent successfully.`
+            : `You have received <strong>${escapeHtml(tx.amount)} ${escapeHtml(tx.asset)}</strong>.`}
         </p>
         <table style="width:100%;border-collapse:collapse;font-size:14px">
           <tr style="border-bottom:1px solid #e5e7eb">
             <td style="padding:10px 0;color:#6b7280;width:40%">Amount</td>
-            <td style="padding:10px 0;font-weight:600">${tx.amount} ${tx.asset}</td>
+            <td style="padding:10px 0;font-weight:600">${escapeHtml(tx.amount)} ${escapeHtml(tx.asset)}</td>
           </tr>
           <tr style="border-bottom:1px solid #e5e7eb">
-            <td style="padding:10px 0;color:#6b7280">${counterpartyLabel}</td>
-            <td style="padding:10px 0;font-family:monospace;word-break:break-all">${counterpartyAddress}</td>
+            <td style="padding:10px 0;color:#6b7280">${escapeHtml(counterpartyLabel)}</td>
+            <td style="padding:10px 0;font-family:monospace;word-break:break-all">${escapeHtml(counterpartyAddress)}</td>
           </tr>
           ${tx.memo ? `
           <tr style="border-bottom:1px solid #e5e7eb">
             <td style="padding:10px 0;color:#6b7280">Memo</td>
-            <td style="padding:10px 0">${tx.memo}</td>
+            <td style="padding:10px 0;font-family:monospace;white-space:pre-wrap;word-break:break-all">${escapeHtml(tx.memo)}</td>
           </tr>` : ''}
           <tr style="border-bottom:1px solid #e5e7eb">
             <td style="padding:10px 0;color:#6b7280">Transaction Hash</td>
-            <td style="padding:10px 0;font-family:monospace;font-size:12px;word-break:break-all">${tx.txHash}</td>
+            <td style="padding:10px 0;font-family:monospace;font-size:12px;word-break:break-all">${escapeHtml(tx.txHash)}</td>
           </tr>
           <tr>
             <td style="padding:10px 0;color:#6b7280">Explorer</td>
@@ -195,11 +218,28 @@ async function sendTransactionEmail(email, type, tx) {
   return enqueueEmail({ to: email, subject, html });
 }
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+
+async function sendClaimableBalanceExpiringEmail(email, name, balanceId, expiresAt) {
+  return enqueueEmail({
+    to: email,
+    subject: 'AfriPay: Claimable balance expiring soon',
+    html: `<p>Hi ${escapeHtml(name)},</p>
+           <p>Your claimable balance <strong>${escapeHtml(balanceId)}</strong> will expire on
+           <strong>${escapeHtml(new Date(expiresAt).toUTCString())}</strong>.</p>
+           <p>Please claim it before it expires to avoid losing the funds.</p>`,
+  });
+}
+
 async function sendPaymentRequestExpiredEmail(email, amount, asset) {
   return enqueueEmail({
     to: email,
     subject: 'Your AfriPay payment request has expired',
-    html: `<p>Your payment request for <strong>${amount} ${asset}</strong> has expired and is no longer active.</p>
+    html: `<p>Your payment request for <strong>${escapeHtml(amount)} ${escapeHtml(asset)}</strong> has expired and is no longer active.</p>
            <p>You can create a new payment request from your AfriPay dashboard.</p>`,
   });
 }
@@ -208,9 +248,9 @@ async function sendEmailChangeRequestedNotice(currentEmail, newEmail, ip, userAg
   return enqueueEmail({
     to: currentEmail,
     subject: 'AfriPay: Your account email is being changed',
-    html: `<p>A request was made to change the email address on your AfriPay account to <strong>${newEmail}</strong>.</p>
-           <p>This change will not take effect until <strong>${newEmail}</strong> is verified — your account still uses this address until then.</p>
-           <p>Request details: IP ${ip || 'unknown'}, device: ${userAgent || 'unknown'}.</p>
+    html: `<p>A request was made to change the email address on your AfriPay account to <strong>${escapeHtml(newEmail)}</strong>.</p>
+           <p>This change will not take effect until <strong>${escapeHtml(newEmail)}</strong> is verified — your account still uses this address until then.</p>
+           <p>Request details: IP ${escapeHtml(ip || 'unknown')}, device: ${escapeHtml(userAgent || 'unknown')}.</p>
            <p>If you did not request this change, please contact support immediately and change your password.</p>`,
   });
 }
@@ -219,7 +259,7 @@ async function sendBackupCodeWarningEmail(email, remaining) {
   return enqueueEmail({
     to: email,
     subject: 'AfriPay: Low 2FA backup codes remaining',
-    html: `<p>You only have <strong>${remaining}</strong> backup code${remaining === 1 ? '' : 's'} remaining for your AfriPay account.</p>
+    html: `<p>You only have <strong>${escapeHtml(remaining)}</strong> backup code${remaining === 1 ? '' : 's'} remaining for your AfriPay account.</p>
            <p>Please regenerate your backup codes from your security settings to avoid being locked out.</p>`,
   });
 }
@@ -227,8 +267,8 @@ async function sendBackupCodeWarningEmail(email, remaining) {
 async function sendKycExpiryReminderEmail(email, name, daysRemaining) {
   const subject = `Action required: Your AfriPay identity document expires in ${daysRemaining} day${daysRemaining !== 1 ? 's' : ''}`;
   const html = `
-    <p>Hi ${name},</p>
-    <p>Your identity document on file with AfriPay will expire in <strong>${daysRemaining} day${daysRemaining !== 1 ? 's' : ''}</strong>.</p>
+    <p>Hi ${escapeHtml(name)},</p>
+    <p>Your identity document on file with AfriPay will expire in <strong>${escapeHtml(daysRemaining)} day${daysRemaining !== 1 ? 's' : ''}</strong>.</p>
     <p>To continue using AfriPay without interruption, please re-submit your KYC documents before the expiry date.</p>
     <p><a href="${process.env.FRONTEND_URL}/kyc">Re-verify my identity</a></p>
     <p style="font-size:12px;color:#9ca3af">If you have already re-submitted, you can ignore this reminder.</p>
@@ -236,7 +276,57 @@ async function sendKycExpiryReminderEmail(email, name, daysRemaining) {
   return enqueueEmail({ to: email, subject, html });
 }
 
+async function sendEscrowCancelledEmail(email, name, amount, asset, txHash) {
+  return enqueueEmail({
+    to: email,
+    subject: 'AfriPay: Your payment has been cancelled and refunded',
+    html: `<p>Hi ${escapeHtml(name)},</p>
+<p>Your payment of <strong>${escapeHtml(amount)} ${escapeHtml(asset)}</strong> has been cancelled and the funds have been refunded to your wallet.</p>
+<p>Transaction Hash: <code>${escapeHtml(txHash)}</code></p>
+<p><a href="${process.env.FRONTEND_URL}/history">View in AfriPay</a></p>`,
+  });
+}
+
+async function sendAgentEscrowDeliveredEmail(email, name, amount, asset, recipientWallet, agentName) {
+  return enqueueEmail({
+    to: email,
+    subject: 'Your AfriPay payment has been delivered',
+    html: `<p>Hi ${escapeHtml(name)},</p><p>Your payment of <strong>${escapeHtml(amount)} ${escapeHtml(asset)}</strong> has been delivered to <code>${escapeHtml(recipientWallet)}</code> by agent <strong>${escapeHtml(agentName)}</strong>.</p>`,
+  });
+}
+
+async function sendClaimableBalanceExpiringEmail(email, name, balanceId, expiresAt) {
+  return enqueueEmail({
+    to: email,
+    subject: 'AfriPay: Claimable balance expiring soon',
+    html: `<p>Hi ${escapeHtml(name)},</p>
+           <p>Your claimable balance <strong>${escapeHtml(balanceId)}</strong> will expire on
+           <strong>${escapeHtml(new Date(expiresAt).toUTCString())}</strong>.</p>
+           <p>Please claim it before it expires to avoid losing the funds.</p>`,
+  });
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function sendEscrowCancelledEmail(email, name, amount, asset, txHash) {
+  const subject = 'AfriPay: Your payment has been cancelled and refunded';
+  const html = `
+    <p>Hi ${escapeHtml(name)},</p>
+    <p>Your payment of <strong>${escapeHtml(amount)} ${escapeHtml(asset)}</strong> has been cancelled and the funds have been refunded to your wallet.</p>
+    <p>Transaction Hash: <code>${escapeHtml(txHash)}</code></p>
+    <p><a href="${process.env.FRONTEND_URL}/history">View in AfriPay</a></p>
+  `;
+  return enqueueEmail({ to: email, subject, html });
+}
+
 module.exports = {
+  escapeHtml,
+  sendClaimableBalanceExpiringEmail,
   initEmailQueue,
   drainEmailQueue,
   enqueueEmail,
@@ -248,5 +338,10 @@ module.exports = {
   sendPaymentRequestExpiredEmail,
   sendBackupCodeWarningEmail,
   sendKycExpiryReminderEmail,
+  sendEscrowCancelledEmail,
+  sendAgentEscrowDeliveredEmail,
+  sendClaimableBalanceExpiringEmail,
+  escapeHtml,
   sendEmailChangeRequestedNotice,
+  sendEscrowCancelledEmail,
 };

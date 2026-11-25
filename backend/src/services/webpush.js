@@ -155,15 +155,24 @@ function _sendRaw(subscription, payload) {
 async function deactivateSubscription(dbPool, subscriptionId) {
   if (!dbPool || !subscriptionId) return;
   await dbPool.query(
-    'UPDATE users SET push_subscription_active = false WHERE id = $1',
+    'UPDATE push_subscriptions SET active = false WHERE id = $1',
     [subscriptionId],
   ).catch(e => logger.warn('Failed to deactivate stale push subscription', { error: e.message }));
+}
+
+/** Delete a subscription whose endpoint is permanently gone (410/404). */
+async function deleteSubscription(dbPool, subscriptionId) {
+  if (!dbPool || !subscriptionId) return;
+  await dbPool.query(
+    'DELETE FROM push_subscriptions WHERE id = $1',
+    [subscriptionId],
+  ).catch(e => logger.warn('Failed to delete gone push subscription', { error: e.message }));
 }
 
 async function recordSendSuccess(dbPool, subscriptionId) {
   if (!dbPool || !subscriptionId) return;
   await dbPool.query(
-    'UPDATE users SET push_failure_count = 0, push_subscription_active = true WHERE id = $1',
+    'UPDATE push_subscriptions SET failure_count = 0, active = true, last_success_at = NOW() WHERE id = $1',
     [subscriptionId],
   ).catch(e => logger.warn('Failed to reset push failure count', { error: e.message }));
 }
@@ -175,12 +184,12 @@ async function recordSendSuccess(dbPool, subscriptionId) {
 async function recordSendFailure(dbPool, subscriptionId) {
   if (!dbPool || !subscriptionId) return;
   const result = await dbPool.query(
-    `UPDATE users SET push_failure_count = push_failure_count + 1
-     WHERE id = $1 RETURNING push_failure_count`,
+    `UPDATE push_subscriptions SET failure_count = failure_count + 1
+     WHERE id = $1 RETURNING failure_count`,
     [subscriptionId],
   ).catch(e => { logger.warn('Failed to increment push failure count', { error: e.message }); return null; });
 
-  const count = result?.rows?.[0]?.push_failure_count;
+  const count = result?.rows?.[0]?.failure_count;
   if (count != null && count >= MAX_CONSECUTIVE_FAILURES) {
     await deactivateSubscription(dbPool, subscriptionId);
   }
@@ -206,9 +215,9 @@ async function sendNotification(subscription, payload, subscriptionId = null, db
   } catch (err) {
     const status = err.statusCode;
 
-    // Permanent failure — deactivate subscription (endpoint is confirmed gone)
+    // Permanent failure — remove only this subscription (endpoint is confirmed gone)
     if (status === 410 || status === 404) {
-      await deactivateSubscription(dbPool, subscriptionId);
+      await deleteSubscription(dbPool, subscriptionId);
       return status;
     }
 
@@ -266,8 +275,8 @@ async function processRetryQueue(dbPool) {
       const status = err.statusCode;
 
       if (status === 410 || status === 404) {
-        // Permanently gone — deactivate (not delete)
-        await deactivateSubscription(dbPool, item.subscriptionId);
+        // Permanently gone — remove only this subscription
+        await deleteSubscription(dbPool, item.subscriptionId);
         continue;
       }
 
@@ -312,6 +321,7 @@ module.exports = {
   processRetryQueue,
   getDeadLetter,
   deactivateSubscription,
+  deleteSubscription,
   recordSendSuccess,
   recordSendFailure,
   _sendRaw,

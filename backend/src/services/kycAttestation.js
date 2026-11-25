@@ -16,22 +16,9 @@ const crypto = require("crypto");
 
 const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
-const isTestnet = process.env.STELLAR_NETWORK !== "mainnet";
-const networkPassphrase = isTestnet
-  ? StellarSdk.Networks.TESTNET
-  : StellarSdk.Networks.PUBLIC;
-
-const rpcUrl =
-  process.env.SOROBAN_RPC_URL ||
-  (isTestnet
-    ? "https://soroban-testnet.stellar.org"
-    : "https://mainnet.soroban.stellar.org");
+const { networkPassphrase, getRpc, waitForSorobanTx } = require("../config/soroban");
 
 const CONTRACT_ID = process.env.KYC_ATTESTATION_CONTRACT_ID;
-
-function getRpc() {
-  return new StellarSdk.SorobanRpc.Server(rpcUrl);
-}
 
 function decryptSecret(encryptedKey) {
   return decryptAesCbc(encryptedKey);
@@ -81,11 +68,7 @@ async function invokeAdmin(method, args) {
     throw Object.assign(new Error(`${method} failed: ${result.errorResult}`), { status: 400 });
   }
 
-  let response = result;
-  while (response.status === "PENDING" || response.status === "NOT_FOUND") {
-    await new Promise((r) => setTimeout(r, 1000));
-    response = await rpc.getTransaction(result.hash);
-  }
+  const response = await waitForSorobanTx(rpc, result);
 
   if (response.status !== "SUCCESS") {
     throw Object.assign(new Error(`Transaction failed: ${response.status}`), { status: 400 });
@@ -94,21 +77,42 @@ async function invokeAdmin(method, args) {
   return result.hash;
 }
 
+// Mirrors `KycTier` in contracts/kyc-attestation (C-like enum → encoded as u32).
+const KYC_TIERS = { basic: 0, enhanced: 1, business: 2 };
+const DEFAULT_TTL_DAYS = parseInt(process.env.KYC_ATTESTATION_TTL_DAYS || "365", 10);
+
+function tierToScVal(tier = "basic") {
+  const value = typeof tier === "number" ? tier : KYC_TIERS[String(tier).toLowerCase()];
+  if (![0, 1, 2].includes(value)) {
+    throw Object.assign(new Error(`Invalid KYC tier: ${tier}`), { status: 400 });
+  }
+  return StellarSdk.nativeToScVal(value, { type: "u32" });
+}
+
 /**
  * Attest a user's KYC on-chain.
+ * Contract: attest(admin, user, tier: KycTier, kyc_hash: Bytes, expires_at: u64)
  * @param {string} adminPublicKey - Admin Stellar address
  * @param {string} userWalletAddress - User's Stellar address
  * @param {string} userId - Internal user ID (for hash construction)
  * @param {string} idType - KYC document type
+ * @param {object} [opts]
+ * @param {string|number} [opts.tier="basic"] - basic | enhanced | business
+ * @param {Date|number} [opts.expiresAt] - expiry (Date or unix seconds); defaults to now + KYC_ATTESTATION_TTL_DAYS
  * @returns {Promise<string>} transaction hash
  */
-async function attestKyc(adminPublicKey, userWalletAddress, userId, idType) {
+async function attestKyc(adminPublicKey, userWalletAddress, userId, idType, opts = {}) {
   const kycHashBytes = buildKycHash(userId, userWalletAddress, idType);
+  let expiresAt = opts.expiresAt;
+  if (expiresAt instanceof Date) expiresAt = Math.floor(expiresAt.getTime() / 1000);
+  if (expiresAt == null) expiresAt = Math.floor(Date.now() / 1000) + DEFAULT_TTL_DAYS * 86400;
 
   const args = [
     StellarSdk.nativeToScVal(adminPublicKey, { type: "address" }),
     StellarSdk.nativeToScVal(userWalletAddress, { type: "address" }),
+    tierToScVal(opts.tier),
     StellarSdk.xdr.ScVal.scvBytes(kycHashBytes),
+    StellarSdk.nativeToScVal(BigInt(expiresAt), { type: "u64" }),
   ];
 
   return invokeAdmin("attest", args);
@@ -116,14 +120,17 @@ async function attestKyc(adminPublicKey, userWalletAddress, userId, idType) {
 
 /**
  * Revoke a user's KYC attestation on-chain.
+ * Contract: revoke(admin, user, tier: KycTier)
  * @param {string} adminPublicKey - Admin Stellar address
  * @param {string} userWalletAddress - User's Stellar address
+ * @param {string|number} [tier="basic"] - basic | enhanced | business
  * @returns {Promise<string>} transaction hash
  */
-async function revokeKyc(adminPublicKey, userWalletAddress) {
+async function revokeKyc(adminPublicKey, userWalletAddress, tier = "basic") {
   const args = [
     StellarSdk.nativeToScVal(adminPublicKey, { type: "address" }),
     StellarSdk.nativeToScVal(userWalletAddress, { type: "address" }),
+    tierToScVal(tier),
   ];
 
   return invokeAdmin("revoke", args);
@@ -142,4 +149,4 @@ function getAdminPublicKey() {
   return StellarSdk.Keypair.fromSecret(decryptSecret(encryptedKey)).publicKey();
 }
 
-module.exports = { attestKyc, revokeKyc, getAdminPublicKey };
+module.exports = { attestKyc, revokeKyc, getAdminPublicKey, KYC_TIERS };

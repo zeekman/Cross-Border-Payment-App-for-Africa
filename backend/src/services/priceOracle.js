@@ -160,4 +160,11 @@ function startPriceRefreshJob() {
   _refreshTimer.unref();
 }
 
-module.exports = { getXlmRates, startPriceRefreshJob };
+function stopPriceRefreshJob() {
+  if (_refreshTimer) {
+    clearInterval(_refreshTimer);
+    _refreshTimer = null;
+  }
+}
+
+module.exports = { getXlmRates, startPriceRefreshJob, stopPriceRefreshJob };

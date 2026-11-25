@@ -1,10 +1,9 @@
 'use strict';
 /**
- * Tests for GET /api/wallet/transactions deprecation (issue #270)
+ * Tests for GET /api/wallet/transactions removal (issue #270, BE-175)
  *
  * Verifies that the endpoint:
- *  - Still returns data (backward-compatible)
- *  - Sets Deprecation: true header
+ *  - Responds 410 Gone without querying transactions
  *  - Sets Link header pointing to /api/payments/history
  */
 
@@ -17,7 +16,6 @@ jest.mock('../services/stellar', () => ({}));
 
 const request = require('supertest');
 const express = require('express');
-const db = require('../db');
 
 // Build a minimal app with just the wallet router
 function buildApp() {
@@ -36,27 +34,21 @@ function buildApp() {
   return { app, db: require('../db') };
 }
 
-describe('GET /api/wallet/transactions — deprecation', () => {
-  test('responds with Deprecation: true header', async () => {
+describe('GET /api/wallet/transactions — removed', () => {
+  test('responds 410 Gone without touching the database', async () => {
     const { app, db } = buildApp();
-    // resolveWallet queries wallets table
-    db.query
-      .mockResolvedValueOnce({ rows: [{ public_key: 'GPUBKEY', id: 'w-1', encrypted_secret_key: 'enc' }] })
-      .mockResolvedValueOnce({ rows: [] }); // transactions query
 
     const res = await request(app)
       .get('/api/wallet/transactions')
       .set('Authorization', 'Bearer token');
 
-    expect(res.status).toBe(200);
-    expect(res.headers['deprecation']).toBe('true');
+    expect(res.status).toBe(410);
+    expect(res.body.successor).toBe('/api/payments/history');
+    expect(db.query).not.toHaveBeenCalled();
   });
 
   test('Link header points to /api/payments/history', async () => {
-    const { app, db } = buildApp();
-    db.query
-      .mockResolvedValueOnce({ rows: [{ public_key: 'GPUBKEY', id: 'w-1', encrypted_secret_key: 'enc' }] })
-      .mockResolvedValueOnce({ rows: [] });
+    const { app } = buildApp();
 
     const res = await request(app)
       .get('/api/wallet/transactions')
@@ -64,20 +56,5 @@ describe('GET /api/wallet/transactions — deprecation', () => {
 
     expect(res.headers['link']).toMatch(/\/api\/payments\/history/);
     expect(res.headers['link']).toMatch(/successor-version/);
-  });
-
-  test('still returns transactions array (backward-compatible)', async () => {
-    const { app, db } = buildApp();
-    const fakeTx = { id: 'tx-1', amount: '10', asset: 'XLM' };
-    db.query
-      .mockResolvedValueOnce({ rows: [{ public_key: 'GPUBKEY', id: 'w-1', encrypted_secret_key: 'enc' }] })
-      .mockResolvedValueOnce({ rows: [fakeTx] });
-
-    const res = await request(app)
-      .get('/api/wallet/transactions')
-      .set('Authorization', 'Bearer token');
-
-    expect(res.status).toBe(200);
-    expect(res.body.transactions).toEqual([fakeTx]);
   });
 });

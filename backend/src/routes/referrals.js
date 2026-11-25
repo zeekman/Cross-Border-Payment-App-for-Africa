@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const { body, validationResult } = require('express-validator');
 const authMiddleware = require('../middleware/auth');
+const { readLimiter } = require('../middleware/rateLimiter');
 const isAdmin = require('../middleware/isAdmin');
 const { getStats, getReferralDetails, awardReferralCreditHandler } = require('../controllers/referralController');
 
@@ -11,6 +12,7 @@ const validate = (req, res, next) => {
 };
 
 router.use(authMiddleware);
+router.use(readLimiter);
 
 /**
  * @swagger

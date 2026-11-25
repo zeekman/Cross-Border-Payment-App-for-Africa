@@ -1,6 +1,6 @@
 const db = require('../db');
 const webpush = require('../services/webpush');
-const { startStreamForUser, stopStreamForUser } = require('../services/horizonWorker');
+const ledgerListener = require('../services/ledgerListener');
 const { persistAndBroadcast } = require('../services/notificationInbox');
 const logger = require('../utils/logger');
 
@@ -26,18 +26,24 @@ async function subscribe(req, res, next) {
       return res.status(400).json({ errors });
     }
 
+    // BE-177: one row per device, upserted by endpoint.
     await db.query(
-      'UPDATE users SET push_subscription = $1 WHERE id = $2',
-      [JSON.stringify(subscription), req.user.userId],
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (endpoint) DO UPDATE
+         SET user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
+             user_agent = EXCLUDED.user_agent, active = true, failure_count = 0`,
+      [req.user.userId, subscription.endpoint, subscription.keys.p256dh, subscription.keys.auth,
+        req.get('user-agent') || null],
     );
 
     // Start Horizon stream for this user if not already running
     const walletResult = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1',
+      'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
       [req.user.userId],
     );
     if (walletResult.rows[0]) {
-      startStreamForUser(req.user.userId, walletResult.rows[0].public_key);
+      ledgerListener.addPushTarget(req.user.userId, walletResult.rows[0].public_key);
     }
 
     res.json({ message: 'Push subscription saved' });
@@ -48,22 +54,35 @@ async function subscribe(req, res, next) {
 
 /**
  * DELETE /api/notifications/subscribe
- * Removes the stored push subscription for the current user.
+ * Body: { endpoint } (or { subscription: { endpoint } })
+ * Removes this device's push subscription; other devices stay subscribed.
  */
 async function unsubscribe(req, res, next) {
   try {
-    const walletResult = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1',
-      [req.user.userId],
-    );
-    if (walletResult.rows[0]) {
-      stopStreamForUser(walletResult.rows[0].public_key);
+    const endpoint = req.body?.endpoint || req.body?.subscription?.endpoint;
+    if (!endpoint) {
+      return res.status(400).json({ errors: [{ field: 'endpoint', message: 'endpoint is required' }] });
     }
 
     await db.query(
-      'UPDATE users SET push_subscription = NULL WHERE id = $1',
+      'DELETE FROM push_subscriptions WHERE user_id = $1 AND endpoint = $2',
+      [req.user.userId, endpoint],
+    );
+
+    const { rows } = await db.query(
+      'SELECT 1 FROM push_subscriptions WHERE user_id = $1 LIMIT 1',
       [req.user.userId],
     );
+    if (!rows[0]) {
+      const walletResult = await db.query(
+        'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
+        [req.user.userId],
+      );
+      if (walletResult.rows[0]) {
+        ledgerListener.removePushTarget(walletResult.rows[0].public_key);
+      }
+    }
+
     res.json({ message: 'Push subscription removed' });
   } catch (err) {
     next(err);
@@ -77,10 +96,9 @@ async function unsubscribe(req, res, next) {
  */
 async function sendPushToUser(userId, payload) {
   const { rows } = await db.query(
-    'SELECT id, push_subscription, push_subscription_active FROM users WHERE id = $1',
+    'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1 AND active = true',
     [userId],
   );
-  const row = rows[0];
 
   if (payload) {
     try {
@@ -90,15 +108,12 @@ async function sendPushToUser(userId, payload) {
     }
   }
 
-  if (!row?.push_subscription) return;
-
-  // Subscription has been deactivated after repeated delivery failures —
-  // don't waste a send attempt until the user re-subscribes.
-  if (row.push_subscription_active === false) return;
-
-  // Failures (including permanent 410/404) are tracked and, if needed,
-  // deactivated inside webpush.sendNotification — nothing further to do here.
-  await webpush.sendNotification(row.push_subscription, JSON.stringify(payload), row.id, db).catch(() => {});
+  // Fan out to every active device. Failures (including permanent 410/404)
+  // are tracked per subscription inside webpush.sendNotification.
+  const body = JSON.stringify(payload);
+  await Promise.all(rows.map((sub) => webpush.sendNotification(
+    { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, body, sub.id, db,
+  ).catch(() => {})));
 }
 
 /**
@@ -110,10 +125,10 @@ async function sendPushToUser(userId, payload) {
 async function getSubscriptionHealth(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT push_subscription IS NOT NULL AS has_subscription,
-              COALESCE(push_subscription_active, true) AS active,
-              COALESCE(push_failure_count, 0) AS failure_count
-         FROM users WHERE id = $1`,
+      `SELECT COUNT(*) > 0 AS has_subscription,
+              COALESCE(BOOL_OR(active), true) AS active,
+              COALESCE(MIN(failure_count), 0) AS failure_count
+         FROM push_subscriptions WHERE user_id = $1`,
       [req.user.userId],
     );
     const row = rows[0] || {};

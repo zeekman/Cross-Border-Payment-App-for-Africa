@@ -18,7 +18,7 @@ vi.mock('react-qr-reader', () => ({
     <div data-testid="qr-reader">
       <button
         data-testid="mock-scan-success"
-        onClick={() => onResult({ text: 'GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP' })}
+        onClick={() => onResult({ text: 'GADQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOZPI' })}
       >
         Scan Success
       </button>
@@ -225,7 +225,7 @@ describe('QRScanner', () => {
       fireEvent.click(screen.getByTestId('mock-scan-success'));
 
       await waitFor(() => {
-        expect(mockOnScan).toHaveBeenCalledWith('GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP');
+        expect(mockOnScan).toHaveBeenCalledWith('GADQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOZPI');
         expect(mockOnClose).toHaveBeenCalled();
         expect(toast.success).toHaveBeenCalledWith('send.qr_scanned');
       });

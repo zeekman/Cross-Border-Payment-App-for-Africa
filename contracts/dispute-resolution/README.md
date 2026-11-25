@@ -21,6 +21,29 @@ Because `open_dispute` pulls `amount + filing_fee` from the `opener`, the contra
 
 Free-form disputes (not linked to an escrow or payment ID) remain allowed. The `sender`, `recipient`, and `amount` arguments are supplied by the opener and are not verified against an on-chain payment. This is intentional: the contract is a general-purpose dispute resolution primitive, and callers who need payment binding should use `open_escrow_dispute`, which verifies the dispute against the escrow contract.
 
+## Escrow disputes and the payout agent
+
+`open_escrow_dispute(escrow_contract, escrow_id, sender, recipient, agent, amount, payout_confirmed)`
+is called only by the registered escrow contract. Escrow funds are released to
+the **agent**, who pays the recipient in fiat off-chain, so the agent is a party
+to the dispute (#1366):
+
+- The agent may `submit_evidence` (read back with `get_agent_evidence`) and `appeal`.
+- The arbitrator may award the funds to the agent with `resolve_dispute_for_agent`;
+  the super-arbitrator with `resolve_appeal_for_agent`. The dispute then ends in
+  `ResolvedForAgent`. The multi-arbitrator panel (`cast_vote`) still votes only
+  for sender or recipient.
+- `payout_confirmed` (see `is_payout_confirmed`) records whether the agent had
+  confirmed delivery. If so and the dispute expires unresolved, only the agent
+  may `claim_expired`, and the funds go to the agent (`DisputeExpiredToAgent`
+  event). Otherwise the sender is refunded as usual.
+- `get_dispute_agent` returns the agent (`None` for free-form disputes).
+- `escrow_id` is stored with the dispute. Every settlement path
+  (`finalize_resolution`, `resolve_appeal*`, `cast_vote` quorum,
+  `claim_expired`) pays the winner and then calls the escrow's
+  `close_disputed_escrow(escrow_id, winner)` so the escrow leaves
+  `UnderDispute` (#1367).
+
 ## API
 
 ### `open_dispute(opener, sender, recipient, amount)`

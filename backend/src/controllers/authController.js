@@ -7,7 +7,7 @@ const audit = require('../services/audit');
 const logger = require('../utils/logger');
 const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
 const { sendVerificationEmail, sendPasswordResetEmail, sendBackupCodeWarningEmail, sendEmailChangeRequestedNotice } = require('../services/email');
-const { generateSecret, verifyToken, generateBackupCodes, useBackupCode, hashBackupCode, verifyBackupCode } = require('../services/twofa');
+const { generateSecret, verifyToken, getTokenCounter, generateBackupCodes, useBackupCode, hashBackupCode, verifyBackupCode } = require('../services/twofa');
 const {
   COOKIE_NAME,
   COOKIE_OPTIONS,
@@ -20,7 +20,9 @@ const {
   verifyDeviceToken,
 } = require('../utils/tokens');
 const { setCsrfCookie } = require('../middleware/csrf');
+const { issueStepUpToken } = require('../middleware/requireStepUp');
 const cache = require('../utils/cache');
+const { encryptSecret, decryptSecret } = require('../utils/symmetricEncryption');
 const {
   getRpConfig,
   generateRegistrationOptions,
@@ -31,16 +33,51 @@ const {
 
 const { sendOTP } = require('../services/sms');
 const { recordSession, invalidateOtherSessions } = require('./sessionController');
+const { disconnectJti, disconnectUser } = require('../services/socketRegistry');
 
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — email verification tokens
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const PHONE_OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const WEBAUTHN_CHALLENGE_TTL_SECONDS = 5 * 60; // 5 minutes
+const LOCKOUT_DURATION_MINUTES = 15;
+const MAX_FAILED_ATTEMPTS = 5;
+const ATTEMPT_WINDOW_MINUTES = 15;
 
 const FORGOT_PASSWORD_MESSAGE = {
   message:
     'If an account exists for this email, you will receive password reset instructions shortly.',
 };
+
+async function recordFailedAuthAttempt(userId, req, reason = 'invalid_2fa') {
+  const attemptWindowMs = ATTEMPT_WINDOW_MINUTES * 60 * 1000;
+  const lockoutDurationMs = LOCKOUT_DURATION_MINUTES * 60 * 1000;
+  const result = await db.query(
+    `UPDATE users
+     SET failed_login_attempts = CASE
+       WHEN last_failed_attempt_at IS NULL
+            OR (EXTRACT(EPOCH FROM (NOW() - last_failed_attempt_at)) * 1000) > $1
+       THEN 1 ELSE failed_login_attempts + 1 END,
+       last_failed_attempt_at = NOW(),
+       locked_until = CASE
+         WHEN (CASE
+           WHEN last_failed_attempt_at IS NULL
+                OR (EXTRACT(EPOCH FROM (NOW() - last_failed_attempt_at)) * 1000) > $1
+           THEN 1 ELSE failed_login_attempts + 1 END) >= $2
+         THEN NOW() + ($3 * INTERVAL '1 millisecond')
+         ELSE locked_until END
+     WHERE id = $4
+     RETURNING failed_login_attempts, locked_until`,
+    [attemptWindowMs, MAX_FAILED_ATTEMPTS, lockoutDurationMs, userId]
+  );
+  const updated = result.rows[0];
+  if (!updated) return null;
+  audit.log(userId, 'login_failure', req.ip, req.headers['user-agent'], {
+    failed_attempts: updated.failed_login_attempts,
+    attempts_remaining: Math.max(0, MAX_FAILED_ATTEMPTS - updated.failed_login_attempts),
+    reason,
+  });
+  return updated;
+}
 
 function generateVerificationToken() {
   const raw = crypto.randomBytes(32).toString('hex');
@@ -194,7 +231,8 @@ async function login(req, res, next) {
     const result = await db.query(
       `SELECT u.id, u.full_name, u.email, u.password_hash, u.email_verified, u.role,
               u.totp_enabled, u.totp_secret, u.failed_login_attempts, u.locked_until,
-              u.last_failed_attempt_at, u.onboarding_completed, w.public_key
+              u.last_failed_attempt_at, u.onboarding_completed, u.is_suspended, 
+              u.suspension_reason, w.public_key
        FROM users u LEFT JOIN wallets w ON w.user_id = u.id
        WHERE u.email = $1`,
       [email]
@@ -202,6 +240,16 @@ async function login(req, res, next) {
 
     const user = result.rows[0];
     const now = new Date();
+    
+    // Check if account is suspended
+    if (user && user.is_suspended) {
+      return res.status(403).json({
+        error: 'Account suspended',
+        reason: user.suspension_reason || 'Your account has been suspended. Please contact support.',
+        code: 'ACCOUNT_SUSPENDED'
+      });
+    }
+    
     // Lockout configuration — single source of truth for threshold and windows
     const LOCKOUT_DURATION_MINUTES = 15;
     const MAX_FAILED_ATTEMPTS = 5;
@@ -309,9 +357,29 @@ async function login(req, res, next) {
           }
         }
         if (!matchedId) {
-          return res.status(401).json({ error: 'BACKUP_CODE_USED' });
+          const failed = await recordFailedAuthAttempt(user.id, req);
+          if (failed?.locked_until && new Date(failed.locked_until) > new Date()) {
+            return res.status(423).json({
+              error: `Account locked due to too many failed login attempts. Try again after ${new Date(failed.locked_until).toISOString()}`,
+              locked_until: new Date(failed.locked_until).toISOString(),
+            });
+          }
+          return res.status(401).json({ error: 'Invalid backup code' });
         }
-        await db.query(`UPDATE totp_backup_codes SET used_at = NOW() WHERE id = $1`, [matchedId]);
+        const consumed = await db.query(
+          `UPDATE totp_backup_codes SET used_at = NOW() WHERE id = $1 AND used_at IS NULL RETURNING id`,
+          [matchedId]
+        );
+        if (!consumed.rows.length) {
+          const failed = await recordFailedAuthAttempt(user.id, req);
+          if (failed?.locked_until && new Date(failed.locked_until) > new Date()) {
+            return res.status(423).json({
+              error: `Account locked due to too many failed login attempts. Try again after ${new Date(failed.locked_until).toISOString()}`,
+              locked_until: new Date(failed.locked_until).toISOString(),
+            });
+          }
+          return res.status(401).json({ error: 'Invalid backup code' });
+        }
         const remaining = await db.query(
           `SELECT COUNT(*) AS count FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`,
           [user.id]
@@ -328,6 +396,9 @@ async function login(req, res, next) {
             const payload = verifyDeviceToken(incomingDeviceToken);
             deviceTrusted = String(payload.userId) === String(user.id);
           } catch { /* expired or invalid — require TOTP */ }
+        }
+        if (!deviceTrusted && !totpCode) {
+          return res.status(401).json({ error: 'TOTP code required', code: 'TOTP_REQUIRED', requires_2fa: true });
         }
         if (!deviceTrusted && !verifyToken(user.totp_secret, totpCode)) {
           return res.status(401).json({ error: 'Invalid TOTP code' });
@@ -356,7 +427,7 @@ async function login(req, res, next) {
     );
 
     // Record session for remote logout support
-    await recordSession(user.id, token, req).catch(() => {});
+    await recordSession(user.id, token, req, familyId).catch(() => {});
 
     const device_token = rememberDevice ? signDeviceToken({ userId: user.id }) : undefined;
 
@@ -404,6 +475,7 @@ async function logout(req, res, next) {
         }
       }
     }
+    disconnectJti(req.user?.jti);
     res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
     res.json({ message: 'Logged out successfully' });
   } catch (err) {
@@ -411,9 +483,32 @@ async function logout(req, res, next) {
   }
 }
 
+async function resendVerification(req, res, next) {
+  try {
+    const { email } = req.body;
+    res.status(200).json({ message: 'If that account exists and is unverified, a new verification email has been sent.' });
+
+    const found = await db.query('SELECT id FROM users WHERE email = $1 AND email_verified = FALSE', [email]);
+    if (found.rows.length === 0) return;
+
+    const { raw, hashed } = generateVerificationToken();
+    const expiresAt = new Date(Date.now() + TOKEN_TTL_MS);
+    Promise.resolve()
+      .then(() => db.query(
+        'UPDATE users SET verification_token = $1, token_expires_at = $2 WHERE id = $3',
+        [hashed, expiresAt, found.rows[0].id]
+      ))
+      .then(() => sendVerificationEmail(email, raw))
+      .catch((err) => logger.warn('resendVerification background task failed', { error: err.message }));
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function verifyEmail(req, res, next) {
   try {
-    const { token } = req.query;
+    // Prefer POST body; query-string GET is deprecated (tokens in URLs leak via logs/Referer)
+    const token = req.body?.token || req.query.token;
     if (!token) return res.status(400).json({ error: 'Verification token is required' });
 
     const hashed = crypto.createHash('sha256').update(token).digest('hex');
@@ -507,8 +602,18 @@ async function getMe(req, res, next) {
 async function setup2FA(req, res, next) {
   try {
     const userId = req.user.userId;
-    const user = await db.query('SELECT email FROM users WHERE id = $1', [userId]);
+    const user = await db.query('SELECT email, totp_enabled FROM users WHERE id = $1', [userId]);
     if (!user.rows[0]) return res.status(404).json({ error: 'User not found' });
+
+    // Issue #1151: Prevent silently replacing an active 2FA secret.
+    // If the user already has 2FA enabled, they must first disable it
+    // (verify2FADisable) before setting up a new secret.
+    if (user.rows[0].totp_enabled) {
+      return res.status(400).json({
+        error: '2FA is already enabled on this account. Please disable it first if you need to set up a new authenticator.',
+        code: 'TOTP_ALREADY_ENABLED',
+      });
+    }
 
     const { secret, qrCode, otpauthUri } = await generateSecret(user.rows[0].email);
     const backupCodes = generateBackupCodes();
@@ -650,19 +755,33 @@ async function verifyPIN(req, res, next) {
     const { pin } = req.body;
     const userId = req.user.userId;
 
-    const result = await db.query(`SELECT pin_hash FROM users WHERE id = $1`, [userId]);
+    const result = await db.query(`SELECT pin_hash, locked_until FROM users WHERE id = $1`, [userId]);
     if (!result.rows[0]) return res.status(404).json({ error: 'User not found' });
 
-    const { pin_hash } = result.rows[0];
+    const { pin_hash, locked_until } = result.rows[0];
+    if (locked_until && new Date(locked_until) > new Date()) {
+      return res.status(423).json({ error: 'Account locked. Try again later.', locked_until: new Date(locked_until).toISOString() });
+    }
 
     if (!pin_hash) {
       return res.status(400).json({ error: 'PIN not configured. Please set up a PIN first.' });
     }
 
     const isPINValid = await comparePIN(pin, pin_hash);
-    if (!isPINValid) return res.status(401).json({ error: 'Invalid PIN' });
+    if (!isPINValid) {
+      const failed = await recordFailedAuthAttempt(userId, req, 'invalid_pin');
+      if (failed?.locked_until && new Date(failed.locked_until) > new Date()) {
+        return res.status(423).json({ error: 'Account locked. Try again later.', locked_until: new Date(failed.locked_until).toISOString() });
+      }
+      return res.status(401).json({ error: 'Invalid PIN' });
+    }
 
-    res.json({ message: 'PIN verified successfully' });
+    await db.query(
+      'UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_failed_attempt_at = NULL WHERE id = $1',
+      [userId],
+    );
+    const stepUp = issueStepUpToken(userId);
+    res.json({ message: 'PIN verified successfully', ...stepUp });
   } catch (err) {
     next(err);
   }
@@ -726,6 +845,44 @@ async function disableBiometric(req, res, next) {
   }
 }
 
+// BE-137: a token rotated within this window (e.g. two tabs refreshing at
+// once) returns the already-issued successor instead of counting as reuse.
+const REFRESH_GRACE_MS = 20_000;
+
+async function revokeFamilyForReuse(res, record) {
+  await db.query(
+    `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = COALESCE(revoked_at, NOW()), replaced_by_enc = NULL
+     WHERE family_id = $1`,
+    [record.family_id]
+  );
+  logger.warn('refresh_token_reuse detected — family revoked', {
+    event: 'refresh_token_reuse',
+    family_id: record.family_id,
+    user_id: record.user_id,
+  });
+  res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
+  return res.status(401).json({ error: 'Refresh token reuse detected. Please log in again.' });
+}
+
+function issueRefreshResponse(res, record, rawToken) {
+  const token = signAccessToken({
+    userId: record.user_id,
+    email: record.email,
+    role: record.role,
+  });
+  res.cookie(COOKIE_NAME, rawToken, COOKIE_OPTIONS);
+  setCsrfCookie(res, record.family_id);
+  return res.json({ token });
+}
+
+function withinGrace(record) {
+  return (
+    record.revoked_at &&
+    record.replaced_by_enc &&
+    Date.now() - new Date(record.revoked_at).getTime() <= REFRESH_GRACE_MS
+  );
+}
+
 async function refresh(req, res, next) {
   try {
     const raw = req.cookies?.[COOKIE_NAME];
@@ -733,7 +890,7 @@ async function refresh(req, res, next) {
 
     const hash = crypto.createHash('sha256').update(raw).digest('hex');
 
-    // Fast-path: check Redis blacklist before hitting the database
+    // Fast-path: check Redis blacklist (set on logout) before hitting the database
     const blacklisted = await cache.get(`blacklist:rt:${hash}`);
     if (blacklisted) {
       logger.warn('refresh_token_blacklisted — Redis fast-reject', { event: 'refresh_token_blacklisted' });
@@ -741,61 +898,32 @@ async function refresh(req, res, next) {
       return res.status(401).json({ error: 'Refresh token has been revoked. Please log in again.' });
     }
 
-    // Look up the token — active (not revoked) and not expired
-    const result = await db.query(
+    const lookup = () => db.query(
       `SELECT rt.id, rt.user_id, rt.expires_at, rt.family_id, rt.revoked,
-              u.email, u.role
+              rt.revoked_at, rt.replaced_by_enc, u.email, u.role
+              u.email, u.role, u.is_suspended, u.suspension_reason
        FROM refresh_tokens rt
        JOIN users u ON u.id = rt.user_id
        WHERE rt.token_hash = $1`,
       [hash]
     );
 
-    const record = result.rows[0];
-
-    if (!record) {
-      // Token hash unknown — could be a completely invalid token (ignore)
-      // or a previously-rotated token being replayed (reuse attack).
-      // Check if this hash belongs to a revoked token in any known family.
-      const revokedResult = await db.query(
-        `SELECT rt.family_id, rt.user_id
-         FROM refresh_tokens rt
-         WHERE rt.token_hash = $1 AND rt.revoked = TRUE`,
-        [hash]
-      );
-
-      if (revokedResult.rows.length > 0) {
-        // Reuse detected — invalidate the entire family and force re-login
-        const { family_id, user_id } = revokedResult.rows[0];
-        await db.query(
-          'DELETE FROM refresh_tokens WHERE family_id = $1',
-          [family_id]
-        );
-        logger.warn('refresh_token_reuse detected — family invalidated', {
-          event: 'refresh_token_reuse',
-          family_id,
-          user_id,
-        });
-        res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
-        return res.status(401).json({ error: 'Refresh token reuse detected. Please log in again.' });
-      }
-
-      return res.status(401).json({ error: 'Invalid refresh token' });
-    }
+    const record = (await lookup()).rows[0];
+    if (!record) return res.status(401).json({ error: 'Invalid refresh token' });
 
     if (record.revoked) {
-      // Active lookup returned a revoked row — same family attack, nuke family
-      await db.query(
-        'DELETE FROM refresh_tokens WHERE family_id = $1',
-        [record.family_id]
-      );
-      logger.warn('refresh_token_reuse detected — family invalidated', {
-        event: 'refresh_token_reuse',
-        family_id: record.family_id,
-        user_id: record.user_id,
-      });
+      if (withinGrace(record)) return issueRefreshResponse(res, record, decryptSecret(record.replaced_by_enc));
+      return revokeFamilyForReuse(res, record);
+    }
+    
+    // Check if user account is suspended
+    if (record.is_suspended) {
       res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
-      return res.status(401).json({ error: 'Refresh token reuse detected. Please log in again.' });
+      return res.status(403).json({
+        error: 'Account suspended',
+        reason: record.suspension_reason || 'Your account has been suspended. Please contact support.',
+        code: 'ACCOUNT_SUSPENDED'
+      });
     }
 
     if (new Date(record.expires_at) < new Date()) {
@@ -805,35 +933,30 @@ async function refresh(req, res, next) {
       return res.status(401).json({ error: 'Refresh token expired' });
     }
 
-    // Valid — rotate: mark old token revoked (kept for reuse detection), issue new one
+    // Valid — rotate. Insert the successor first, then atomically claim the
+    // old token; if a concurrent request won the race, hand back its successor.
     const { raw: newRaw, hash: newHash } = generateRefreshToken();
-    const expiresAt = refreshTokenExpiresAt();
-
-    await db.query(
-      'UPDATE refresh_tokens SET revoked = TRUE WHERE id = $1',
-      [record.id]
-    );
+    const successorId = uuidv4();
     await db.query(
       `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, family_id, revoked)
        VALUES ($1, $2, $3, $4, $5, FALSE)`,
-      [uuidv4(), record.user_id, newHash, expiresAt, record.family_id]
+      [successorId, record.user_id, newHash, refreshTokenExpiresAt(), record.family_id]
+    );
+    const claimed = await db.query(
+      `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = NOW(), replaced_by_enc = $2
+       WHERE id = $1 AND revoked = FALSE
+       RETURNING id`,
+      [record.id, encryptSecret(newRaw)]
     );
 
-    // Blacklist old token in Redis (TTL = remaining valid time before it would have expired)
-    const oldTtlSeconds = Math.max(0, Math.floor((new Date(record.expires_at) - Date.now()) / 1000));
-    if (oldTtlSeconds > 0) {
-      await cache.set(`blacklist:rt:${hash}`, '1', oldTtlSeconds);
+    if (!claimed.rows.length) {
+      await db.query('DELETE FROM refresh_tokens WHERE id = $1', [successorId]);
+      const winner = (await lookup()).rows[0];
+      if (winner && withinGrace(winner)) return issueRefreshResponse(res, winner, decryptSecret(winner.replaced_by_enc));
+      return revokeFamilyForReuse(res, record);
     }
 
-    const token = signAccessToken({
-      userId: record.user_id,
-      email: record.email,
-      role: record.role,
-    });
-
-    res.cookie(COOKIE_NAME, newRaw, COOKIE_OPTIONS);
-    setCsrfCookie(res, record.family_id);
-    res.json({ token });
+    return issueRefreshResponse(res, record, newRaw);
   } catch (err) {
     next(err);
   }
@@ -911,6 +1034,7 @@ async function resetPassword(req, res, next) {
       client.release();
     }
 
+    disconnectUser(userId);
     audit.log(userId, 'password_change', req.ip, req.headers['user-agent']);
     audit.log(userId, 'password_reset_sessions_invalidated', req.ip, req.headers['user-agent']);
     res.json({ message: 'Password has been reset. You can now log in.' });
@@ -1030,7 +1154,7 @@ async function changeEmail(req, res, next) {
 
 async function verifyEmailChange(req, res, next) {
   try {
-    const { token } = req.query;
+    const token = req.body?.token || req.query.token;
     if (!token) return res.status(400).json({ error: 'Token is required' });
 
     const hashed = crypto.createHash('sha256').update(token).digest('hex');
@@ -1406,6 +1530,7 @@ module.exports = {
   logout,
   revokeDeviceTrust,
   verifyEmail,
+  resendVerification,
   verifyPhone,
   getMe,
   updateProfile,

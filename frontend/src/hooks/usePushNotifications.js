@@ -83,8 +83,10 @@ export function usePushNotifications() {
     try {
       const reg = await navigator.serviceWorker.ready;
       const sub = await reg.pushManager.getSubscription();
-      if (sub) await sub.unsubscribe();
-      await api.delete('/notifications/subscribe');
+      if (sub) {
+        await sub.unsubscribe();
+        await api.delete('/notifications/subscribe', { data: { endpoint: sub.endpoint } });
+      }
       setSubscribed(false);
     } catch (err) {
       console.error('Push unsubscribe failed', err);

@@ -4,11 +4,15 @@ import { ArrowLeft, Plus, Trash2, List, Calendar } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import useStepUp from '../hooks/useStepUp';
+import { useConfirm } from '../context/ConfirmContext';
 import { CURRENCIES } from '../utils/currency';
 import ScheduledPaymentsCalendar from '../components/ScheduledPaymentsCalendar';
 import { validateStellarAddress } from '../utils/validation';
 
 export default function ScheduledPayments() {
+  const { requestStepUp, stepUpModal } = useStepUp();
+  const confirm = useConfirm();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const [payments, setPayments] = useState([]);
@@ -25,7 +29,7 @@ export default function ScheduledPayments() {
 
   useEffect(() => {
     fetchPayments();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- load once on mount
 
   const fetchPayments = async () => {
     try {
@@ -67,6 +71,8 @@ export default function ScheduledPayments() {
       // If balance check fails, proceed — backend will validate anyway
     }
 
+    const stepUpToken = await requestStepUp();
+    if (!stepUpToken) return;
     try {
       await api.post('/scheduled-payments', {
         execute_at: new Date(Date.now() + 3600000).toISOString(),
@@ -75,7 +81,7 @@ export default function ScheduledPayments() {
         asset: form.asset,
         frequency: form.frequency,
         memo: form.memo || undefined
-      });
+      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success(t('scheduled.created') || 'Scheduled payment created');
       setForm({ recipient_wallet: '', amount: '', asset: 'XLM', frequency: 'monthly', memo: '' });
       setShowForm(false);
@@ -86,7 +92,7 @@ export default function ScheduledPayments() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm(t('scheduled.confirm_delete') || 'Delete this scheduled payment?')) return;
+    if (!(await confirm(t('scheduled.confirm_delete', 'Delete this scheduled payment? It will no longer run.'), { title: t('confirm.delete_scheduled_title', 'Delete scheduled payment'), confirmLabel: t('confirm.delete', 'Delete') }))) return;
     try {
       await api.delete(`/scheduled-payments/${id}`);
       toast.success(t('scheduled.deleted') || 'Deleted');
@@ -238,6 +244,7 @@ export default function ScheduledPayments() {
           ))}
         </div>
       )}
+      {stepUpModal}
     </div>
   );
 }

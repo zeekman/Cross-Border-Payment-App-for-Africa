@@ -7,13 +7,23 @@ on:
     branches: [ main ]
 
 jobs:
+  contracts-integration:
+    name: Contracts integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test (cross-contract)
+        working-directory: contracts/integration-tests
+        run: cargo test
+
   test:
     name: Test Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
     
     strategy:
       matrix:
-        node-version: [18.x, 20.x]
+        node-version: [22.x, 24.x]
         # Run backend/frontend separately for coverage
         component: [backend, frontend]
       fail-fast: false
@@ -99,7 +109,13 @@ jobs:
         cd frontend
         npm ci
 
-    - name: Lint (frontend)
+    - name: Lint correctness (frontend, required)
+      if: matrix.component == 'frontend'
+      run: |
+        cd frontend
+        npm run lint:build
+
+    - name: Lint style (frontend)
       if: matrix.component == 'frontend'
       # continue-on-error: repo has pre-existing lint debt (~800 violations);
       # this makes new violations visible without blocking merges until that's paid down
@@ -142,7 +158,7 @@ jobs:
     
     - name: Upload coverage
       uses: actions/upload-artifact@v4
-      if: matrix.node-version == '20.x' && success()
+      if: matrix.node-version == '22.x' && success()
       with:
         name: coverage-report-${{ matrix.component }}
         path: coverage/
@@ -248,10 +264,10 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Setup Node 20.x
+    - name: Setup Node 22.x
       uses: actions/setup-node@v4
       with:
-        node-version: 20.x
+        node-version: 22.x
         cache: 'npm'
         cache-dependency-path: '**/package-lock.json'
     
@@ -283,9 +299,16 @@ jobs:
         cd frontend
         npm run build
       env:
-        REACT_APP_API_URL: http://localhost:5000
+        # FE-130: must include /api so axios baseURL matches the backend routing
+        # (api.js calls paths like /auth/login which resolve to /api/auth/login).
+        REACT_APP_API_URL: http://localhost:5000/api
         REACT_APP_STELLAR_NETWORK: testnet
     
+    - name: Check e2e selectors and routes
+      run: |
+        cd e2e
+        npm run check:selectors
+
     - name: Run E2E tests
       run: |
         cd e2e

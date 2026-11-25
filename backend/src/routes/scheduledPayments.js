@@ -1,6 +1,7 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const auth = require('../middleware/auth');
+const { requireStepUp } = require('../middleware/requireStepUp');
 const StellarSdk = require('@stellar/stellar-sdk');
 const { create, list, update, delete: delete_ } = require('../controllers/scheduledPaymentController');
 
@@ -87,6 +88,7 @@ router.post(
       }),
   ],
   validate,
+  requireStepUp,
   create,
 );
 

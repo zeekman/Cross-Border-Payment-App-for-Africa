@@ -89,7 +89,7 @@ describe('processRetryQueue', () => {
     _store[webpush.RETRY_QUEUE_KEY] = [JSON.stringify(makeItem({ subscriptionId: 'gone-user' }))];
     await webpush.processRetryQueue(mockDb);
     expect(mockDb.query).toHaveBeenCalledWith(
-      'UPDATE users SET push_subscription_active = false WHERE id = $1', ['gone-user']
+      'DELETE FROM push_subscriptions WHERE id = $1', ['gone-user']
     );
     expect(_store[webpush.DEAD_LETTER_KEY] || []).toHaveLength(0);
     expect(_store[webpush.RETRY_QUEUE_KEY] || []).toHaveLength(0);
@@ -140,13 +140,13 @@ describe('sendNotification', () => {
     expect(status).toBe(201);
   });
 
-  test('deactivates subscription on 410 Gone', async () => {
+  test('deletes only that subscription on 410 Gone', async () => {
     const err = Object.assign(new Error('410'), { statusCode: 410 });
     sendRawSpy.mockRejectedValue(err);
     const status = await webpush.sendNotification(SUBSCRIPTION, '{}', 'u-gone', mockDb);
     expect(status).toBe(410);
     expect(mockDb.query).toHaveBeenCalledWith(
-      'UPDATE users SET push_subscription_active = false WHERE id = $1', ['u-gone']
+      'DELETE FROM push_subscriptions WHERE id = $1', ['u-gone']
     );
     expect(mockRedis.rpush).not.toHaveBeenCalled();
   });

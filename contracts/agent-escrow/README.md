@@ -118,16 +118,58 @@ Returns total platform fees accumulated but not yet withdrawn.
 
 ---
 
-#### `withdraw_fees(env, admin, amount)`
-Withdraws accumulated platform fees to the admin address.
+#### `withdraw_fees(env, to, amount)`
+Withdraws `amount` of the accumulated platform fees to `to`. Requires the
+stored admin's authorisation. Partial withdrawals are supported; insurance
+contributions are not withdrawable here.
 
 **Arguments:**
-- `admin`: Must match the admin set during `initialize`
-- `amount`: Amount to withdraw (must not exceed accumulated fees)
+- `to`: Recipient of the fees (e.g. treasury). Must not be the contract itself
+- `amount`: Amount to withdraw (must be positive and not exceed accumulated fees)
 
 **Panics if:**
-- Caller is not admin
-- Withdrawal amount exceeds accumulated fees
+- Admin has not authorised the call
+- `amount` is zero/negative or exceeds accumulated fees
+- `to` is the contract address
+
+**Events:**
+- `FeesWithdrawn`: `{ admin, to, amount, remaining_fees }`
+
+---
+
+### Insurance Fund
+
+Every fee booked by `confirm_payout`, `partial_confirm_payout` and
+`admin_release` (to agent) is split: `InsuranceContributionBps` (default
+500 = 5 %) goes to the insurance fund, the rest to withdrawable fees.
+`withdraw_fees` never touches the insurance fund.
+
+#### `insurance_payout(env, escrow_id)`
+Admin only. Pays the escrow's original sender from the insurance fund.
+
+- The escrow must be `Cancelled`.
+- The claim is the escrow's `released_amount` (funds the agent received
+  before cancellation; everything else was already refunded). A plain
+  cancel with no partial releases has nothing to claim.
+- Cumulative payouts per escrow are capped at that claim, so repeated calls
+  cannot pay twice. Each call pays `min(outstanding claim, fund balance)`.
+- Emits `InsurancePayout`.
+
+#### `set_insurance_contribution_bps(env, new_bps)`
+Admin only. Sets the insurance share of each fee (max 1000 = 10 %).
+Emits `InsuranceContributionBpsUpdated`.
+
+#### `get_insurance_balance(env) -> i128`
+Current insurance fund balance (`get_insurance_fund` is an alias).
+
+#### `get_insurance_contribution_bps(env) -> u32` / `get_insurance_paid(env, escrow_id) -> i128`
+Current contribution rate, and insurance already paid for an escrow.
+
+### Administration
+
+#### `update_admin(env, new_admin)`
+Rotates the admin. Requires authorisation from **both** the current and
+the new admin. Emits `AdminUpdated`.
 
 ---
 
@@ -164,6 +206,7 @@ pub struct AgentEscrow {
 - **EscrowCreated**: Emitted when a new escrow is created
 - **PayoutConfirmed**: Emitted when agent confirms payout
 - **EscrowCancelled**: Emitted when sender cancels escrow
+- **FeesWithdrawn**: Emitted when the admin withdraws platform fees
 
 ---
 

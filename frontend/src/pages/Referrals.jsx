@@ -3,17 +3,19 @@ import { Copy, CheckCheck, Users, Gift, Share2, Clock, AlertCircle, CheckCircle 
 import { QRCodeCanvas } from 'qrcode.react';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
 
 const DEEP_LINK_PREFIX = 'afripay://register';
 
 const STATUS_CONFIG = {
-  pending: { icon: Clock, color: 'text-yellow-500', bg: 'bg-yellow-50 dark:bg-yellow-900', label: 'Pending' },
-  credited: { icon: CheckCircle, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-900', label: 'Credited' },
-  failed: { icon: AlertCircle, color: 'text-red-500', bg: 'bg-red-50 dark:bg-red-900', label: 'Failed' },
-  ineligible: { icon: AlertCircle, color: 'text-gray-500', bg: 'bg-gray-50 dark:bg-gray-800', label: 'Ineligible' },
+  pending: { icon: Clock, color: 'text-yellow-500', bg: 'bg-yellow-50 dark:bg-yellow-900', label: 'referrals.pending' },
+  credited: { icon: CheckCircle, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-900', label: 'referrals.credited' },
+  failed: { icon: AlertCircle, color: 'text-red-500', bg: 'bg-red-50 dark:bg-red-900', label: 'referrals.failed' },
+  ineligible: { icon: AlertCircle, color: 'text-gray-500', bg: 'bg-gray-50 dark:bg-gray-800', label: 'referrals.ineligible' },
 };
 
 export default function Referrals() {
+  const { t, i18n } = useTranslation();
   const [stats, setStats] = useState(null);
   const [referrals, setReferrals] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -30,13 +32,13 @@ export default function Referrals() {
         setStats(statsRes.data);
         setReferrals(detailsRes.data.referrals || []);
       } catch (err) {
-        toast.error('Failed to load referral data');
+        toast.error(t('referrals.loadFailed'));
       } finally {
         setLoading(false);
       }
     };
     fetchData();
-  }, []);
+  }, [t]);
 
   const code = stats?.referral_code || '';
   const webLink = code ? `${window.location.origin}/register?ref=${code}` : '';
@@ -46,17 +48,17 @@ export default function Referrals() {
     try {
       await navigator.clipboard.writeText(webLink);
       setCopied(true);
-      toast.success('Referral link copied!');
+      toast.success(t('referrals.linkCopied'));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error('Failed to copy referral link');
+      toast.error(t('referrals.copyFailed'));
     }
   };
 
   const handleShare = async () => {
     const shareData = {
-      title: 'Join AfriPay',
-      text: `Use my referral link to join AfriPay and earn rewards: ${webLink}`,
+      title: t('referrals.shareTitle'),
+      text: t('referrals.shareText', { link: webLink }),
       url: webLink,
     };
     if (navigator.share) {
@@ -71,7 +73,7 @@ export default function Referrals() {
   };
 
   const formatDate = (date) => {
-    return new Date(date).toLocaleDateString('en-US', {
+    return new Date(date).toLocaleDateString(i18n.language, {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
@@ -88,30 +90,30 @@ export default function Referrals() {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950 px-4 py-6">
-      <h1 className="text-xl font-bold text-gray-900 dark:text-white mb-6">Refer &amp; Earn</h1>
+      <h1 className="text-xl font-bold text-gray-900 dark:text-white mb-6">{t('referrals.title')}</h1>
 
-      {/* Total Rewards Earned Summary */}
+      {/* {t('referrals.totalRewards')} Summary */}
       <div className="bg-gradient-to-r from-primary-500 to-primary-600 rounded-2xl p-5 shadow-md mb-4 text-white">
-        <p className="text-sm opacity-90 mb-1">Total Rewards Earned</p>
+        <p className="text-sm opacity-90 mb-1">{t('referrals.totalRewards')}</p>
         <div className="flex items-baseline gap-2">
           <span className="text-3xl font-bold">{stats?.total_rewards_earned || 0}</span>
-          <span className="text-sm opacity-75">loyalty points</span>
+          <span className="text-sm opacity-75">{t('referrals.points')}</span>
         </div>
         <p className="text-xs opacity-75 mt-2">
-          From {stats?.first_payments_completed || 0} completed referral reward{stats?.first_payments_completed === 1 ? '' : 's'}
+          {t('referrals.fromRewards', { count: stats?.first_payments_completed || 0 })}
         </p>
       </div>
 
       <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm mb-4">
         <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-          Invite friends to AfriPay. When they complete their first transaction, you earn a{' '}
+          {t('referrals.inviteIntro')}{' '}
           <span className="font-semibold text-primary-500">
-            {(stats?.credit_per_referral_bps ?? 0) / 100}% fee discount credit
+            {t('referrals.discount', { pct: (stats?.credit_per_referral_bps ?? 0) / 100 })}
           </span>{' '}
-          (valid 90 days).
+          {t('referrals.valid')}
         </p>
 
-        <label className="text-xs text-gray-500 dark:text-gray-400 mb-1 block">Your referral link</label>
+        <label className="text-xs text-gray-500 dark:text-gray-400 mb-1 block">{t('referrals.yourLink')}</label>
         <div className="flex items-center gap-2 mb-3">
           <input
             readOnly
@@ -121,14 +123,14 @@ export default function Referrals() {
           <button
             onClick={handleCopy}
             className="p-2 rounded-xl bg-primary-500 text-white hover:bg-primary-600 transition-colors"
-            aria-label="Copy referral link"
+            aria-label={t('referrals.copyAria')}
           >
             {copied ? <CheckCheck size={18} /> : <Copy size={18} />}
           </button>
           <button
             onClick={handleShare}
             className="p-2 rounded-xl bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-            aria-label="Share referral link"
+            aria-label={t('referrals.shareAria')}
           >
             <Share2 size={18} />
           </button>
@@ -139,7 +141,7 @@ export default function Referrals() {
             onClick={() => setShowQR((v) => !v)}
             className="text-xs text-primary-500 hover:text-primary-400 font-medium transition-colors"
           >
-            {showQR ? 'Hide QR code' : 'Show QR code'}
+            {showQR ? t('referrals.hideQr') : t('referrals.showQr')}
           </button>
         </div>
 
@@ -147,7 +149,7 @@ export default function Referrals() {
           <div className="flex justify-center mt-4">
             <div className="bg-white rounded-xl p-4 inline-flex flex-col items-center gap-2">
               <QRCodeCanvas value={deepLink} size={160} level="M" />
-              <p className="text-xs text-gray-500">Scan to join AfriPay</p>
+              <p className="text-xs text-gray-500">{t('referrals.scan')}</p>
             </div>
           </div>
         )}
@@ -157,19 +159,19 @@ export default function Referrals() {
         <div className="bg-white dark:bg-gray-900 rounded-2xl p-4 shadow-sm flex flex-col items-center gap-2">
           <Users size={24} className="text-primary-500" />
           <span className="text-2xl font-bold text-gray-900 dark:text-white">{stats?.referral_count ?? 0}</span>
-          <span className="text-xs text-gray-500 dark:text-gray-400">Friends referred</span>
+          <span className="text-xs text-gray-500 dark:text-gray-400">{t('referrals.friends')}</span>
         </div>
         <div className="bg-white dark:bg-gray-900 rounded-2xl p-4 shadow-sm flex flex-col items-center gap-2">
           <Gift size={24} className="text-green-500" />
           <span className="text-2xl font-bold text-gray-900 dark:text-white">{stats?.active_credits ?? 0}</span>
-          <span className="text-xs text-gray-500 dark:text-gray-400">Active credits</span>
+          <span className="text-xs text-gray-500 dark:text-gray-400">{t('referrals.activeCredits')}</span>
         </div>
       </div>
 
       {/* Referral Status List */}
       {referrals.length > 0 && (
         <div className="bg-white dark:bg-gray-900 rounded-2xl p-5 shadow-sm">
-          <h2 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">Referral Status</h2>
+          <h2 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">{t('referrals.statusTitle')}</h2>
           <div className="space-y-3">
             {referrals.map((ref) => {
               const config = STATUS_CONFIG[ref.reward_status] || STATUS_CONFIG.ineligible;
@@ -187,22 +189,22 @@ export default function Referrals() {
                         {ref.email}
                       </p>
                       <p className="text-xs text-gray-600 dark:text-gray-400">
-                        Referred: {formatDate(ref.referred_at)}
+                        {t('referrals.referred', { date: formatDate(ref.referred_at) })}
                       </p>
                       {ref.reward_status === 'credited' && ref.reward_claimed_at && (
                         <p className="text-xs text-gray-600 dark:text-gray-400">
-                          Claimed: {formatDate(ref.reward_claimed_at)}
+                          {t('referrals.claimed', { date: formatDate(ref.reward_claimed_at) })}
                         </p>
                       )}
                     </div>
                   </div>
                   <div className="flex flex-col items-end gap-1 flex-shrink-0 ml-2">
                     <span className={`text-xs font-semibold ${config.color}`}>
-                      {config.label}
+                      {t(config.label)}
                     </span>
                     {ref.reward_amount && (
                       <span className="text-xs text-gray-600 dark:text-gray-400">
-                        {ref.reward_amount} pts
+                        {t('referrals.pts', { amount: ref.reward_amount })}
                       </span>
                     )}
                   </div>
@@ -217,7 +219,7 @@ export default function Referrals() {
         <div className="bg-white dark:bg-gray-900 rounded-2xl p-8 shadow-sm text-center">
           <Users size={32} className="mx-auto text-gray-400 mb-3" />
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            No referrals yet. Share your referral link to get started!
+            {t('referrals.none')}
           </p>
         </div>
       )}
