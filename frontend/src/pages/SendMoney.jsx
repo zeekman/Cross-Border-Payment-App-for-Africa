@@ -39,6 +39,9 @@ const DEFAULT_SLIPPAGE = 1;
 // Issue #998: quote freshness window. If the user pauses on the Review/Confirm
 // steps longer than this, the quote (path rate / network fee) is re-fetched
 // automatically so they never confirm a stale rate.
+// res = await api.post('/payments/send', payload);                        // no headers
+res = await api.post('/payments/send-path', {...});                     // no headers
+res = await api.post('/payments/send-strict-receive', {...});          
 const QUOTE_FRESHNESS_MS = 30000;
 
 const getSavedSlippage = () => {
