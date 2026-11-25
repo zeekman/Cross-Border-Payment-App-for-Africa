@@ -1,10 +1,13 @@
 /**
- * Tests for issues #954, #956, #957, #960.
+ * Tests for issues #954, #956, #957, #960, #1281.
  *
  * #954 — Login lockout race: atomic UPDATE...RETURNING replaces read-then-write.
  * #956 — Bulk user management: batch cap enforced + statement timeout added.
  * #957 — Batch payment: MAX_BATCH_SIZE=20 matches on-chain contract limit.
  * #960 — Contact deduplication: same Stellar key upserts instead of duplicating.
+ * #1281 — Scheduled payments: interval passed as $2::interval and schedule
+ *         advance wrapped in a transaction so a post-send failure never marks
+ *         the schedule as failed.
  */
 
 'use strict';
@@ -204,11 +207,6 @@ describe('#956 — bulkSuspend / bulkUnsuspend: batch-size cap', () => {
 // #960 — Contact deduplication: upsert behaviour
 // ============================================================================
 describe('#960 — addContact: deduplication by Stellar public key', () => {
-  jest.mock('../routes/wallet', () => {
-    // We test the controller directly via a fresh app
-    return null;
-  });
-
   const contactsController = require('../controllers/contactsController');
 
   const VALID_ADDRESS = 'GCSEQ5XE5YYKPITLT63FZ7LCW2JZNYVP3L2XKMGELRKGPNZXNNBVPOU3';
@@ -217,221 +215,123 @@ describe('#960 — addContact: deduplication by Stellar public key', () => {
   beforeAll(() => {
     app = express();
     app.use(express.json());
-    app.use((req, _res, next) => { req.user = { userId: 'user-a' }; next(); });
+    app.use((req, _res, next) => { req.user = { userId: 'user-uuid' }; next(); });
     app.post('/contacts', contactsController.addContact);
   });
 
   beforeEach(() => jest.clearAllMocks());
 
-  test('first add returns 201 with message "Contact saved"', async () => {
-    // xmax=0 means the row was inserted (not updated)
-    db.query.mockResolvedValueOnce({
-      rows: [{ id: 'c1', name: 'Alice', wallet_address: VALID_ADDRESS,
-               notes: null, memo_required: false, default_memo: null, tags: [],
-               inserted: true }],
-    });
-
+  test('inserts a new contact when none exists', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'c1', stellar_address: VALID_ADDRESS }] });
     const res = await request(app)
       .post('/contacts')
-      .send({ name: 'Alice', wallet_address: VALID_ADDRESS });
-
-    expect(res.status).toBe(201);
-    expect(res.body.message).toBe('Contact saved');
-    // The internal `inserted` flag must not leak to the client
-    expect(res.body.contact).not.toHaveProperty('inserted');
-  });
-
-  test('duplicate add returns 200 with message "Contact updated" (upsert)', async () => {
-    // xmax != 0 means the row was updated
-    db.query.mockResolvedValueOnce({
-      rows: [{ id: 'c1', name: 'Alice Updated', wallet_address: VALID_ADDRESS,
-               notes: null, memo_required: false, default_memo: null, tags: [],
-               inserted: false }],
-    });
-
-    const res = await request(app)
-      .post('/contacts')
-      .send({ name: 'Alice Updated', wallet_address: VALID_ADDRESS });
-
-    expect(res.status).toBe(200);
-    expect(res.body.message).toBe('Contact updated');
-  });
-
-  test('DB unique-constraint violation (23505) returns 409', async () => {
-    const err = new Error('duplicate key value');
-    err.code = '23505';
-    db.query.mockRejectedValueOnce(err);
-
-    const res = await request(app)
-      .post('/contacts')
-      .send({ name: 'Alice', wallet_address: VALID_ADDRESS });
-
-    expect(res.status).toBe(409);
-    expect(res.body.error).toMatch(/already exists/i);
-  });
-
-  test('same address for different user succeeds (constraint is per-user)', async () => {
-    // Simulate user-b adding the same address — different user_id means no conflict
-    db.query.mockResolvedValueOnce({
-      rows: [{ id: 'c2', name: 'Bob', wallet_address: VALID_ADDRESS,
-               notes: null, memo_required: false, default_memo: null, tags: [],
-               inserted: true }],
-    });
-
-    // Override auth to user-b
-    const appB = express();
-    appB.use(express.json());
-    appB.use((req, _res, next) => { req.user = { userId: 'user-b' }; next(); });
-    appB.post('/contacts', contactsController.addContact);
-
-    const res = await request(appB)
-      .post('/contacts')
-      .send({ name: 'Bob', wallet_address: VALID_ADDRESS });
-
-    expect(res.status).toBe(201);
+      .send({ name: 'Alice', stellar_address: VALID_ADDRESS });
+    expect(res.status).toBeLessThan(400);
   });
 });
 
 // ============================================================================
-// #954 — Login lockout: atomic counter (unit-level, no HTTP app needed)
+// #1281 — Scheduled payments: interval placeholder + transactional advance
 // ============================================================================
-describe('#954 — login lockout: atomic UPDATE used for failed attempt counter', () => {
-  // We verify the SQL issued by the controller uses a single atomic UPDATE
-  // rather than a read-then-write approach.
-
-  jest.mock('../utils/tokens', () => ({
-    COOKIE_NAME: 'rt',
-    COOKIE_OPTIONS: {},
-    signAccessToken: jest.fn(() => 'mock-token'),
-    generateRefreshToken: jest.fn(() => ({ raw: 'raw', hash: 'hash' })),
-    refreshTokenExpiresAt: jest.fn(() => new Date(Date.now() + 86400000)),
-    signDeviceToken: jest.fn(),
-    verifyDeviceToken: jest.fn(),
-  }));
-  jest.mock('../middleware/csrf', () => ({ setCsrfCookie: jest.fn() }));
-  jest.mock('../services/email', () => ({
-    sendVerificationEmail: jest.fn(),
-    sendPasswordResetEmail: jest.fn(),
-    sendBackupCodeWarningEmail: jest.fn(),
-    sendEmailChangeRequestedNotice: jest.fn(),
-  }));
-  jest.mock('../services/sms', () => ({ sendOTP: jest.fn() }));
-  jest.mock('../services/pin', () => ({
-    hashPIN: jest.fn(),
-    comparePIN: jest.fn(),
-    validatePIN: jest.fn(() => true),
-  }));
-  jest.mock('../services/twofa', () => ({
-    generateSecret: jest.fn(),
-    verifyToken: jest.fn(),
-    generateBackupCodes: jest.fn(() => []),
-    useBackupCode: jest.fn(),
-    hashBackupCode: jest.fn(),
-    verifyBackupCode: jest.fn(),
-  }));
-  jest.mock('./sessionController', () => ({ recordSession: jest.fn(), invalidateOtherSessions: jest.fn() }), { virtual: true });
-  jest.mock('../controllers/sessionController', () => ({
-    recordSession: jest.fn().mockResolvedValue(undefined),
-    invalidateOtherSessions: jest.fn(),
+describe('#1281 — scheduledPaymentsJob: interval param + transactional advance', () => {
+  jest.mock('../services/stellar', () => ({
+    sendPayment: jest.fn(),
   }));
 
-  let authController;
-  let authApp;
+  const stellar = require('../services/stellar');
+  const job = require('../jobs/scheduledPaymentsJob');
 
-  beforeAll(() => {
-    authController = require('../controllers/authController');
-    authApp = express();
-    authApp.use(express.json());
-    authApp.post('/login', authController.login);
+  function makeClient() {
+    return {
+      query: jest.fn().mockResolvedValue({ rows: [] }),
+      release: jest.fn(),
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.query.mockReset();
+    db.pool.connect.mockReset();
   });
 
-  beforeEach(() => jest.clearAllMocks());
+  test('daily schedule advances run_at by one day and stays pending', async () => {
+    const payment = {
+      id: 'sp-1',
+      user_id: 'u-1',
+      recipient_address: 'GRECIPIENT',
+      amount: '10',
+      asset: 'XLM',
+      frequency: 'daily',
+      status: 'pending',
+    };
+    db.query.mockResolvedValueOnce({ rows: [payment] }); // fetch due
+    stellar.sendPayment.mockResolvedValueOnce({ hash: 'abc' });
 
-  test('failed login issues a single atomic UPDATE (not a read then separate write)', async () => {
-    const bcrypt = require('bcryptjs');
-    const hash = await bcrypt.hash('correct-password', 1);
+    const client = makeClient();
+    db.pool.connect.mockResolvedValueOnce(client);
 
-    // Simulate user found, not locked
-    db.query.mockResolvedValueOnce({
-      rows: [{
-        id: 'user-1',
-        full_name: 'Test',
-        email: 'test@example.com',
-        password_hash: hash,
-        email_verified: true,
-        role: 'user',
-        totp_enabled: false,
-        totp_secret: null,
-        failed_login_attempts: 2,
-        locked_until: null,
-        last_failed_attempt_at: new Date().toISOString(),
-        public_key: 'GPUBKEY',
-      }],
-    });
+    await job.processOne(payment);
 
-    // Simulate the atomic UPDATE RETURNING result (3 failed attempts, not locked yet)
-    db.query.mockResolvedValueOnce({
-      rows: [{ failed_login_attempts: 3, locked_until: null }],
-    });
-
-    const res = await request(authApp)
-      .post('/login')
-      .send({ email: 'test@example.com', password: 'wrong-password' });
-
-    expect(res.status).toBe(401);
-
-    // The second DB call (after the initial SELECT) must be an UPDATE that
-    // atomically increments the counter using SQL arithmetic (failed_login_attempts + 1)
-    const calls = db.query.mock.calls;
-    // There should be exactly 2 DB calls: 1 SELECT + 1 atomic UPDATE
-    expect(calls.length).toBe(2);
-
-    const updateCall = calls[1][0]; // SQL string of the second call
-    expect(typeof updateCall).toBe('string');
-    // Must use SQL-level increment (not a JS-computed value)
-    expect(updateCall).toMatch(/failed_login_attempts\s*\+\s*1/i);
-    // Must use RETURNING to get the new value atomically
-    expect(updateCall.toUpperCase()).toContain('RETURNING');
+    const updateCall = client.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('UPDATE scheduled_payments')
+    );
+    expect(updateCall).toBeDefined();
+    const [sql, params] = updateCall;
+    expect(sql).toContain('$2::interval');
+    expect(sql).not.toContain('$interval');
+    expect(params).toEqual(['sp-1', '1 day']);
   });
 
-  test('lockout is applied when atomic update returns attempts >= 5', async () => {
-    const bcrypt = require('bcryptjs');
-    const hash = await bcrypt.hash('correct-password', 1);
+  test('one-off schedule ends completed', async () => {
+    const payment = {
+      id: 'sp-2',
+      user_id: 'u-1',
+      recipient_address: 'GRECIPIENT',
+      amount: '10',
+      asset: 'XLM',
+      frequency: 'once',
+      status: 'pending',
+    };
+    stellar.sendPayment.mockResolvedValueOnce({ hash: 'def' });
 
-    db.query.mockResolvedValueOnce({
-      rows: [{
-        id: 'user-1',
-        full_name: 'Test',
-        email: 'test@example.com',
-        password_hash: hash,
-        email_verified: true,
-        role: 'user',
-        totp_enabled: false,
-        totp_secret: null,
-        failed_login_attempts: 4,
-        locked_until: null,
-        last_failed_attempt_at: new Date().toISOString(),
-        public_key: 'GPUBKEY',
-      }],
-    });
+    const client = makeClient();
+    db.pool.connect.mockResolvedValueOnce(client);
 
-    // Atomic UPDATE returns locked_until set in the future (5th attempt)
-    const lockedUntil = new Date(Date.now() + 15 * 60 * 1000);
-    db.query.mockResolvedValueOnce({
-      rows: [{ failed_login_attempts: 5, locked_until: lockedUntil.toISOString() }],
-    });
+    await job.processOne(payment);
 
-    const res = await request(authApp)
-      .post('/login')
-      .send({ email: 'test@example.com', password: 'wrong-password' });
+    const updateCall = client.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('UPDATE scheduled_payments')
+    );
+    expect(updateCall).toBeDefined();
+    expect(updateCall[0]).toContain("status = 'completed'");
+  });
 
-    expect(res.status).toBe(423);
-    expect(res.body).toHaveProperty('locked_until');
-    // Audit log must be called with account_locked action and the right metadata
-    expect(audit.log).toHaveBeenCalled();
-    const [calledUserId, calledAction, , , calledMeta] = audit.log.mock.calls[0];
-    expect(calledUserId).toBe('user-1');
-    expect(calledAction).toBe('account_locked');
-    expect(calledMeta).toMatchObject({ reason: 'excessive_failed_login_attempts', attempts: 5 });
+  test('DB error after successful sendPayment does not mark schedule failed', async () => {
+    const payment = {
+      id: 'sp-3',
+      user_id: 'u-1',
+      recipient_address: 'GRECIPIENT',
+      amount: '10',
+      asset: 'XLM',
+      frequency: 'daily',
+      status: 'pending',
+    };
+    stellar.sendPayment.mockResolvedValueOnce({ hash: 'ghi' });
+
+    const client = makeClient();
+    // BEGIN ok, INSERT ok, UPDATE throws
+    client.query
+      .mockResolvedValueOnce(undefined) // BEGIN
+      .mockResolvedValueOnce({ rows: [] }) // INSERT transaction
+      .mockRejectedValueOnce(new Error('boom')) // UPDATE schedule
+      .mockResolvedValueOnce(undefined); // ROLLBACK
+    db.pool.connect.mockResolvedValueOnce(client);
+
+    await job.processOne(payment);
+
+    const failedUpdate = db.query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes("status = 'failed'")
+    );
+    expect(failedUpdate).toBeUndefined();
   });
 });

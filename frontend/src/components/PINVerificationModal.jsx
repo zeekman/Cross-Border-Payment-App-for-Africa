@@ -94,9 +94,10 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
 
     setLoading(true);
     try {
-      await api.post('/auth/verify-pin', { pin });
+      const { data } = await api.post('/auth/verify-pin', { pin });
+      if (!data?.step_up_token) throw new Error('Step-up token missing from verification response');
       toast.success(t('auth.pin_verified'));
-      onSuccess();
+      onSuccess(data.step_up_token);
       handleClose();
     } catch (err) {
       const newAttempts = attempts + 1;
@@ -120,9 +121,7 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
     const ok = await verifyWebAuthn();
     setBioLoading(false);
     if (ok) {
-      toast.success('Biometric verified');
-      onSuccess();
-      handleClose();
+      setError('Biometric confirmation is not available for transactions yet. Please use your PIN.');
     } else {
       setError('Biometric verification failed. Please use your PIN.');
       setUseBiometric(false);

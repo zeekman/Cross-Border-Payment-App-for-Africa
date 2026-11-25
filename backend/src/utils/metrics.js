@@ -40,6 +40,9 @@ const anchorPollDuration = new client.Histogram({
   help: 'Anchor transaction-status poll duration in seconds, per anchor',
   labelNames: ['anchor', 'success'],
   buckets: [0.05, 0.1, 0.3, 0.5, 1, 2, 5, 10],
+  registers: [registry],
+});
+
 const paymentsTotal = new client.Counter({
   name: 'afripay_payments_total',
   help: 'Total payment state changes',
@@ -71,6 +74,42 @@ const activeUsers = new client.Gauge({
 const emailQueueDepth = new client.Gauge({
   name: 'afripay_email_queue_depth',
   help: 'Email queue waiting job count',
+  registers: [registry],
+});
+
+// Ledger-listener liveness (BE-198). Lag is measured in ledgers between the newest
+// payment Horizon has and the newest payment the listener's stream has delivered, so
+// a quiet network reads 0 rather than looking stale.
+const ledgerListenerLagLedgers = new client.Gauge({
+  name: 'ledger_listener_lag_ledgers',
+  help: 'Ledgers between the newest payment on Horizon and the newest payment the listener stream has delivered',
+  registers: [registry],
+});
+
+const ledgerListenerLastEventTimestampSeconds = new client.Gauge({
+  name: 'ledger_listener_last_event_timestamp_seconds',
+  help: 'Unix time of the last proof of life from the ledger listener (stream event or caught-up poll)',
+  registers: [registry],
+});
+
+// Durable webhook delivery queue (BE-217), same pattern as the email queue gauge.
+const webhookQueueDepth = new client.Gauge({
+  name: 'afripay_webhook_queue_depth',
+  help: 'Webhook delivery jobs by state',
+  labelNames: ['state'],
+  registers: [registry],
+});
+
+const webhookDeliveriesTotal = new client.Counter({
+  name: 'afripay_webhook_deliveries_total',
+  help: 'Webhook delivery attempts by result (delivered, retry, failed, skipped)',
+  labelNames: ['result'],
+  registers: [registry],
+});
+
+const webhookEndpointsDisabledTotal = new client.Counter({
+  name: 'afripay_webhook_endpoints_disabled_total',
+  help: 'Webhook endpoints automatically disabled after consecutive failed events',
   registers: [registry],
 });
 
@@ -140,6 +179,9 @@ const geoDenialsTotal = new client.Counter({
   name: 'afripay_geo_denials_total',
   help: 'Total requests denied by geo-restriction, labelled by country and route',
   labelNames: ['country', 'route'],
+  registers: [registry],
+});
+
 const txQueueDepth = new client.Gauge({
   name: 'afripay_tx_queue_depth',
   help: 'Number of per-wallet transaction submission queues currently holding a pending/in-flight task (txQueue.js)',
@@ -155,6 +197,9 @@ const txQueueBackpressure = new client.Gauge({
 const txQueuePendingTasksTotal = new client.Gauge({
   name: 'afripay_tx_queue_pending_tasks_total',
   help: 'Total pending/in-flight tasks across all per-wallet transaction submission queues (txQueue.js)',
+  registers: [registry],
+});
+
 const sep31CallbackSkippedTotal = new client.Counter({
   name: 'afripay_sep31_callback_skipped_total',
   help: 'Total SEP-31 callbacks skipped instead of being delivered, labelled by reason',
@@ -199,8 +244,17 @@ const jobItemsProcessedTotal = new client.Counter({
   registers: [registry],
 });
 
+// BE-178: fraud rule load/evaluation failures
+const fraudRuleErrorsTotal = new client.Counter({
+  name: 'fraud_rule_errors_total',
+  help: 'Total fraud rule load or evaluation errors, labelled by stage (load, evaluate) and rule',
+  labelNames: ['stage', 'rule'],
+  registers: [registry],
+});
+
 module.exports = {
   registry,
+  redisUp,
   httpRequestDuration,
   horizonRequestDuration,
   dbQueryDuration,
@@ -211,6 +265,11 @@ module.exports = {
   afripayHorizonDuration,
   activeUsers,
   emailQueueDepth,
+  ledgerListenerLagLedgers,
+  ledgerListenerLastEventTimestampSeconds,
+  webhookQueueDepth,
+  webhookDeliveriesTotal,
+  webhookEndpointsDisabledTotal,
   amlScreeningsTotal,
   amlScreeningCoverageGauge,
   rateLimiterDegraded,
@@ -230,4 +289,5 @@ module.exports = {
   jobLastSuccessTimestamp,
   jobIntervalSeconds,
   jobItemsProcessedTotal,
+  fraudRuleErrorsTotal,
 };

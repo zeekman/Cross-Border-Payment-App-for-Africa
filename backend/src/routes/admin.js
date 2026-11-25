@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { body, param, validationResult } = require('express-validator');
 const StellarSdk = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
+const { readLimiter, adminLimiter } = require('../middleware/rateLimiter');
 const isAdmin = require('../middleware/isAdmin');
 const ipAllowlist = require('../middleware/ipAllowlist');
 const { issueTokens } = require('../controllers/assetController');
@@ -52,6 +53,7 @@ const validate = (req, res, next) => {
 
 router.use(ipAllowlist);
 router.use(authMiddleware);
+router.use(readLimiter);
 router.use(isAdmin);
 
 /**

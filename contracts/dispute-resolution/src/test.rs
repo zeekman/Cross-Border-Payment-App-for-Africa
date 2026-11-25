@@ -1,9 +1,9 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Bytes, Env,
+    Address, Bytes, Env, IntoVal,
 };
 
 use crate::{DisputeResolutionContract, DisputeResolutionContractClient, DisputeStatus};
@@ -22,14 +22,13 @@ fn setup() -> (
 ) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, DisputeResolutionContract);
+    let contract_id = env.register(DisputeResolutionContract, ());
     let client = DisputeResolutionContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let arbitrator = Address::generate(&env);
     let super_arbitrator = Address::generate(&env);
     let usdc_id = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
+        .register_stellar_asset_contract(admin.clone());
     client.initialize(&admin, &arbitrator, &usdc_id, &256u32, &super_arbitrator);
     (env, client, admin, arbitrator, usdc_id, super_arbitrator)
 }
@@ -65,6 +64,71 @@ fn test_initialize_succeeds() {
 fn test_double_initialize_panics() {
     let (env, client, admin, arbitrator, usdc_id, super_arbitrator) = setup();
     client.initialize(&admin, &arbitrator, &usdc_id, &256u32, &super_arbitrator);
+}
+
+#[test]
+#[should_panic]
+fn test_initialize_requires_admin_auth() {
+    let env = Env::default();
+    let contract_id = env.register(DisputeResolutionContract, ());
+    let client = DisputeResolutionContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+    let super_arbitrator = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract(admin.clone());
+
+    // A non-admin caller cannot produce the admin's signature, so the
+    // `admin.require_auth()` inside `initialize` must reject the call.
+    let impostor = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &impostor,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (&admin, &arbitrator, &usdc_id, 256u32, &super_arbitrator).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.initialize(&admin, &arbitrator, &usdc_id, &256u32, &super_arbitrator);
+}
+
+#[test]
+fn test_initialize_emits_event() {
+    let (env, client, admin, _, _, _) = setup();
+    let _ = client;
+    let events = env.events().all();
+    let found = events.iter().any(|(_, topics, _)| {
+        topics
+            .get(0)
+            .map(|t| {
+                let sym: Result<soroban_sdk::Symbol, _> = t.try_into_val(&env);
+                matches!(sym, Ok(s) if s == soroban_sdk::Symbol::new(&env, "Initialized"))
+            })
+            .unwrap_or(false)
+    });
+    assert!(found, "Initialized event was not emitted");
+    let _ = admin;
+}
+
+// ── TTL ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_dispute_readable_after_ttl_advance() {
+    let (env, client, _, _, usdc_id, _) = setup();
+    let amount = 500_0000000i128;
+    let (sender, recipient, id) = open(&env, &client, &usdc_id, amount);
+
+    // Advance well past the default entry TTL, then touch the contract again
+    // so the instance/persistent TTLs are extended.
+    env.ledger().set_sequence_number(env.ledger().sequence() + 1_000_000);
+    let _ = client.get_dispute(&id);
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 1_000_000);
+    let d = client.get_dispute(&id);
+    assert_eq!(d.sender, sender);
+    assert_eq!(d.recipient, recipient);
+    assert_eq!(d.amount, amount);
+    assert_eq!(d.status, DisputeStatus::Open);
 }
 
 // ── open_dispute ──────────────────────────────────────────────────────────────
@@ -160,6 +224,24 @@ fn test_open_dispute_insufficient_filing_fee_panics() {
     let recipient = Address::generate(&env);
     mint(&env, &usdc_id, &sender, 10_000000);
     client.open_dispute(&sender, &sender, &recipient, &10_000000);
+}
+
+#[test]
+fn test_fee_change_after_open_settles_original_fee() {
+    let (env, client, admin, arbitrator, usdc_id, _) = setup();
+    let amount = 1_000_0000000i128;
+    let (sender, _, id) = open(&env, &client, &usdc_id, amount);
+
+    // Raising the fee later must not change what this dispute refunds.
+    client.update_filing_fee(&admin, &100_000000);
+    client.resolve_dispute(&arbitrator, &id, &false);
+    env.ledger().with_mut(|li| li.timestamp += 24 * 60 * 60 + 1);
+    client.finalize_resolution(&id);
+
+    assert_eq!(
+        TokenClient::new(&env, &usdc_id).balance(&sender),
+        amount + DEFAULT_FILING_FEE
+    );
 }
 
 #[test]
@@ -294,7 +376,7 @@ fn test_resolve_for_sender_refunds_sender() {
     env.ledger().with_mut(|li| li.timestamp += 24 * 60 * 60 + 1);
     client.finalize_resolution(&id);
 
-    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&sender), amount);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&sender), amount + DEFAULT_FILING_FEE); // winning opener gets the filing fee back
     assert_eq!(client.get_dispute(&id).status, DisputeStatus::ResolvedForSender);
 }
 
@@ -332,7 +414,12 @@ fn test_claim_expired_after_deadline_refunds_sender() {
     let (sender, _, id) = open(&env, &client, &usdc_id, amount);
     env.ledger().with_mut(|li| li.timestamp += 7 * 24 * 60 * 60 + 1);
     client.claim_expired(&sender, &id);
-    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&sender), amount);
+    // Dispute amount and the filing fee both come back: the arbitrator missed
+    // the deadline, so the opener is not penalised.
+    assert_eq!(
+        TokenClient::new(&env, &usdc_id).balance(&sender),
+        amount + DEFAULT_FILING_FEE
+    );
     assert_eq!(client.get_dispute(&id).status, DisputeStatus::Expired);
 }
 
@@ -538,7 +625,7 @@ fn test_super_arbitrator_resolution_for_sender() {
     client.resolve_dispute(&arbitrator, &id, &true);
     client.appeal(&recipient, &id);
     client.resolve_appeal(&super_arbitrator, &id, &false);
-    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&sender), amount);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&sender), amount + DEFAULT_FILING_FEE); // winning opener gets the filing fee back
     assert_eq!(client.get_dispute(&id).status, DisputeStatus::ResolvedForSender);
 }
 
@@ -586,6 +673,89 @@ fn test_set_super_arbitrator_non_admin_panics() {
     let impostor = Address::generate(&env);
     let new_super = Address::generate(&env);
     client.set_super_arbitrator(&impostor, &new_super);
+}
+
+// ── admin rotation (propose + accept + cancel) ────────────────────────────────
+
+const ADMIN_ROTATION_DELAY: u64 = 24 * 60 * 60;
+
+#[test]
+fn test_propose_and_accept_admin_rotates_admin() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY + 1);
+    client.accept_admin(&new_admin);
+
+    // New admin can perform admin-only actions.
+    let new_super = Address::generate(&env);
+    client.set_super_arbitrator(&new_admin, &new_super);
+}
+
+#[test]
+#[should_panic(expected = "admin rotation delay has not elapsed")]
+fn test_accept_admin_before_delay_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY - 1);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic]
+fn test_accept_admin_requires_new_admin_auth() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY + 1);
+    // Drop the blanket auth mock: the new admin's signature is required.
+    env.set_auths(&[]);
+    client.accept_admin(&new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_propose_admin_non_admin_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let impostor = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&impostor, &new_admin);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_old_admin_loses_privileges_after_rotation() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY + 1);
+    client.accept_admin(&new_admin);
+
+    // The old admin must no longer be able to perform admin-only actions.
+    client.set_super_arbitrator(&admin, &Address::generate(&env));
+}
+
+#[test]
+fn test_cancel_admin_proposal_blocks_accept() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&admin);
+    env.ledger().with_mut(|li| li.timestamp += ADMIN_ROTATION_DELAY + 1);
+    // After cancellation there is no pending proposal to accept.
+    let result = client.try_accept_admin(&new_admin);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_cancel_admin_proposal_non_admin_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    let impostor = Address::generate(&env);
+    client.propose_admin(&admin, &new_admin);
+    client.cancel_admin_proposal(&impostor);
 }
 
 // ── cast_vote / multi-arbitrator panel ───────────────────────────────────────
@@ -659,7 +829,7 @@ fn test_cast_vote_quorum_for_sender() {
     // Second vote: 2-of-3 → quorum reached, funds refunded.
     client.cast_vote(&arb2, &id, &false);
     assert_eq!(client.get_dispute(&id).status, DisputeStatus::ResolvedForSender);
-    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&sender), amount);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&sender), amount + DEFAULT_FILING_FEE); // winning opener gets the filing fee back
 }
 
 /// Acceptance criterion: no quorum — only 1-of-3 votes cast, split 1-for-recipient
@@ -687,4 +857,135 @@ fn test_cast_vote_duplicate_rejected() {
     client.cast_vote(&arb1, &id, &true);
     // Second call from the same arbitrator must panic.
     client.cast_vote(&arb1, &id, &false);
+}
+
+// ── escrow cross-contract hook ────────────────────────────────────────────────
+
+#[test]
+fn test_set_and_get_escrow_contract() {
+    let (env, client, admin, _, _, _) = setup();
+    let escrow = Address::generate(&env);
+    assert!(client.get_escrow_contract().is_none());
+    client.set_escrow_contract(&admin, &escrow);
+    assert_eq!(client.get_escrow_contract().unwrap(), escrow);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_set_escrow_contract_non_admin_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let impostor = Address::generate(&env);
+    let escrow = Address::generate(&env);
+    client.set_escrow_contract(&impostor, &escrow);
+}
+
+#[test]
+#[should_panic]
+fn test_open_escrow_dispute_non_escrow_caller_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let escrow = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    // Drop the blanket auth mock: a top-level caller cannot produce the
+    // escrow contract's authorization, so this must be rejected.
+    env.set_auths(&[]);
+    client.open_escrow_dispute(&escrow, &sender, &sender, &recipient, &500_0000000);
+    // Without the escrow contract's authorization (i.e. it is not the direct
+    // invoker), the call must be rejected.
+    env.set_auths(&[]);
+    client.open_escrow_dispute(&escrow, &1u64, &sender, &recipient, &agent, &500_0000000, &false);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: escrow contract not registered")]
+fn test_open_escrow_dispute_unregistered_escrow_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let registered = Address::generate(&env);
+    let other = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.set_escrow_contract(&admin, &registered);
+    client.open_escrow_dispute(&other, &sender, &sender, &recipient, &500_0000000);
+}
+
+#[test]
+fn test_open_escrow_dispute_charges_filing_fee() {
+    let (env, client, admin, _, usdc_id, _) = setup();
+    let escrow = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    mint(&env, &usdc_id, &recipient, DEFAULT_FILING_FEE);
+
+    let id = client.open_escrow_dispute(&escrow, &recipient, &sender, &recipient, &500_0000000);
+
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&recipient), 0);
+    assert_eq!(
+        TokenClient::new(&env, &usdc_id).balance(&client.address),
+        DEFAULT_FILING_FEE
+    );
+    assert_eq!(client.get_dispute(&id).status, DisputeStatus::Open);
+}
+
+#[test]
+#[should_panic(expected = "Insufficient balance for dispute filing fee")]
+fn test_open_escrow_dispute_without_fee_balance_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let escrow = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    client.open_escrow_dispute(&escrow, &sender, &sender, &recipient, &500_0000000);
+}
+
+#[test]
+#[should_panic(expected = "opener must be sender or recipient")]
+fn test_open_escrow_dispute_third_party_opener_panics() {
+    let (env, client, admin, _, usdc_id, _) = setup();
+    let escrow = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let outsider = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    mint(&env, &usdc_id, &outsider, DEFAULT_FILING_FEE);
+    client.open_escrow_dispute(&escrow, &outsider, &sender, &recipient, &500_0000000);
+    let escrow = Address::generate(&env);
+    let impostor = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    client.open_escrow_dispute(&impostor, &1u64, &sender, &recipient, &agent, &500_0000000, &false);
+    // Drop the blanket auth mock: a caller that is not the escrow contract
+    // cannot produce `escrow.require_auth()`, so this must be rejected.
+    env.set_auths(&[]);
+    client.open_escrow_dispute(&escrow, &sender, &recipient, &500_0000000);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: escrow contract not registered")]
+fn test_open_escrow_dispute_unregistered_escrow_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let escrow = Address::generate(&env);
+    let impostor = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    client.open_escrow_dispute(&impostor, &sender, &recipient, &500_0000000);
+}
+
+#[test]
+#[should_panic]
+fn test_open_escrow_dispute_non_escrow_caller_panics() {
+    let (env, client, admin, _, _, _) = setup();
+    let escrow = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    // Drop the blanket auth mock: a top-level caller cannot produce the
+    // escrow contract's authorization, so this must be rejected.
+    env.set_auths(&[]);
+    client.open_escrow_dispute(&escrow, &sender, &recipient, &500_0000000);
 }

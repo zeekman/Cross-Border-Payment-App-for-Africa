@@ -5,13 +5,14 @@
  *
  * Routes:
  *   GET  /api/loyalty/balance        — on-chain point balance for the user
- *   POST /api/loyalty/redeem         — redeem 100 points for a 50 % fee discount
+ *   GET  /api/loyalty/tiers          — configured redemption tiers (threshold, discount_bps)
+ *   POST /api/loyalty/redeem         — redeem a tier { tier_index } for its fee discount
  *   GET  /api/loyalty/history        — off-chain mint/burn ledger from DB
  */
 
 const { v4: uuidv4 } = require("uuid");
 const db = require("../db");
-const { mintPoints, redeemPoints, getBalance } = require("../services/loyaltyToken");
+const { mintPoints, redeemPoints, getBalance, getTiers, MAX_TIERS } = require("../services/loyaltyToken");
 
 /**
  * GET /api/loyalty/balance
@@ -20,7 +21,7 @@ const { mintPoints, redeemPoints, getBalance } = require("../services/loyaltyTok
 async function balance(req, res, next) {
   try {
     const walletResult = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -40,14 +41,33 @@ async function balance(req, res, next) {
 }
 
 /**
+ * GET /api/loyalty/tiers
+ * Returns the redemption tiers configured on the loyalty contract.
+ */
+async function tiers(req, res, next) {
+  try {
+    if (!process.env.LOYALTY_TOKEN_CONTRACT_ID) return res.json({ tiers: [] });
+    res.json({ tiers: await getTiers() });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
  * POST /api/loyalty/redeem
- * Burns 100 points on-chain and records the discount entitlement in the DB.
- * Returns { redeemed, discount_pct, tx_hash }.
+ * Body: { tier_index }
+ * Burns the tier's threshold on-chain and records the burn in the DB.
+ * Returns { redeemed, discount_bps, points_burned, tx_hash }.
  */
 async function redeem(req, res, next) {
   try {
+    const tierIndex = Number(req.body?.tier_index);
+    if (!Number.isInteger(tierIndex) || tierIndex < 0 || tierIndex >= MAX_TIERS) {
+      return res.status(400).json({ error: `tier_index must be an integer between 0 and ${MAX_TIERS - 1}` });
+    }
+
     const walletResult = await db.query(
-      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -55,30 +75,35 @@ async function redeem(req, res, next) {
     }
     const { public_key, encrypted_secret_key } = walletResult.rows[0];
 
-    const { redeemed, txHash } = await redeemPoints({
-      encryptedSecretKey: encrypted_secret_key,
-      walletAddress: public_key,
-    });
-
-    if (!redeemed) {
-      return res.status(400).json({
-        error: "Insufficient loyalty points. You need at least 100 points to redeem.",
-        redeemed: false,
+    let result;
+    try {
+      result = await redeemPoints({
+        encryptedSecretKey: encrypted_secret_key,
+        walletAddress: public_key,
+        tierIndex,
       });
+    } catch (err) {
+      if (err.status === 400) {
+        return res.status(400).json({ error: err.message, redeemed: false, threshold: err.threshold });
+      }
+      throw err;
     }
+    const { txHash, tier } = result;
 
-    // Record the burn in the off-chain ledger
+    // Record the actual burned amount in the off-chain ledger
     await db.query(
       `INSERT INTO loyalty_points (id, user_id, wallet_address, event_type, points, tx_hash)
        VALUES ($1, $2, $3, 'burn', $4, $5)`,
-      [uuidv4(), req.user.userId, public_key, 100, txHash]
+      [uuidv4(), req.user.userId, public_key, tier.threshold, txHash]
     );
 
     res.json({
       redeemed: true,
-      discount_pct: 50,
+      tier_index: tierIndex,
+      points_burned: tier.threshold,
+      discount_bps: tier.discount_bps,
       tx_hash: txHash,
-      message: "50 % fee discount applied to your next transaction.",
+      message: `${tier.discount_bps / 100} % fee discount applied to your next transaction.`,
     });
   } catch (err) {
     next(err);
@@ -117,7 +142,7 @@ async function mint(req, res, next) {
     }
 
     const walletResult = await db.query(
-      'SELECT public_key FROM wallets WHERE user_id = $1 LIMIT 1',
+      'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
       [user_id],
     );
     if (!walletResult.rows[0]) {
@@ -139,4 +164,4 @@ async function mint(req, res, next) {
   }
 }
 
-module.exports = { balance, redeem, history, mint };
+module.exports = { balance, tiers, redeem, history, mint };

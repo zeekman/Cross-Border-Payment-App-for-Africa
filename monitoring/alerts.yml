@@ -1,17 +1,75 @@
-# BE-222: background job alert rules
 groups:
+  - name: afripay-ledger-listener
+    rules:
+      # The ledger listener credits incoming payments, sends "payment received"
+      # notifications and webhooks, and confirms transactions. If its Horizon
+      # stream silently dies nothing else shows it (BE-198).
+      - alert: LedgerListenerLagging
+        # Lag is ledgers between the newest payment on Horizon and the newest payment
+        # the listener has seen. A quiet network reads 0, so this does not flap at night.
+        # Ledgers close roughly every 5s, so 12 ledgers is about a minute behind.
+        expr: ledger_listener_lag_ledgers > 12
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ledger listener is {{ $value }} ledgers behind Horizon"
+          description: >-
+            The payments stream has stopped delivering while Horizon keeps producing
+            payments. Incoming payments are not being credited or notified. Check
+            /health/deep (ledger_listener) and the API logs for stream errors.
+
+      - alert: LedgerListenerSilent
+        # No proof of life (stream event or caught-up poll) for two minutes. Mirrors
+        # the `degraded` status of ledger_listener in /health/deep.
+        expr: time() - ledger_listener_last_event_timestamp_seconds > 120
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ledger listener has shown no sign of life for over 2 minutes"
+          description: >-
+            Neither the Horizon stream nor the health poll has reported in. Horizon may
+            be unreachable or the listener may not have started.
+
+  - name: afripay-webhooks
+    rules:
+      - alert: WebhookQueueBacklog
+        expr: afripay_webhook_queue_depth{state="waiting"} > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} webhook deliveries are waiting to be sent"
+          description: >-
+            Deliveries are being enqueued faster than the worker sends them. Raise
+            WEBHOOK_WORKER_CONCURRENCY or check for slow receivers.
+
+      - alert: WebhookEndpointsAutoDisabled
+        expr: increase(afripay_webhook_endpoints_disabled_total[1h]) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "Webhook endpoints were disabled after repeated failed deliveries"
+          description: >-
+            One or more subscriber endpoints reached WEBHOOK_MAX_CONSECUTIVE_FAILURES and
+            were disabled. Their owners were notified.
+
+  # BE-222: background job alert rules
   - name: background-jobs
     rules:
       - alert: JobStale
-        # job_interval_seconds is exported per job; stale when last success > 3x interval
+        # Stale when the last success is older than 3x the job's cron interval
         expr: (time() - job_last_success_timestamp) > 3 * job_interval_seconds
         for: 5m
-        labels: { severity: warning }
+        labels:
+          severity: warning
         annotations:
           summary: "Job {{ $labels.job }} has not succeeded in over 3x its cron interval"
       - alert: JobErrors
         expr: sum by (job) (increase(job_runs_total{status="error"}[15m])) > 0
         for: 15m
-        labels: { severity: warning }
+        labels:
+          severity: warning
         annotations:
           summary: "Job {{ $labels.job }} has been failing for 15 minutes"

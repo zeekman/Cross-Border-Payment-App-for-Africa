@@ -5,7 +5,8 @@ import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 import { Eye, EyeOff, ArrowLeft, ChevronDown, ChevronUp, Check, X, AlertCircle, Phone } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { getRegisterPasswordStrength, getEmailError } from '../utils/passwordValidator';
+import { getRegisterPasswordStrength, getPasswordChecklist, getPasswordError, getEmailError } from '../utils/passwordValidator';
+import { usePasswordPolicy } from '../hooks/usePasswordPolicy';
 
 export default function Register() {
   const { register } = useAuth();
@@ -28,18 +29,18 @@ export default function Register() {
   const [phoneVerifyLoading, setPhoneVerifyLoading] = useState(false);
   const [registeredPhone, setRegisteredPhone] = useState('');
 
-  // Password strength indicator (issue #656)
-  const strength = useMemo(() => getRegisterPasswordStrength(form.password), [form.password]);
+  // Password strength indicator (issue #656) — rules come from the backend
+  // password policy so the UI can never drift from what the server enforces.
+  const policy = usePasswordPolicy();
+  const strength = useMemo(
+    () => getRegisterPasswordStrength(form.password, policy),
+    [form.password, policy]
+  );
   const emailError = touched.email ? getEmailError(form.email) : '';
   const passwordsMatch = confirmPassword.length > 0 && confirmPassword === form.password;
   const passwordsMismatch = confirmPassword.length > 0 && confirmPassword !== form.password;
 
-  const checklist = [
-    { key: 'length', label: 'At least 8 characters' },
-    { key: 'uppercase', label: 'One uppercase letter' },
-    { key: 'number', label: 'One number' },
-    { key: 'special', label: 'One special character' },
-  ];
+  const checklist = useMemo(() => getPasswordChecklist(policy), [policy]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -57,7 +58,7 @@ export default function Register() {
       return;
     }
     if (!strength.isAcceptable) {
-      toast.error('Please choose a stronger password (at least "Fair").');
+      toast.error(getPasswordError(form.password, policy));
       return;
     }
     if (confirmPassword !== form.password) {
@@ -81,7 +82,6 @@ export default function Register() {
       if (refCode) payload.referral_code = refCode;
       await register(payload);
       toast.success(t('register.success'));
-      setShowPINSetup(true);
       // If phone was provided, show verification step (issue #478)
       if (form.phone && form.phone.trim()) {
         setRegisteredPhone(form.phone);
@@ -91,7 +91,8 @@ export default function Register() {
         if (redirect) {
           navigate('/login?redirect=' + encodeURIComponent(redirect));
         } else {
-          navigate('/login');
+          // Signal the login page to show the "verify your email" banner.
+          navigate('/login', { state: { emailVerificationRequired: true } });
         }
       }
     } catch (err) {
@@ -116,7 +117,8 @@ export default function Register() {
       if (redirect) {
         navigate('/login?redirect=' + encodeURIComponent(redirect));
       } else {
-        navigate('/login');
+        // Signal the login page to show the "verify your email" banner.
+        navigate('/login', { state: { emailVerificationRequired: true } });
       }
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to verify phone. Please check your OTP and try again.');
@@ -207,7 +209,7 @@ export default function Register() {
               <input
                 type={showPass ? 'text' : 'password'}
                 required
-                minLength={8}
+                minLength={policy.min_length}
                 placeholder={t('register.password_placeholder')}
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}

@@ -5,15 +5,24 @@ const { getAnchorHealth } = require('./anchor');
 const { getClient: getRedisClient } = require('../utils/cache');
 const logger = require('../utils/logger');
 const { getRateLimiterStatus } = require('../middleware/rateLimiter');
+const ledgerState = require('./ledgerListenerState');
 
 const horizonUrl = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
 
-// Ledger listener last-event tracking (updated by ledgerListener.js via setLastLedgerEvent)
-let lastLedgerEventAt = null;
-const LEDGER_LISTENER_MAX_STALE_MS = 60 * 1000; // 1 minute
+// Ledger listener liveness (BE-198). ledgerListener.js records proof of life through
+// setLastLedgerEvent: on every stream message, and on every poll that finds the stream
+// fully caught up with Horizon, so a quiet network does not read as stale.
+// Degraded once there has been no proof of life for LEDGER_LISTENER_MAX_STALE_MS
+// (default 90 s, so a dead stream is flagged well inside two minutes).
+const DEFAULT_LEDGER_LISTENER_MAX_STALE_MS = 90 * 1000;
 
-function setLastLedgerEvent(ts) {
-  lastLedgerEventAt = ts;
+function ledgerListenerMaxStaleMs() {
+  const configured = Number(process.env.LEDGER_LISTENER_MAX_STALE_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_LEDGER_LISTENER_MAX_STALE_MS;
+}
+
+function setLastLedgerEvent(ts, info) {
+  ledgerState.setLastLedgerEvent(ts, info);
 }
 
 async function checkDatabase() {
@@ -62,15 +71,29 @@ async function checkRedis() {
 }
 
 function checkLedgerListener() {
-  if (!lastLedgerEventAt) {
-    return { status: 'unknown', last_event_at: null };
+  const s = ledgerState.getLedgerListenerState();
+  const maxStaleMs = ledgerListenerMaxStaleMs();
+  const details = {
+    last_ledger_sequence: s.lastLedgerSequence,
+    horizon_latest_ledger: s.horizonLatestLedger,
+    lag_ledgers: s.lagLedgers,
+  };
+
+  if (!s.lastEventAt) {
+    // Never heard from it. Unknown until it has had a fair chance to start, but a
+    // listener that was started and stays silent past the threshold is not fine.
+    if (s.startedAt && Date.now() - s.startedAt > maxStaleMs) {
+      return { status: 'degraded', last_event_at: null, stale_ms: Date.now() - s.startedAt, ...details };
+    }
+    return { status: 'unknown', last_event_at: null, ...details };
   }
-  const staleMs = Date.now() - lastLedgerEventAt;
-  const ok = staleMs <= LEDGER_LISTENER_MAX_STALE_MS;
+
+  const staleMs = Date.now() - s.lastEventAt;
   return {
-    status: ok ? 'healthy' : 'degraded',
-    last_event_at: new Date(lastLedgerEventAt).toISOString(),
+    status: staleMs <= maxStaleMs ? 'healthy' : 'degraded',
+    last_event_at: new Date(s.lastEventAt).toISOString(),
     stale_ms: staleMs,
+    ...details,
   };
 }
 
@@ -178,4 +201,4 @@ async function runDeepHealthChecks() {
   };
 }
 
-module.exports = { runHealthChecks, runDeepHealthChecks, setLastLedgerEvent };
+module.exports = { runHealthChecks, runDeepHealthChecks, setLastLedgerEvent, checkLedgerListener };

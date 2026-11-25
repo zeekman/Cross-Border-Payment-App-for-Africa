@@ -9,12 +9,12 @@ jest.mock('../utils/cache');
 // Valid UUID v4 for use in tests
 const VALID_KEY = '123e4567-e89b-4d3c-a456-426614174000';
 
-function makeReq({ key = VALID_KEY, body = { amount: 10, recipient_address: 'GABC' }, userId = 'user-1' } = {}) {
+function makeReq({ key = VALID_KEY, body = { amount: 10, recipient_address: 'GABC' }, userId = 'user-1', path = '/api/payments/send' } = {}) {
   return {
     headers: { 'idempotency-key': key },
     body,
     user: { userId },
-    path: '/api/payments/send',
+    path,
     method: 'POST',
   };
 }
@@ -198,6 +198,56 @@ describe('idempotency middleware', () => {
 
     expect(cache.set).toHaveBeenCalledWith(
       expect.stringContaining('idem:payment:'),
+      expect.objectContaining({ statusCode: 200, request_hash: expect.any(String) }),
+      expect.any(Number)
+    );
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO idempotency_keys'),
+      expect.arrayContaining([VALID_KEY, 'user-1'])
+    );
+  });
+
+  // --- Escrow create path (issue #1179) ---
+
+  test('replays cached response for escrow create when same key is reused with the same body', async () => {
+    const body = { amount: '12345678.1234567', recipient_address: 'GABC' };
+    const requestHash = crypto.createHash('sha256').update(JSON.stringify(body)).digest('hex');
+
+    cache.get.mockImplementation((k) => {
+      if (k === `idem:escrow:${VALID_KEY}`) {
+        return Promise.resolve({ statusCode: 201, body: { escrowId: 'esc-1' }, request_hash: requestHash });
+      }
+      return Promise.resolve(null);
+    });
+
+    const req = makeReq({ body, path: '/api/escrow/create' });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await idempotency(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.set).toHaveBeenCalledWith('X-Idempotency-Replayed', 'true');
+    expect(res._jsonSpy).toHaveBeenCalledWith({ escrowId: 'esc-1' });
+  });
+
+  test('creates exactly one escrow and caches the response for a new key', async () => {
+    cache.get.mockResolvedValue(null);
+    db.query.mockResolvedValue({ rows: [] });
+
+    const req = makeReq({ body: { amount: '12345678.1234567', recipient_address: 'GABC' }, path: '/api/escrow/create' });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await idempotency(req, res, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+
+    // Simulate the controller creating the escrow and responding
+    await res.json({ escrowId: 'esc-1' });
+
+    expect(cache.set).toHaveBeenCalledWith(
+      expect.stringContaining('idem:escrow:'),
       expect.objectContaining({ statusCode: 200, request_hash: expect.any(String) }),
       expect.any(Number)
     );

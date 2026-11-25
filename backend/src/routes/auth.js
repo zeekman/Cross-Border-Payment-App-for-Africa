@@ -7,12 +7,13 @@ const {
   refresh,
   logout,
   verifyEmail,
+  resendVerification,
   verifyPhone,
-  getMe,
   updateProfile,
   changeEmail,
   verifyEmailChange,
   getActivity,
+  getMe,
   uploadAvatar,
   setPIN,
   verifyPIN,
@@ -33,11 +34,14 @@ const {
   webauthnRegister,
   webauthnLoginOptions,
   webauthnVerify,
+  completeOnboarding,
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
 const geoRestriction = require('../middleware/geoRestriction');
 const { verifyCsrf } = require('../middleware/csrf');
 const { listSessions, revokeSession, revokeAllSessions } = require('../controllers/sessionController');
+
+const { getPolicy, checkPasswordStrength } = require('../services/passwordPolicy');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -45,18 +49,18 @@ const validate = (req, res, next) => {
   next();
 };
 
-const PASSWORD_MIN_LENGTH = parseInt(process.env.PASSWORD_MIN_LENGTH, 10) || 8;
+// Express-validator custom check backed by the shared password policy
+// (services/passwordPolicy.js) — used on every endpoint that sets a password
+// so register, reset and change-password can never drift apart.
+const passwordStrengthCheck = (message) => (value) => {
+  const unmet = checkPasswordStrength(value);
+  if (unmet.length === 0) return true;
+  throw new Error(`${message}: ${unmet.join(', ')}`);
+};
 
-function checkPasswordStrength(password) {
-  const unmet = [];
-  if (password.length < PASSWORD_MIN_LENGTH)
-    unmet.push(`at least ${PASSWORD_MIN_LENGTH} characters`);
-  if (!/[A-Z]/.test(password)) unmet.push('at least one uppercase letter');
-  if (!/[a-z]/.test(password)) unmet.push('at least one lowercase letter');
-  if (!/\d/.test(password)) unmet.push('at least one digit');
-  if (!/[^A-Za-z0-9]/.test(password)) unmet.push('at least one special character');
-  return unmet;
-}
+// Public config: the exact policy the backend enforces, served for the
+// frontend to derive its validation from (single source of truth).
+router.get('/password-policy', (req, res) => res.json(getPolicy()));
 
 router.post(
   '/register',
@@ -66,13 +70,7 @@ router.post(
     body('email').isEmail().normalizeEmail(),
     body('password')
       .notEmpty().withMessage('Password is required')
-      .custom((value) => {
-        const unmet = checkPasswordStrength(value);
-        if (unmet.length > 0) {
-          throw new Error(`Password does not meet requirements: ${unmet.join(', ')}`);
-        }
-        return true;
-      }),
+      .custom(passwordStrengthCheck('Password does not meet requirements')),
   ],
   validate,
   register
@@ -99,7 +97,7 @@ router.post(
     body('token').trim().notEmpty().withMessage('Reset token is required'),
     body('password')
       .notEmpty().withMessage('Password is required')
-      .isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+      .custom(passwordStrengthCheck('Password does not meet requirements')),
   ],
   validate,
   resetPassword
@@ -110,7 +108,17 @@ router.get('/reset-password/validate', validateResetToken);
 router.post('/refresh', verifyCsrf, refresh);
 router.post('/logout', verifyCsrf, logout);
 
-router.get('/verify-email', verifyEmail);
+// Token-bearing endpoints: POST is preferred; GET variants are deprecated.
+const noReferrer = (_req, res, next) => { res.set('Referrer-Policy', 'no-referrer'); next(); };
+const deprecatedGet = (_req, res, next) => { res.set('Deprecation', 'true'); next(); };
+router.post('/verify-email', noReferrer, [body('token').trim().notEmpty()], validate, verifyEmail);
+router.get('/verify-email', noReferrer, deprecatedGet, verifyEmail);
+router.post(
+  '/resend-verification',
+  [body('email').isEmail().normalizeEmail()],
+  validate,
+  resendVerification
+);
 router.post(
   '/verify-phone',
   authMiddleware,
@@ -130,8 +138,10 @@ router.post(
   validate,
   changeEmail
 );
-router.get('/verify-email-change', verifyEmailChange);
+router.post('/verify-email-change', noReferrer, [body('token').trim().notEmpty()], validate, verifyEmailChange);
+router.get('/verify-email-change', noReferrer, deprecatedGet, verifyEmailChange);
 router.get('/activity', authMiddleware, getActivity);
+router.post('/onboarding-completed', authMiddleware, completeOnboarding);
 
 router.post(
   '/set-pin',
@@ -214,7 +224,9 @@ router.patch(
   authMiddleware,
   [
     body('current_password').notEmpty().withMessage('Current password is required'),
-    body('new_password').isLength({ min: 8 }).withMessage('New password must be at least 8 characters'),
+    body('new_password')
+      .notEmpty().withMessage('New password is required')
+      .custom(passwordStrengthCheck('New password does not meet requirements')),
   ],
   validate,
   changePassword

@@ -3,6 +3,7 @@ const db = require('../db');
 const logger = require('../utils/logger');
 const cache = require('../utils/cache');
 const geoip = require('geoip-lite');
+const { disconnectJti } = require('../services/socketRegistry');
 
 const SESSION_CAP = 5;
 const TOUCH_DEBOUNCE_SEC = 5 * 60; // 5 minutes
@@ -11,6 +12,11 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+/**
+ * Record a new session on login.
+ * Called from authController.login after issuing the JWT.
+ */
+async function recordSession(userId, token, req, familyId = null) {
 function detectDeviceType(ua) {
   if (!ua) return 'unknown';
   const s = ua.toLowerCase();
@@ -38,11 +44,14 @@ function getClientIp(req) {
 async function blacklistJti(jti, ttlSeconds) {
   if (!jti) return;
   await cache.set(`jti:blacklist:${jti}`, 1, ttlSeconds || TOUCH_DEBOUNCE_SEC).catch(() => {});
+  disconnectJti(jti);
 }
 
 async function isJtiBlacklisted(jti) {
   if (!jti) return false;
-  const val = await cache.get(`jti:blacklist:${jti}`).catch(() => null);
+  // BE-172: fail closed — a Redis error propagates so the caller rejects the
+  // token instead of treating an outage as "not revoked".
+  const val = await cache.getStrict(`jti:blacklist:${jti}`);
   return val !== null;
 }
 
@@ -54,6 +63,28 @@ async function recordSession(userId, token, req) {
   const deviceType = detectDeviceType(userAgent);
   const location = getLocation(ipAddress);
 
+  await db.query(
+    `INSERT INTO sessions (user_id, token_hash, device_info, ip_address, family_id)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (token_hash) DO UPDATE SET last_active = NOW()`,
+    [userId, tokenHash, deviceInfo, ipAddress, familyId]
+  );
+}
+
+/**
+ * Revoke the refresh-token families linked to the given sessions so a revoked
+ * device cannot mint new access tokens via POST /auth/refresh.
+ */
+async function revokeFamilies(rows) {
+  const familyIds = rows.map((r) => r.family_id).filter(Boolean);
+  if (familyIds.length === 0) return;
+  await db.query(`DELETE FROM refresh_tokens WHERE family_id = ANY($1::uuid[])`, [familyIds]);
+}
+
+/**
+ * Update last_active for an existing session.
+ * Can be called from auth middleware on each request.
+ */
   // Extract JTI from decoded token payload (base64 middle section)
   let jti = null;
   try {
@@ -189,6 +220,7 @@ async function revokeSession(req, res, next) {
   try {
     const { id } = req.params;
     const { rows, rowCount } = await db.query(
+      `DELETE FROM sessions WHERE id = $1 AND user_id = $2 RETURNING family_id`,
       `UPDATE sessions SET is_active = FALSE
        WHERE id = $1 AND user_id = $2 AND is_active = TRUE
        RETURNING token_jti`,
@@ -199,6 +231,7 @@ async function revokeSession(req, res, next) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
+    await revokeFamilies(rows);
     const jti = rows[0]?.token_jti;
     if (jti) await blacklistJti(jti, 24 * 3600);
 
@@ -229,6 +262,16 @@ async function revokeAllSessions(req, res, next) {
       ? hashToken(req.headers.authorization.replace('Bearer ', ''))
       : null;
 
+    if (keepCurrent && req.headers.authorization) {
+      const currentHash = hashToken(req.headers.authorization.replace('Bearer ', ''));
+      const { rows } = await db.query(
+        `DELETE FROM sessions WHERE user_id = $1 AND token_hash != $2 RETURNING family_id`,
+        [userId, currentHash]
+      );
+      await revokeFamilies(rows);
+    } else {
+      await db.query(`DELETE FROM sessions WHERE user_id = $1`, [userId]);
+      await db.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [userId]);
     let rows;
     if (!includeCurrent && currentHash) {
       ({ rows } = await db.query(
@@ -276,4 +319,5 @@ module.exports = {
   listSessions,
   revokeSession,
   revokeAllSessions,
+  revokeFamilies,
 };

@@ -1,7 +1,8 @@
 const express = require('express');
 const { body, param, validationResult } = require('express-validator');
 const auth = require('../middleware/auth');
-const { create, list, withdraw } = require('../controllers/savingsController');
+const { requireStepUp } = require('../middleware/requireStepUp');
+const { create, list, withdraw, getWithdrawQuote } = require('../controllers/savingsController');
 
 const router = express.Router();
 
@@ -12,6 +13,17 @@ const validate = (req, res, next) => {
 };
 
 router.use(auth);
+
+// BE-176: vaults are bookkeeping only (no on-chain deposit/withdraw yet), so the
+// feature is preview-only and disabled in production unless explicitly enabled.
+router.use((req, res, next) => {
+  const flag = process.env.SAVINGS_ENABLED;
+  const enabled = flag !== undefined ? flag === 'true' : process.env.NODE_ENV !== 'production';
+  if (!enabled) {
+    return res.status(503).json({ error: 'Savings vaults are not available yet', code: 'FEATURE_DISABLED' });
+  }
+  next();
+});
 
 /**
  * @swagger
@@ -52,16 +64,49 @@ router.post(
       .withMessage('Invalid lock period'),
   ],
   validate,
+  requireStepUp,
   create
 );
 
 router.get('/', list);
+
+/**
+ * @swagger
+ * /api/savings/{id}/withdraw-quote:
+ *   get:
+ *     summary: Get the exact early-withdrawal penalty for a vault before confirming withdrawal
+ *     tags: [Savings]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Withdrawal quote
+ *       404:
+ *         description: Vault not found
+ */
+router.get(
+  '/:id/withdraw-quote',
+  [
+    param('id').isUUID().withMessage('Invalid vault ID'),
+  ],
+  validate,
+  getWithdrawQuote
+);
+
 router.post(
   '/:id/withdraw',
   [
     param('id').isUUID().withMessage('Invalid vault ID'),
   ],
   validate,
+  requireStepUp,
   withdraw
 );
 

@@ -3,6 +3,7 @@ const db = require('../db');
 const { getStellarStats } = require('../services/stellar');
 const { attestKyc, revokeKyc } = require('../services/kycAttestation');
 const audit = require('../services/audit');
+const { disconnectUser } = require('../services/socketRegistry');
 
 // Cache for Stellar stats (10 seconds)
 let stellarStatsCache = null;
@@ -223,7 +224,7 @@ async function approveKYC(req, res, next) {
     }
 
     const adminWallet = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     const adminPublicKey = adminWallet.rows[0]?.public_key;
@@ -278,7 +279,7 @@ async function revokeKYC(req, res, next) {
     }
 
     const adminWallet = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     const adminPublicKey = adminWallet.rows[0]?.public_key;
@@ -815,6 +816,8 @@ async function bulkSuspend(req, res, next) {
     );
     await client.query('COMMIT');
 
+    disconnectUser(affectedUsers.map((u) => u.id));
+
     await audit.auditLog(req, 'user_suspension', {
       type: 'bulk_user',
       newValue: { user_ids: userIds, reason: reason || null },
@@ -1028,7 +1031,7 @@ async function bulkKycUpdate(req, res, next) {
 
     // Get admin wallet for on-chain operations
     const adminWallet = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     const adminPublicKey = adminWallet.rows[0]?.public_key;

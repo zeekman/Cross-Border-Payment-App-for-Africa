@@ -58,8 +58,6 @@ function generateChallenge(clientPublicKey) {
     .addOperation(
       StellarSDK.Operation.manageData({
         name: `${HOME_DOMAIN} auth`,
-        value: crypto.randomBytes(32).toString('hex')
-        name: 'challenge',
         value: crypto.randomBytes(32).toString('hex'),
       })
     )
@@ -72,26 +70,17 @@ function generateChallenge(clientPublicKey) {
 
 function verifyChallenge(clientPublicKey, signedXDR) {
   try {
-    const transaction = StellarSDK.TransactionEnvelope.fromXDR(
-      signedXDR,
-      process.env.STELLAR_NETWORK === 'mainnet'
-        ? StellarSDK.Networks.PUBLIC_NETWORK_PASSPHRASE
-        : StellarSDK.Networks.TESTNET_NETWORK_PASSPHRASE
-    );
-
-    const tx = transaction.transaction();
+    const transaction = StellarSDK.TransactionBuilder.fromXDR(signedXDR, networkPassphrase());
 
     // Exact, case-sensitive match on the manage_data operation name against
     // the configured home domain. Reject anything that merely contains,
     // starts with, or ends with the expected value (sub-domain spoofing,
     // trailing-dot spoofing, case-mismatch spoofing).
     const expectedName = `${HOME_DOMAIN} auth`;
-    const manageDataOp = (tx.operations || []).find(op => op.type === 'manageData');
+    const manageDataOp = (transaction.operations || []).find(op => op.type === 'manageData');
     if (!manageDataOp || manageDataOp.name !== expectedName) return false;
 
     // Verify server signed it
-    const transaction = StellarSDK.TransactionBuilder.fromXDR(signedXDR, networkPassphrase());
-
     const serverSigned = transaction.signatures.some(sig => {
       try {
         return StellarSDK.Keypair.fromPublicKey(SERVER_KEYPAIR.publicKey()).verify(transaction.hash(), sig.signature());
@@ -200,8 +189,7 @@ function _withLock(key, fn) {
 module.exports = {
   generateChallenge,
   verifyChallenge,
-  SERVER_KEYPAIR,
-  HOME_DOMAIN
+  HOME_DOMAIN,
   storeSession,
   getSession,
   deleteSession,

@@ -1,0 +1,19 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Dev-only crate: registers every contract in a single test `Env` so that a
+# signature change in any cross-called function breaks this build.
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+soroban-sdk = { version = "20.5.0", features = ["testutils"] }
+escrow-contract = { path = "../escrow" }
+kyc-attestation-contract = { path = "../kyc-attestation" }
+dispute-resolution-contract = { path = "../dispute-resolution" }
+fee-distributor-contract = { path = "../fee-distributor" }
+recurring-payments-contract = { path = "../recurring-payments" }
+savings-vault-contract = { path = "../savings-vault" }

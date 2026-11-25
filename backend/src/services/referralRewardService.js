@@ -4,6 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const { mintPoints } = require('./loyaltyToken');
 const { sendPushToUser } = require('../controllers/notificationController');
+const { detectReferralAbuse } = require('./referralAbuseGuard');
 const logger = require('../utils/logger');
 
 const REFERRAL_REWARD_TOKENS = parseInt(process.env.REFERRAL_REWARD_TOKENS || '50', 10);
@@ -34,7 +35,23 @@ async function creditReferralReward(refereeUserId, paymentId) {
 
   const { referrer_id, referee_email } = referralResult.rows[0];
 
-  // 2. Insert reward row — unique(referee_id) enforces one-time-only
+  // 2. Reject self-referral and circular referral chains before issuing a reward
+  const abuseReason = await detectReferralAbuse(referrer_id, refereeUserId);
+  if (abuseReason) {
+    logger.warn('Referral reward withheld — abuse check failed', {
+      referrerId: referrer_id, refereeUserId, paymentId, reason: abuseReason,
+    });
+    await db.query(
+      `INSERT INTO referral_rewards (id, referrer_id, referee_id, reward_amount, status, payment_id)
+       VALUES ($1, $2, $3, 0, 'flagged', $4)`,
+      [uuidv4(), referrer_id, refereeUserId, paymentId],
+    ).catch((err) => {
+      if (err.code !== '23505') throw err; // already recorded — nothing more to do
+    });
+    return;
+  }
+
+  // 3. Insert reward row — unique(referee_id) enforces one-time-only
   let rewardId;
   try {
     const insertResult = await db.query(
@@ -50,7 +67,7 @@ async function creditReferralReward(refereeUserId, paymentId) {
     throw err;
   }
 
-  // 3. Mint tokens to referrer's wallet
+  // 4. Mint tokens to referrer's wallet
   try {
     const walletResult = await db.query(
       'SELECT public_key FROM wallets WHERE user_id = $1 LIMIT 1',
@@ -76,7 +93,7 @@ async function creditReferralReward(refereeUserId, paymentId) {
     return;
   }
 
-// 4. Notify referrer (fire-and-forget)
+// 5. Notify referrer (fire-and-forget)
    const message = `${referee_email} just made their first payment using your referral link! You've earned ${REFERRAL_REWARD_TOKENS} loyalty points.`;
 
    const { persistAndBroadcast } = require('../services/notificationInbox');

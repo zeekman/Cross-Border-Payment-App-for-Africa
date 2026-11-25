@@ -1,34 +1,43 @@
 const crypto = require('crypto');
 const db = require('../db');
-const { validatePublicUrl } = require('../utils/ssrf');
 const { validatePublicUrl } = require('../utils/ssrfValidator');
 const { validateOutboundUrl } = require('../utils/ssrf');
 const { encryptSecret, decryptSecret } = require('../utils/symmetricEncryption');
+const { retryDelivery } = require('../services/webhook');
 
-const VALID_EVENTS = ['payment.sent', 'payment.received', 'payment.failed'];
+const { WEBHOOK_EVENTS: VALID_EVENTS, WEBHOOK_EVENT_DESCRIPTIONS } = require('../services/webhookEvents');
+
+// Shared URL validation for create/update: HTTPS-only + SSRF check.
+async function validateWebhookUrl(url) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return { status: 400, body: { error: 'Invalid URL format' } };
+  }
+  if (parsedUrl.protocol !== 'https:') {
+    return { status: 400, body: { error: 'Webhook URL must use HTTPS' } };
+  }
+  const ssrfCheck = await validateOutboundUrl(url);
+  if (!ssrfCheck.valid) {
+    return {
+      status: 400,
+      body: {
+        error: 'SSRF_BLOCKED',
+        message: 'The provided URL resolves to a restricted network range.',
+      },
+    };
+  }
+  return null;
+}
 
 async function create(req, res, next) {
   try {
     const { url, events } = req.body;
 
     // Webhook endpoints must be HTTPS to protect the HMAC secret in transit
-    let parsedUrl;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      return res.status(400).json({ error: 'Invalid URL format' });
-    }
-    if (parsedUrl.protocol !== 'https:') {
-      return res.status(400).json({ error: 'Webhook URL must use HTTPS' });
-    }
-
-    const ssrfCheck = await validateOutboundUrl(url);
-    if (!ssrfCheck.valid) {
-      return res.status(400).json({
-        error: 'SSRF_BLOCKED',
-        message: 'The provided URL resolves to a restricted network range.',
-      });
-    }
+    const urlError = await validateWebhookUrl(url);
+    if (urlError) return res.status(urlError.status).json(urlError.body);
 
     const invalidEvents = (events || []).filter((e) => !VALID_EVENTS.includes(e));
     if (invalidEvents.length) {
@@ -55,7 +64,9 @@ async function create(req, res, next) {
 async function list(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, url, events, active, created_at, secret FROM webhooks WHERE user_id = $1 ORDER BY created_at DESC`,
+      `SELECT id, url, events, active, created_at, secret,
+              consecutive_failures, disabled_at, disabled_reason
+       FROM webhooks WHERE user_id = $1 ORDER BY created_at DESC`,
       [req.user.userId]
     );
 
@@ -136,7 +147,7 @@ async function rotateSecret(req, res, next) {
     );
 
     // Return the plain secret once — it will not be shown again
-    res.json({ ...updated[0], secret: newPlainSecret });
+    res.json({ ...updated[0], secret: newPlainSecret, rotation_overlap_hours: ROTATION_OVERLAP_HOURS });
   } catch (err) {
     next(err);
   }
@@ -162,7 +173,6 @@ async function retry(req, res, next) {
   }
 }
 
-module.exports = { create, list, listDeliveries, retry, rotateSecret };
 async function update(req, res, next) {
   try {
     const { id } = req.params;
@@ -176,13 +186,8 @@ async function update(req, res, next) {
     if (!owned.length) return res.status(404).json({ error: 'Webhook not found' });
 
     if (url !== undefined) {
-      const ssrfCheck = await validateOutboundUrl(url);
-      if (!ssrfCheck.valid) {
-        return res.status(400).json({
-          error: 'SSRF_BLOCKED',
-          message: 'The provided URL resolves to a restricted network range.',
-        });
-      }
+      const urlError = await validateWebhookUrl(url);
+      if (urlError) return res.status(urlError.status).json(urlError.body);
     }
 
     const invalidEvents = (events || []).filter((e) => !VALID_EVENTS.includes(e));
@@ -194,9 +199,14 @@ async function update(req, res, next) {
       `UPDATE webhooks
        SET url = COALESCE($1, url),
            events = COALESCE($2, events),
-           active = COALESCE($3, active)
+           active = COALESCE($3, active),
+           -- Re-enabling an endpoint (BE-217) starts it with a clean slate, otherwise the
+           -- next single failure would put it straight back over the auto-disable threshold.
+           consecutive_failures = CASE WHEN $3::boolean IS TRUE THEN 0 ELSE consecutive_failures END,
+           disabled_at = CASE WHEN $3::boolean IS TRUE THEN NULL ELSE disabled_at END,
+           disabled_reason = CASE WHEN $3::boolean IS TRUE THEN NULL ELSE disabled_reason END
        WHERE id = $4 AND user_id = $5
-       RETURNING id, url, events, active, created_at`,
+       RETURNING id, url, events, active, created_at, consecutive_failures, disabled_at, disabled_reason`,
       [url || null, events || null, active !== undefined ? active : null, id, req.user.userId]
     );
 
@@ -206,4 +216,10 @@ async function update(req, res, next) {
   }
 }
 
-module.exports = { create, update, list, listDeliveries, retry };
+function listEvents(req, res) {
+  res.json({
+    events: VALID_EVENTS.map((name) => ({ name, description: WEBHOOK_EVENT_DESCRIPTIONS[name] })),
+  });
+}
+
+module.exports = { listEvents, create, update, list, listDeliveries, retry, rotateSecret };

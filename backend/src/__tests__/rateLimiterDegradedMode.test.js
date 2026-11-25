@@ -35,7 +35,7 @@ describe('RedisStore degraded-mode alerting', () => {
     );
   }
 
-  test('first Redis failure: falls back to null, logs a warning, and sets the degraded metric', async () => {
+  test('first Redis failure: falls back to in-memory counting, logs a warning, and sets the degraded metric', async () => {
     mockFailingRedis();
     const logger = require('../utils/logger');
     const metrics = require('../utils/metrics');
@@ -44,7 +44,7 @@ describe('RedisStore degraded-mode alerting', () => {
     const store = new RedisStore(60000, 'auth');
     const result = await store.increment('1.2.3.4');
 
-    expect(result).toBeNull();
+    expect(result).toEqual(expect.objectContaining({ totalHits: 1 }));
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('degraded'),

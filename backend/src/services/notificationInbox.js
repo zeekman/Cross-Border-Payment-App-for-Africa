@@ -23,16 +23,12 @@ async function persistAndBroadcast(userId, type, title, body, data = {}) {
   return notification;
 }
 
-async function broadcast(userId, notification) {
+function broadcast(userId, notification) {
   if (!io) return;
   try {
-    const { rows } = await db.query(
-      `SELECT public_key FROM wallets WHERE user_id = $1`,
-      [userId]
-    );
-    for (const row of rows) {
-      io.to(row.public_key).emit('notification:new', notification);
-    }
+    // Every socket of the user joins `user:<userId>` on connect, so one emit
+    // reaches each socket exactly once regardless of how many wallets they own.
+    io.to(`user:${userId}`).emit('notification:new', notification);
   } catch (err) {
     logger.warn('Failed to broadcast notification', { error: err.message, userId });
   }

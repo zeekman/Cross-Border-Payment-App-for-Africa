@@ -8,8 +8,11 @@ const Sentry = require('@sentry/node');
 const requestId = require('./middleware/requestId');
 const { isSorobanError, toApiError } = require('./utils/sorobanErrors');
 const metricsMiddleware = require('./middleware/metricsMiddleware');
+const errorHandler = require('./middleware/errorHandler');
 const { registry } = require('./utils/metrics');
+const rateLimit = require('express-rate-limit');
 const rateLimiters = require('./middleware/rateLimiter');
+
 const { getHealth: getLedgerHealth } = require('./services/ledgerListener');
 
 const authRoutes = require('./routes/auth');
@@ -49,15 +52,18 @@ const swaggerUi = require('swagger-ui-express');
 const paymentSendValidators = require('./validators/paymentSendValidators');
 
 const logger = require('./utils/logger');
+const { resolveTrustProxy } = require('./utils/trustProxy');
 const { runHealthChecks, runDeepHealthChecks } = require('./services/health');
 
 const app = express();
+// req.ip drives rate limiting, the admin IP allow-list and geo-restriction,
+// so only TRUSTED_PROXIES controls which hops may set X-Forwarded-For.
+app.set('trust proxy', resolveTrustProxy(process.env, logger));
 
-// Serve uploaded avatars
-const path = require('path');
-app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars')));
+// Sentry v8 removed the v7 `Sentry.Handlers` namespace. Request isolation is
+// handled by `Sentry.init()` and errors are captured via
+// `Sentry.setupExpressErrorHandler(app)` registered after all routes below.
 
-app.use(Sentry.Handlers.requestHandler());
 app.use(requestId);
 app.use((req, res, next) => {
   req.logger = logger.child({ requestId: req.requestId });
@@ -69,11 +75,14 @@ app.use((req, res, next) => {
   res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
   next();
 });
-app.use((req, res, next) => helmet({
+
+// Helmet is instantiated once at startup. The per-request CSP nonce is supplied
+// via a directive function that reads res.locals.cspNonce at request time.
+const helmetMiddleware = helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'none'"],
-      scriptSrc: ["'self'", `'nonce-${res.locals.cspNonce}'`],
+      scriptSrc: ["'self'", (req, res) => `'nonce-${res.locals.cspNonce}'`],
       connectSrc: ["'self'", 'https://horizon.stellar.org', 'wss://horizon.stellar.org'],
       imgSrc: ["'self'", 'data:'],
       frameAncestors: ["'none'"],
@@ -86,13 +95,15 @@ app.use((req, res, next) => helmet({
   },
   frameguard: { action: 'deny' },
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  permissionsPolicy: {
-    camera: [],
-    microphone: [],
-    geolocation: [],
-    payment: [],
-  },
-})(req, res, next));
+});
+app.use(helmetMiddleware);
+
+// Helmet 8 has no `permissionsPolicy` option, so emit the header explicitly.
+app.use((req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+  next();
+});
+
 app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true, maxAge: 86400 }));
 app.use(express.json());
 
@@ -101,32 +112,52 @@ app.use((req, res, next) => {
   next();
 });
 
+// Serve uploaded avatars after the security middleware so responses carry
+// nosniff, CSP and Cross-Origin-Resource-Policy headers.
+const path = require('path');
+app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars'), {
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', 'inline');
+  },
+}));
+
 // Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set)
 app.use('/api/auth/login', rateLimiters.authLimiter);
 app.use('/api/auth/register', rateLimiters.authLimiter);
-app.use('/api/payments/send', rateLimiters.paymentLimiter);
-app.use('/api/wallet/export-key', rateLimiters.exportKeyLimiter);
-app.use('/api/admin', rateLimiters.adminLimiter);
-app.use('/api', rateLimiters.readLimiter);
 
 app.use('/api/auth', authRoutes);
+// Authenticated wallet/payment data must never be cached (FE-162)
+app.use(['/api/wallet', '/api/payments'], (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+// Deprecated alias for /api/contacts (BE-188) — same router and middleware stack.
+const CONTACTS_SUNSET = 'Wed, 31 Mar 2027 00:00:00 GMT';
+app.use('/api/wallet/contacts', (req, res, next) => {
+  res.set('Deprecation', 'true');
+  res.set('Sunset', CONTACTS_SUNSET);
+  res.set('Link', '</api/contacts>; rel="successor-version"');
+  next();
+}, contactsRoutes);
 app.use('/api/wallet', walletRoutes);
+app.use('/api/wallet', geoRestriction, walletRoutes);
 app.use('/api/payments', geoRestriction, paymentRoutes);
 app.use('/api/payment-requests', geoRestriction, paymentRequestRoutes);
 app.use('/api/scheduled-payments', geoRestriction, scheduledPaymentRoutes);
 app.use('/api/savings', geoRestriction, savingsRoutes);
-app.use('/api/anchor', anchorRoutes);
+app.use('/api/anchor', geoRestriction, anchorRoutes);
 app.use('/api/analytics', analyticsRoutes);
-app.use('/api/dex', dexRoutes);
+app.use('/api/dex', geoRestriction, dexRoutes);
 app.use('/api/support', supportRoutes);
-app.use('/api/escrow', agentEscrowRoutes);
+app.use('/api/escrow', geoRestriction, agentEscrowRoutes);
 app.use('/api/referrals', referralRoutes);
 app.use('/api/loyalty', loyaltyRoutes);
 app.use('/api/disputes', disputeRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/admin', ipAllowlist, adminRoutes);
 app.use('/api/prices', pricesRoutes);
-app.use('/api/channels', channelsRoutes);
+app.use('/api/channels', geoRestriction, channelsRoutes);
 app.use('/api/contracts', contractsRoutes);
 app.use('/api/ledger', ledgerRoutes);
 app.use('/api/contacts', contactsRoutes);
@@ -136,7 +167,7 @@ app.use('/api/assets', assetsRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/.well-known/stellar', sep10Routes);
 app.use('/api/sep10', sep10Routes);
-app.use('/api/sep31', sep31Routes);
+app.use('/api/sep31', geoRestriction, sep31Routes);
 // BE-031: /api/dev is reserved exclusively for the env-gated developer router
 // below. A "legacy alias" that also mounted toolsRoutes at /api/dev used to
 // live here (removed) — its naming collision with this router was flagged as
@@ -149,6 +180,10 @@ if (process.env.NODE_ENV !== 'production') {
   app.use('/api/dev', devRoutes);
 }
 app.use('/', stellarTomlRoutes);
+
+// Sentry v8: register the Express error handler after all routes so thrown
+// route errors are reported. No-op when Sentry was not initialized (no DSN).
+Sentry.setupExpressErrorHandler(app);
 
 // Swagger API Documentation
 const swaggerOptions = {
@@ -289,8 +324,6 @@ app.get('/metrics', async (req, res) => {
   res.end(await registry.metrics());
 });
 
-app.use(Sentry.Handlers.errorHandler());
-
 app.use((err, req, res, next) => {
   // BE-220: translate Soroban contract failures into stable API codes
   if (err.contractError || (!err.code && isSorobanError(err))) {
@@ -302,8 +335,7 @@ app.use((err, req, res, next) => {
     });
     return res.status(apiErr.status).json({ error: apiErr.message, code: apiErr.code });
   }
-  req.logger.error(err.message, { stack: err.stack, status: err.status });
-  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  return errorHandler(err, req, res, next);
 });
 
 module.exports = app;

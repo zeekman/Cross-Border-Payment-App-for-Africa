@@ -37,7 +37,7 @@ async function open(req, res, next) {
     } = req.body;
 
     const walletResult = await db.query(
-      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -132,7 +132,7 @@ async function submitEvidenceHandler(req, res, next) {
     }
 
     const walletResult = await db.query(
-      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -276,7 +276,7 @@ async function getDispute(req, res, next) {
 
     if (req.user.role !== "admin") {
       const walletResult = await db.query(
-        "SELECT public_key FROM wallets WHERE user_id = $1",
+        "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
         [req.user.userId]
       );
       const public_key = walletResult.rows[0]?.public_key;
@@ -314,7 +314,7 @@ async function listEvidence(req, res, next) {
     }
 
     const walletResult = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {
@@ -355,7 +355,7 @@ async function listEvidence(req, res, next) {
 async function listDisputes(req, res, next) {
   try {
     const walletResult = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1",
+      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
       [req.user.userId]
     );
     if (!walletResult.rows[0]) {

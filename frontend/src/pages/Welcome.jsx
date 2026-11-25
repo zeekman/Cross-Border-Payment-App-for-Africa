@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useAuth } from '../context/AuthContext';
+import api from '../utils/api';
 
 const SLIDES = [
   {
@@ -31,6 +33,7 @@ const AUTO_ADVANCE_MS = 4000;
 export default function Welcome() {
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const { user, updateUser } = useAuth();
 
   const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -38,12 +41,6 @@ export default function Welcome() {
   const [showCTA, setShowCTA] = useState(false);
   const timerRef = useRef(null);
   const touchStartX = useRef(null);
-
-  useEffect(() => {
-    if (localStorage.getItem('onboarding_completed') === 'true') {
-      setShowCTA(true);
-    }
-  }, []);
 
   const goTo = useCallback((index) => {
     if (index >= SLIDES.length) {
@@ -80,7 +77,15 @@ export default function Welcome() {
   }
 
   function handleGetStarted() {
-    localStorage.setItem('onboarding_completed', 'true');
+    if (user) {
+      // Onboarding completion is a per-account fact stored on the server.
+      // Update local state optimistically so a transient network failure
+      // doesn't trap the user on this screen.
+      api.post('/auth/onboarding-completed').catch(() => {});
+      updateUser({ onboarding_completed: true });
+      navigate('/dashboard');
+      return;
+    }
     navigate('/register');
   }
 
@@ -110,12 +115,14 @@ export default function Welcome() {
           >
             {t('welcome.get_started')} <ArrowRight size={18} />
           </button>
-          <button
-            onClick={() => navigate('/login')}
-            className="w-full bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-900 dark:text-white border border-gray-200 dark:border-gray-700 font-semibold py-3.5 rounded-xl transition-colors shadow-sm"
-          >
-            {t('welcome.have_account')}
-          </button>
+          {!user && (
+            <button
+              onClick={() => navigate('/login')}
+              className="w-full bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-900 dark:text-white border border-gray-200 dark:border-gray-700 font-semibold py-3.5 rounded-xl transition-colors shadow-sm"
+            >
+              {t('welcome.have_account')}
+            </button>
+          )}
         </div>
       </div>
     );

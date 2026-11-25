@@ -9,6 +9,28 @@ Breaking changes are marked **[BREAKING]**.
 
 ## [Unreleased]
 
+### Removed — `GET /api/wallet/transactions` (BE-175, issue #1307) **[BREAKING]**
+
+The endpoint was deprecated with a `Sunset` of 2026-01-01 but was still served
+and returned `SELECT *` rows from `transactions`. It now responds `410 Gone`
+with a `Link: </api/payments/history>; rel="successor-version"` header. Use
+`GET /api/payments/history` instead.
+
+### Security — backend hardening (BE-172–BE-174, issues #1304–#1306)
+
+- Restored the truncated tail of `app.js` (Swagger, health, `/metrics`, error
+  handler). 5xx responses now return `{ error: 'Internal server error',
+  request_id }` instead of the raw error message.
+- `REDIS_URL` and `METRICS_TOKEN` are required in production; `/metrics`
+  returns 401 without the token in production.
+- Shared Redis connection factory (`utils/redisClient.js`) with the offline
+  queue enabled, so the first command after boot/reconnect no longer fails.
+  `POST /api/payments/send` returns `503 LOCK_UNAVAILABLE` (not 429) when
+  Redis is unreachable.
+- Access-token revocation checks fail closed on Redis errors; without
+  `REDIS_URL` (development) the cache falls back to an in-process store so
+  revocation and WebAuthn challenges keep working. New `redis_up` gauge.
+
 ### Security — backend routes (`backend/src/routes/wallet.js`)
 
 #### Fixed: `GET /api/wallet/signers` bypassed admin/owner authorization (BE-001, issue #948)

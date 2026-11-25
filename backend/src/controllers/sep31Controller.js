@@ -130,7 +130,6 @@ async function getInfo(req, res, next) {
  */
 async function createTransaction(req, res, next) {
   try {
-    const { amount, asset_code = 'USDC', receiver_account, fields = {}, sender_name, sender_email, callback_url } = req.body;
     const {
       amount,
       asset_code = 'USDC',
@@ -141,10 +140,6 @@ async function createTransaction(req, res, next) {
       callback_url,
     } = req.body;
     const userId = req.user.userId;
-
-    if (callback_url && !validateCallbackUrl(callback_url)) {
-      return res.status(400).json({ error: 'callback_url must be a valid HTTPS URL (no internal addresses)' });
-    }
 
     if (!amount || !receiver_account) {
       return res.status(400).json({ error: 'amount and receiver_account required' });
@@ -192,20 +187,16 @@ async function createTransaction(req, res, next) {
     }
 
     await db.query(
-      `INSERT INTO sep31_transactions (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status, callback_url)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)`,
-      [txId, userId, receiver_account, amount, asset_code, kycVerified, callback_url || null]
-    );
-
-    if (callback_url) {
-      // Fire-and-forget: delivery failures are logged, never block the response.
-      deliverCallback(callback_url, { transaction_id: txId, status: 'pending' }).catch(() => {});
-    }
       `INSERT INTO sep31_transactions
          (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status, callback_url, shared_secret)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)`,
       [txId, userId, receiver_account, amount, asset_code, kycVerified, callback_url || null, sharedSecret]
     );
+
+    if (callback_url) {
+      // Fire-and-forget: delivery failures are logged, never block the response.
+      deliverCallback({ id: txId, callback_url, shared_secret: sharedSecret, status: 'pending' }).catch(() => {});
+    }
 
     logger.info('SEP-31 transaction created', {
       txId,

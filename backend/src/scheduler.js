@@ -20,6 +20,7 @@ const { remindScheduledFeeConfigs } = require('./jobs/remindScheduledFeeConfigs'
 const { processLoyaltyMintQueue } = require('./jobs/loyaltyMintJob');
 const { cleanupOldNotifications } = require('./jobs/cleanupOldNotifications');
 const { checkKycDocumentExpiry } = require('./jobs/kycExpiryJob');
+const { reconcileTransactionConfirmations } = require('./jobs/transactionConfirmationJob');
 
 // Configurable cron expressions — fall back to sensible defaults
 const PAYMENTS_CRON             = process.env.CRON_SCHEDULED_PAYMENTS   || '* * * * *';
@@ -33,6 +34,7 @@ const LOYALTY_MINT_CRON         = process.env.CRON_LOYALTY_MINT         || '* * 
 const FEE_CONFIG_ACTIVATE_CRON  = process.env.CRON_FEE_CONFIG_ACTIVATE  || '* * * * *';
 const NOTIFICATION_CLEANUP_CRON = process.env.CRON_NOTIFICATION_CLEANUP || '0 2 * * *';
 const FEE_CONFIG_REMINDER_CRON  = process.env.CRON_FEE_CONFIG_REMINDER  || '0 * * * *';
+const TX_CONFIRMATION_CRON      = process.env.CRON_TX_CONFIRMATION_RECONCILIATION || '* * * * *';
 
 // BE-221: when Redis is unavailable, jobs only run unlocked if explicitly allowed.
 // Defaults to true outside production (single-instance dev), false in production.
@@ -176,6 +178,11 @@ function startScheduler() {
   register('activateScheduledFeeConfigs', FEE_CONFIG_ACTIVATE_CRON, activateScheduledFeeConfigs, { lockTtlMs: 55 * 1000 });
   register('remindScheduledFeeConfigs', FEE_CONFIG_REMINDER_CRON, remindScheduledFeeConfigs);
   register('cleanupOldNotifications', NOTIFICATION_CLEANUP_CRON, cleanupOldNotifications);
+  register('transactionConfirmationReconciliation', TX_CONFIRMATION_CRON, reconcileTransactionConfirmations, { lockTtlMs: 55 * 1000 });
 }
 
-module.exports = { startScheduler, safeJob, getJobStatuses, cronIntervalSeconds };
+function stopScheduler() {
+  for (const task of cron.getTasks().values()) task.stop();
+}
+
+module.exports = { startScheduler, stopScheduler, safeJob, getJobStatuses, cronIntervalSeconds };

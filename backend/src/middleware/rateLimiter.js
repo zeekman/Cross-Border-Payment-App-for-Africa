@@ -1,4 +1,5 @@
 const rateLimit = require('express-rate-limit');
+const { MemoryStore } = require('express-rate-limit');
 const Redis = require('ioredis');
 const logger = require('../utils/logger');
 const audit = require('../services/audit');
@@ -78,6 +79,14 @@ class RedisStore {
   constructor(windowMs, prefix) {
     this.windowSec = Math.ceil(windowMs / 1000);
     this.prefix = prefix;
+    // Per-process fallback used while Redis is unconfigured or erroring.
+    // express-rate-limit has no implicit fallback: a store that returns null
+    // makes every request fail with a 500.
+    this.memory = new MemoryStore();
+  }
+
+  init(options) {
+    this.memory.init(options);
   }
 
   async increment(key) {
@@ -86,7 +95,7 @@ class RedisStore {
     if (!redis) {
       // No Redis configured — fall back to in-memory (handled by express-rate-limit default)
       markDegraded(this.prefix, 'no_redis_configured');
-      return null;
+      return this.memory.increment(key);
     }
     try {
       const multi = redis.multi();
@@ -101,13 +110,13 @@ class RedisStore {
       return { totalHits, resetTime };
     } catch (err) {
       markDegraded(this.prefix, 'redis_error');
-      return null; // Redis error — fail open
+      return this.memory.increment(key); // Redis error — degrade to per-process limiting
     }
   }
 
   async decrement(key) {
     const redis = getRedis();
-    if (!redis) return;
+    if (!redis) return this.memory.decrement(key);
     try {
       await redis.decr(`rl:${this.prefix}:${key}`);
     } catch {}
@@ -115,7 +124,7 @@ class RedisStore {
 
   async resetKey(key) {
     const redis = getRedis();
-    if (!redis) return;
+    if (!redis) return this.memory.resetKey(key);
     try {
       await redis.del(`rl:${this.prefix}:${key}`);
     } catch {}
@@ -123,13 +132,9 @@ class RedisStore {
 }
 
 function getTrustedIp(req) {
-  const trusted = (process.env.TRUSTED_PROXIES || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const forwarded = req.headers['x-forwarded-for'];
-  if (forwarded && trusted.length > 0) {
-    const ips = forwarded.split(',').map((s) => s.trim());
-    return ips[0] || req.ip;
-  }
-  return req.ip;
+  // Express computes req.ip using the configured trust-proxy chain. Never
+  // trust a client-supplied left-most X-Forwarded-For value here.
+  return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
 function makeKeyByIp(req) {
@@ -178,11 +183,7 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   handler(req, res, next, options) {
     onLimitReached(req, res, options);
-    makeHeaders(req, res, options.requestWasSuccessful ? {} : {
-      limit: options.max,
-      remaining: 0,
-      resetTime: new Date(Date.now() + options.windowMs),
-    });
+    makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
     res.status(429).json({ error: 'Too many auth attempts. Please try again later.' });
   },
   message: { error: 'Too many auth attempts. Please try again later.' },
@@ -232,44 +233,134 @@ const exportKeyLimiter = rateLimit({
   handler(req, res, next, options) {
     onLimitReached(req, res, options);
     makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
-    res.status(429).json({ error: 'Too many key export attempts. Please try again later.' });
+    res.status(429).json({ error: 'Too many export attempts. Please try again later.' });
   },
 });
 
-// Admin endpoints: 30 req/min per admin user
-const adminLimiter = rateLimit({
-  windowMs: WINDOW_1MIN,
-  max: 30,
-  keyGenerator: makeKeyByAdmin,
-  store: new RedisStore(WINDOW_1MIN, 'admin'),
-  standardHeaders: false,
-  legacyHeaders: false,
-  handler(req, res, next, options) {
-    onLimitReached(req, res, options);
-    makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
-    res.status(429).json({ error: 'Admin rate limit exceeded.' });
-  },
-});
+// Per-user PIN/TOTP failure tracking for secret-key export (#1177).
+// The IP-keyed exportKeyLimiter above can be bypassed with forged
+// X-Forwarded-For when TRUSTED_PROXIES is set, so a 4–6 digit PIN could be
+// brute-forced at offline speed across rotating IPs. We therefore count
+// verification failures per user and lock export (and other PIN-protected
+// actions) after EXPORT_MAX_FAILURES failures for EXPORT_LOCKOUT_MS.
+const EXPORT_MAX_FAILURES = Number(process.env.EXPORT_MAX_FAILURES || 5);
+const EXPORT_LOCKOUT_MS = Number(process.env.EXPORT_LOCKOUT_MS || 15 * 60 * 1000);
+const EXPORT_FAILURE_PREFIX = 'export-key-fail';
 
-// Attach rate limit headers on successful responses
-function attachHeaders(limiter) {
-  const originalMiddleware = limiter;
-  return (req, res, next) => {
-    const origJson = res.json.bind(res);
-    res.json = (body) => {
-      // headers are set by handler on 429; set on success too
-      return origJson(body);
+// In-process fallback used when Redis is unavailable, so lockout still works
+// (per-process) rather than silently disabling the protection.
+const exportFailureMemory = new Map(); // userId -> { count, lockedUntil }
+
+function getExportFailureMemory(userId) {
+  const entry = exportFailureMemory.get(userId);
+  if (!entry) return { count: 0, lockedUntil: 0 };
+  if (entry.lockedUntil && entry.lockedUntil <= Date.now()) {
+    exportFailureMemory.delete(userId);
+    return { count: 0, lockedUntil: 0 };
+  }
+  return entry;
+}
+
+// Returns { locked, lockedUntil, failures } for the given user.
+async function getExportLockStatus(userId) {
+  if (!userId) return { locked: false, lockedUntil: 0, failures: 0 };
+  const redis = getRedis();
+  if (!redis) {
+    const entry = getExportFailureMemory(userId);
+    return {
+      locked: entry.lockedUntil > Date.now(),
+      lockedUntil: entry.lockedUntil || 0,
+      failures: entry.count || 0,
     };
-    originalMiddleware(req, res, next);
-  };
+  }
+  try {
+    const key = `rl:${EXPORT_FAILURE_PREFIX}:${userId}`;
+    const [countRaw, ttl] = await Promise.all([redis.get(key), redis.pttl(key)]);
+    const count = Number(countRaw || 0);
+    const locked = count >= EXPORT_MAX_FAILURES && ttl > 0;
+    return {
+      locked,
+      lockedUntil: locked ? Date.now() + ttl : 0,
+      failures: count,
+    };
+  } catch {
+    const entry = getExportFailureMemory(userId);
+    return {
+      locked: entry.lockedUntil > Date.now(),
+      lockedUntil: entry.lockedUntil || 0,
+      failures: entry.count || 0,
+    };
+  }
+}
+
+// Records a failed PIN/TOTP verification for the user. Returns the updated
+// status so callers can decide whether to lock and notify.
+async function recordExportFailure(userId) {
+  if (!userId) return { locked: false, lockedUntil: 0, failures: 0 };
+  const redis = getRedis();
+  if (!redis) {
+    const entry = getExportFailureMemory(userId);
+    entry.count = (entry.count || 0) + 1;
+    if (entry.count >= EXPORT_MAX_FAILURES) {
+      entry.lockedUntil = Date.now() + EXPORT_LOCKOUT_MS;
+    }
+    exportFailureMemory.set(userId, entry);
+    return {
+      locked: entry.lockedUntil > Date.now(),
+      lockedUntil: entry.lockedUntil || 0,
+      failures: entry.count,
+    };
+  }
+  try {
+    const key = `rl:${EXPORT_FAILURE_PREFIX}:${userId}`;
+    const count = await redis.incr(key);
+    if (count === 1) {
+      await redis.pexpire(key, EXPORT_LOCKOUT_MS);
+    }
+    const ttl = await redis.pttl(key);
+    const locked = count >= EXPORT_MAX_FAILURES;
+    return {
+      locked,
+      lockedUntil: locked ? Date.now() + (ttl > 0 ? ttl : EXPORT_LOCKOUT_MS) : 0,
+      failures: count,
+    };
+  } catch {
+    const entry = getExportFailureMemory(userId);
+    entry.count = (entry.count || 0) + 1;
+    if (entry.count >= EXPORT_MAX_FAILURES) {
+      entry.lockedUntil = Date.now() + EXPORT_LOCKOUT_MS;
+    }
+    exportFailureMemory.set(userId, entry);
+    return {
+      locked: entry.lockedUntil > Date.now(),
+      lockedUntil: entry.lockedUntil || 0,
+      failures: entry.count,
+    };
+  }
+}
+
+// Clears the failure counter after a successful export.
+async function resetExportFailures(userId) {
+  if (!userId) return;
+  exportFailureMemory.delete(userId);
+  const redis = getRedis();
+  if (!redis) return;
+  try {
+    await redis.del(`rl:${EXPORT_FAILURE_PREFIX}:${userId}`);
+  } catch {}
 }
 
 module.exports = {
   authLimiter,
   paymentLimiter,
   readLimiter,
-  adminLimiter,
   exportKeyLimiter,
   RedisStore,
   getRateLimiterStatus,
+  getTrustedIp,
+  getExportLockStatus,
+  recordExportFailure,
+  resetExportFailures,
+  EXPORT_MAX_FAILURES,
+  EXPORT_LOCKOUT_MS,
 };

@@ -4,34 +4,208 @@ This directory contains Soroban smart contracts for the AfriPay cross-border pay
 
 ## Contracts
 
-### Escrow Contract (`escrow/`)
-A trustless on-chain escrow contract for USDC remittances.
+| Contract | Description | Docs |
+|---|---|---|
+| `escrow/` | Three-party (sender/recipient/agent) trustless escrow for USDC remittances | [README](./escrow/README.md) |
+| `agent-escrow/` | Trustless agent-mediated escrow variant for cross-border remittances | [README](./agent-escrow/README.md) |
+| `dispute-resolution/` | On-chain three-party dispute resolution for escrowed payments | — |
+| `fee-distributor/` | On-chain platform fee accumulation and withdrawal | — |
+| `kyc-attestation/` | On-chain KYC status via SHA-256 hash (no raw PII stored on-chain) | — |
+| `loyalty-token/` | SEP-41 compatible fungible loyalty token with tiered fee-discount redemption | — |
+| `multisig-approval/` | Multisig proposal approval and signer key rotation | — |
+| `recurring-payments/` | User-authorized recurring transfers without giving the contract custody of funds | [README](./recurring-payments/README.md) |
+| `savings-vault/` | On-chain savings deposit/withdrawal vault | — |
 
-**Features:**
-- Three-party escrow model (sender, recipient, agent)
-- Automated fee calculation and collection
-- Event emission for blockchain transparency
-- Full test coverage
-- Comprehensive documentation
+Each contract is an independent crate — see its `Cargo.toml` and `src/lib.rs` for details where a dedicated README isn't yet written.
 
-**Quick Links:**
-- Documentation: [escrow/README.md](./escrow/README.md)
-- Source: [escrow/src/lib.rs](./escrow/src/lib.rs)
-- Deployment: [deploy.sh](./deploy.sh)
+**Deployment:** [deploy.sh](./deploy.sh)
+
+## Storage TTL policy
+
+Soroban storage entries expire: once an entry's TTL runs out it is **archived**, and any
+transaction that reads it fails until the entry is restored with a `RestoreFootprint`
+operation. Every contract therefore manages TTLs explicitly.
+
+### Constants
+
+Each contract defines four constants in `src/lib.rs` (values in ledgers; ~5s per ledger):
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `INSTANCE_LIFETIME_THRESHOLD` | `17_280` (~1 day) | Bump instance TTL only when it falls below this |
+| `INSTANCE_BUMP_AMOUNT` | `518_400` (~30 days) | Extend instance TTL to this many ledgers from now |
+| `PERSISTENT_LIFETIME_THRESHOLD` | `120_960` (~7 days) | Bump a persistent entry only when below this |
+| `PERSISTENT_BUMP_AMOUNT` | `518_400` (~30 days) | Extend a persistent entry to this many ledgers from now |
+
+```rust
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;   // ~1 day
+const INSTANCE_BUMP_AMOUNT: u32 = 518_400;         // ~30 days
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960; // ~7 days
+const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;       // ~30 days
+```
+
+### What lives where
+
+- **`instance()`** — small global config and counters, bumped on *every* public entry point:
+  `Admin`, `Paused`, `PendingUpgrade`, token/USDC address, fee bps, and counters.
+  An archived `Admin` key would break `pause`, `execute_upgrade`, and every admin function,
+  so instance TTL is extended unconditionally at the top of each entry point:
+  ```rust
+  env.storage()
+      .instance()
+      .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+  ```
+- **`persistent()`** — per-record data: escrows, vaults, schedules, KYC attestations,
+  loyalty balances, disputes, multisig proposals. The TTL is extended whenever the record is
+  read or written:
+  ```rust
+  env.storage().persistent().extend_ttl(
+      &key,
+      PERSISTENT_LIFETIME_THRESHOLD,
+      PERSISTENT_BUMP_AMOUNT,
+  );
+  ```
+
+**Rule:** every public entry point extends the instance TTL, and every persistent record that
+is touched (read *or* written) has its TTL extended. Do not add a new storage key without
+adding the corresponding `extend_ttl` call.
+
+### Keeper job
+
+Long-lived records that are not touched by user activity (e.g. active vaults with distant
+unlock times) are bumped by a backend keeper job in `backend/src/jobs/`, which periodically
+submits transactions that extend the TTL of records nearing expiry.
+
+### Restoring archived entries
+
+If an entry has already been archived (e.g. a contract was idle for more than ~30 days):
+
+1. Find the archived keys — the Stellar RPC `getLedgerEntries` response reports entries with
+   `liveUntilLedgerSeq` in the past, and `simulateTransaction` returns the
+   `restorePreamble` (the ledger footprint to restore) for any call that touches them.
+2. Submit a `RestoreFootprint` operation with that footprint, signed by any funded account:
+   ```bash
+   stellar contract restore \
+     --id <CONTRACT_ID> \
+     --source <identity> \
+     --network testnet
+   ```
+   (or build the `RestoreFootprint` op manually from the `restorePreamble` returned by
+   `simulateTransaction`).
+3. Re-run the original call. The entry's TTL is extended again by the contract's
+   `extend_ttl` logic, so no further action is needed.
+
+### Testing TTL behaviour
+
+Tests advance the ledger sequence past the default TTL and assert records remain readable
+after activity:
+
+```rust
+env.ledger().set_sequence_number(1_000_000);
+// ... call an entry point that touches the record ...
+env.ledger().set_sequence_number(1_000_000 + INSTANCE_BUMP_AMOUNT + 1);
+// record is still readable because the entry point extended its TTL
+```
+## Admin rotation
+
+All nine contracts above support a **two-step admin rotation** (SC-120 / SC-190). The flow is:
+
+1. `propose_admin(admin, new_admin)` — the current admin authorizes the call. The proposed admin is
+   stored as `PendingAdmin` together with an ETA of **24 hours** from the current ledger timestamp.
+   Emits `AdminProposed { admin, new_admin, eta }`.
+2. `accept_admin(new_admin)` — the *new* admin must sign (`new_admin.require_auth()`) and the ledger
+   timestamp must be `>= eta`. On success `Admin` is swapped to `new_admin`, `PendingAdmin` is
+   cleared, and `AdminChanged { old, new }` is emitted.
+3. `cancel_admin_proposal(admin)` — the current admin can cancel a pending proposal at any time.
+   Emits `AdminCancelled { admin, new_admin }`.
+
+Notes:
+
+- Rotation cannot complete without the new admin's signature, and cannot complete before the 24 h
+  delay elapses. Both are enforced on-chain and covered by tests.
+- Once `accept_admin` succeeds, the old admin loses **all** privileges immediately (e.g. `pause`,
+  `unpause`, fee withdrawal, KYC revocation, upgrades). Calls made with the old key fail auth.
+- **Recommendation:** the admin should be a multisig account, or the `multisig-approval` contract
+  itself, so that a single lost or compromised key cannot take over or lock out governance.
+
+## Events
+
+All contracts publish events with stable topics so the backend indexer
+(`backend/src/jobs/contractEventIndexer.js`) can build history and trigger notifications.
+
+### Admin rotation events
+
+| Topic | Payload |
+|---|---|
+| `("admin_proposed",)` | `{ admin, new_admin, eta }` |
+| `("admin_changed",)` | `{ old, new }` |
+| `("admin_cancelled",)` | `{ admin, new_admin }` |
+
+### `multisig-approval` events
+
+Every state-changing function in `multisig-approval` emits exactly one event. Topics are
+`(symbol, id)` where `id` is the transaction/proposal id (or signer address for weight changes).
+
+| Topic | Payload |
+|---|---|
+| `("ms_proposed", tx_id)` | `{ proposer, amount, recipient, description, expires_at }` |
+| `("ms_approved", tx_id)` | `{ approver, weight, total_approvals, quorum }` |
+| `("ms_rejected", tx_id)` | `{ rejecter, weight, total_rejections, quorum }` |
+| `("ms_cancelled", tx_id)` | `{ canceller }` |
+| `("ms_expired", tx_id)` | `{ tx_id, expired_at }` |
+| `("ms_executed", tx_id)` | `{ executor, amount, recipient }` |
+| `("ms_quorum_proposed", id)` | `{ proposer, quorum, eta }` |
+| `("ms_quorum_changed", id)` | `{ old_quorum, new_quorum }` |
+| `("ms_weight_set", signer)` | `{ signer, old_weight, new_weight }` |
+
+Signer-rotation events (`EvtSignerChangeProposed`, `EvtSignerChanged`, `EvtSignerChangeCancelled`)
+are documented in `multisig-approval/src/lib.rs`.
 
 ## Building
 
 ```bash
-cd escrow
+cd <contract-dir>   # e.g. escrow, fee-distributor, savings-vault, ...
 cargo build --release --target wasm32-unknown-unknown
 cargo test
 ```
 
 ## Deployment
 
+The deploy script never passes a secret key on the command line. It signs with a
+named Stellar CLI identity (`--source <identity>`).
+
+### Deployer identity setup
+
+**Testnet** — create or import an identity once (the key is read from a prompt/stdin, not argv):
+
 ```bash
-export SOROBAN_SECRET_KEY='your-secret-key'
-bash deploy.sh
+stellar keys generate afripay-testnet-deployer --network testnet --fund
+# or: stellar keys add afripay-testnet-deployer --secret-key   (paste key at the prompt)
+SOROBAN_IDENTITY=afripay-testnet-deployer bash deploy.sh
+```
+
+As a testnet-only convenience, `SOROBAN_SECRET_KEY` is still accepted: the script imports it
+into an identity via stdin and unsets the variable before any deploy call.
+
+**Mainnet** — an explicit identity is required (no env-secret fallback); a Ledger is recommended:
+
+```bash
+stellar keys add afripay-mainnet --ledger      # or another hardware-backed identity
+EXPECTED_WASM_HASH=<sha256 of audited wasm> SOROBAN_IDENTITY=afripay-mainnet \
+  bash deploy.sh --network mainnet --confirm-mainnet
+```
+
+The script exits non-zero (without writing `.deployed_ids.env`) if the deploy fails, the
+returned contract ID is not a valid `C…` address, or the WASM hash does not match
+`EXPECTED_WASM_HASH` (mandatory on mainnet).
+
+### Integration tests
+
+`integration-tests/` registers all contracts in a single test `Env` and exercises KYC → escrow →
+release → fee distributor → dispute, recurring payments with a fee, and savings deposit/withdraw:
+
+```bash
+cd integration-tests && cargo test
 ```
 
 See [deploy.sh](./deploy.sh) for detailed deployment instructions and network configuration.
@@ -45,13 +219,13 @@ See [deploy.sh](./deploy.sh) for detailed deployment instructions and network co
 
 ### Testing
 ```bash
-cd escrow
+cd <contract-dir>
 cargo test
 ```
 
 ### Building for Production
 ```bash
-cd escrow
+cd <contract-dir>
 cargo build --release --target wasm32-unknown-unknown
 ```
 

@@ -9,11 +9,12 @@
 
 const db = require('../db');
 
-async function enqueueMint({ userId, walletAddress, points }) {
+async function enqueueMint({ transactionId, userId, walletAddress, amount, asset }) {
   await db.query(
-    `INSERT INTO loyalty_mint_queue (user_id, wallet_address, points)
-     VALUES ($1, $2, $3)`,
-    [userId, walletAddress, points],
+    `INSERT INTO loyalty_mint_queue (id, user_id, sender_wallet, amount, asset)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT DO NOTHING`,
+    [transactionId, userId, walletAddress, amount, asset],
   );
 }
 

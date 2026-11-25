@@ -174,11 +174,18 @@ async function initiateWithdrawal(userPublicKey, asset, sep10Jwt, extra = {}) {
   return { url: data.url, id: data.id };
 }
 
+/**
+ * Poll a SEP-24 transaction by ID.
+ * Requires the SEP-10 JWT so the anchor can authorise the lookup.
+ *
+ * @param {string} transactionId
+ * @param {string} sep10Jwt
+ */
 // Get transaction status. Polling callers (anchorController's status route)
 // should treat this as bounded: it retries with exponential backoff up to
 // MAX_ATTEMPTS and trips a circuit breaker after repeated failures rather
 // than being called in a tight client-driven loop with no ceiling.
-async function getTransactionStatus(transactionId) {
+async function getTransactionStatus(transactionId, sep10Jwt) {
   if (isCircuitOpen(anchorUrl)) {
     const err = new Error('Anchor is temporarily unavailable (circuit open)');
     err.status = 503;
@@ -189,10 +196,15 @@ async function getTransactionStatus(transactionId) {
   try {
     const data = await withRetry(
       async () => {
-        const { transferServer } = await getAnchorInfo();
-        if (!transferServer) throw new Error('Anchor does not support SEP-24');
+        const { transferServerSep24 } = await getAnchorInfo();
+        if (!transferServerSep24) throw new Error('Anchor does not support SEP-24');
 
-        const response = await fetch(`${transferServer}/transaction?id=${transactionId}`);
+        const url = new URL(`${transferServerSep24}/transaction`);
+        url.searchParams.set('id', transactionId);
+
+        const response = await fetch(url.toString(), {
+          headers: sep10Jwt ? { Authorization: `Bearer ${sep10Jwt}` } : {},
+        });
         if (!response.ok) {
           const err = new Error(`Anchor status endpoint returned ${response.status}`);
           err.status = response.status;
@@ -210,31 +222,7 @@ async function getTransactionStatus(transactionId) {
     anchorPollDuration.observe({ anchor: anchorUrl, success: 'false' }, (Date.now() - start) / 1000);
     logger.error('Failed to get transaction status', { error: err.message });
     throw err;
-/**
- * Poll a SEP-24 transaction by ID.
- * Requires the SEP-10 JWT so the anchor can authorise the lookup.
- *
- * @param {string} transactionId
- * @param {string} sep10Jwt
- */
-async function getTransactionStatus(transactionId, sep10Jwt) {
-  const { transferServerSep24 } = await getAnchorInfo();
-  if (!transferServerSep24) throw new Error('Anchor does not support SEP-24');
-
-  const url = new URL(`${transferServerSep24}/transaction`);
-  url.searchParams.set('id', transactionId);
-
-  const response = await fetch(url.toString(), {
-    headers: sep10Jwt ? { Authorization: `Bearer ${sep10Jwt}` } : {},
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.error || 'Failed to fetch transaction status');
   }
-
-  return data.transaction;
 }
 
 module.exports = {
