@@ -16,7 +16,10 @@ import {
 import api from '../utils/api';
 import { useWallet } from '../context/WalletContext';
 import { useConfirm } from '../context/ConfirmContext';
-import { validateStellarAddress } from '../utils/validation';
+import { parseMuxedAddress, validateStellarAddress } from '../utils/validation';
+import { CURRENCIES, formatAmount } from '../utils/currency';
+import { useLimits } from '../hooks/useLimits';
+import LimitNotice from '../components/LimitNotice';
 import { useExchangeRates } from '../hooks/useExchangeRates';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
@@ -139,12 +142,16 @@ export default function SendMoney() {
         );
       });
   }, [requestId]); // eslint-disable-line react-hooks/exhaustive-deps -- prefill once per request id; must not overwrite later user edits
-  const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
+  const { convertFromXLM, usingApproximateRates } = useExchangeRates();
+  const limits = useLimits();
   const [pathResult, setPathResult] = useState(null);
   const [pathLoading, setPathLoading] = useState(false);
-  const [memoRequired, setMemoRequired] = useState(false);
+  const [memoRequiredFlag, setMemoRequired] = useState(false);
   const [memoError, setMemoError] = useState(false);
   const { memoError: hashMemoError, validateMemo, getMemoPlaceholder, isMemoValid } = useMemoValidation();
+  const muxed = parseMuxedAddress(form.recipient_address);
+  // A muxed address already identifies the sub-account, so no memo is needed.
+  const memoRequired = memoRequiredFlag && !muxed;
   const memoRef = useRef(null);
   const [addressError, setAddressError] = useState(false);
   // 'send' = strict send (sender specifies exact amount), 'receive' = strict receive (recipient gets exact amount)
@@ -536,7 +543,7 @@ export default function SendMoney() {
   );
 
   const checkMemoRequired = useCallback(async (address) => {
-    if (!address || address.length < 56) {
+    if (!address || address.length < 56 || parseMuxedAddress(address)) {
       setMemoRequired(false);
       return;
     }
@@ -579,7 +586,19 @@ export default function SendMoney() {
   }, [form.recipient_address, form.asset]);
 
   const estimatedValue =
-    form.amount && form.asset === 'XLM' ? `≈ ${convertFromXLM(form.amount, 'USD')} USD` : '';
+    form.amount && form.asset === 'XLM' ? `≈ ${formatAmount(convertFromXLM(form.amount, 'USD'), 'USD', i18n?.language)}` : '';
+
+  // Limits apply to what leaves the wallet; convert when they use another currency.
+  const spend = isCrossAsset && sendMode === 'receive' ? pathResult?.sourceAmount : form.amount;
+  const spendAsset = form.asset;
+  const limitCurrency = limits?.currency || 'XLM';
+  const spendInLimit =
+    spendAsset === limitCurrency
+      ? parseFloat(spend)
+      : spendAsset === 'XLM'
+        ? convertFromXLM(spend, limitCurrency)
+        : null;
+  const overLimit = limits?.max != null && spendInLimit != null && spendInLimit > limits.max;
 
   // Minimum destination amount after slippage
   const destMin = pathResult
@@ -590,6 +609,7 @@ export default function SendMoney() {
 
   // Fetch fee estimate and contract simulation, then advance to Review step
   const handleAdvanceToReview = async () => {
+    if (overLimit) return;
     setStepLoading(true);
     setQuoteRefreshed(false);
     try {
@@ -837,6 +857,7 @@ export default function SendMoney() {
     !form.amount ||
     parseFloat(form.amount) <= 0 ||
     belowMinBalance ||
+    overLimit ||
     (isCrossAsset && (!pathResult || pathLoading)) ||
     stepLoading ||
     (memoRequired && !form.memo.trim());
@@ -1039,8 +1060,9 @@ export default function SendMoney() {
           />
           {addressError && (
             <p id="address-error" className="mt-1 text-xs text-red-400">
-              Invalid address. Enter a valid Stellar public key or federation address
-              (name*domain).
+              {form.recipient_address.trim().startsWith('M')
+                ? validateStellarAddress(form.recipient_address)
+                : 'Invalid address. Enter a valid Stellar public key or federation address (name*domain).'}
             </p>
           )}
           {!addressError &&
@@ -1188,18 +1210,19 @@ export default function SendMoney() {
                     onChange={(e) => setForm({ ...form, asset: e.target.value })}
                     className="appearance-none bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
                   >
-                    {currencies.map((c) => (
+                    {CURRENCIES.map((c) => (
                       <option key={c.code} value={c.code}>{c.flag} {c.code}</option>
                     ))}
                   </select>
                   <ChevronDown size={14} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
                 </div>
               </div>
+              <LimitNotice limits={limits} overLimit={overLimit} />
               {estimatedValue && (
                 <div className="mt-1 space-y-1">
                   <p className="text-xs text-gray-500">{estimatedValue}</p>
                   {usingApproximateRates && (
-                    <p className="text-xs text-amber-500/90">{t('common.rates_disclaimer')}</p>
+                    <p className="text-xs text-amber-500/90">{t('common.rates_unavailable', 'Rates unavailable')}</p>
                   )}
                 </div>
               )}
@@ -1259,7 +1282,7 @@ export default function SendMoney() {
                   className="appearance-none w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-primary-500 pr-8 transition-colors"
                 >
                   <option value="">Same as sent ({form.asset})</option>
-                  {currencies.filter((c) => c.code !== form.asset).map((c) => (
+                  {CURRENCIES.filter((c) => c.code !== form.asset).map((c) => (
                     <option key={c.code} value={c.code}>{c.flag} {c.code}</option>
                   ))}
                 </select>
@@ -1459,7 +1482,7 @@ export default function SendMoney() {
                     {form.recipient_address.slice(0, 10)}…{form.recipient_address.slice(-10)}
                   </span>{' '}
                   <a
-                    href={`https://stellar.expert/explorer/${process.env.REACT_APP_STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet'}/account/${form.recipient_address}`}
+                    href={`https://stellar.expert/explorer/${process.env.REACT_APP_STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet'}/account/${muxed?.baseAccount || form.recipient_address}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-primary-400 hover:text-primary-300 text-xs underline"
@@ -1468,6 +1491,12 @@ export default function SendMoney() {
                     Verify address ↗
                   </a>
                 </p>
+                {muxed && (
+                  <p data-testid="muxed-details">
+                    Exchange account <span className="font-mono text-xs break-all">{muxed.baseAccount}</span>, sub-account{' '}
+                    <span className="font-mono">{muxed.id}</span>
+                  </p>
+                )}
                 <p>
                   {t('send.confirm_amount')}{' '}
                   <span className="text-white font-semibold">{form.amount} {form.asset}</span>

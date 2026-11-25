@@ -74,7 +74,7 @@ function validateAmount(amount) {
 function validateRecipient(recipient, rowNumber) {
   const errors = [];
   
-  const addressError = validateStellarAddress(recipient.recipient_address);
+  const addressError = validateStellarAddress(recipient.recipient_address, { allowMuxed: false });
   if (addressError) {
     errors.push(addressError);
   }

@@ -69,7 +69,7 @@ router.post(
       .notEmpty()
       .withMessage('Wallet address is required')
       .custom((value) => {
-        if (!value.includes('*') && !StellarSdk.StrKey.isValidEd25519PublicKey(value))
+        if (!value.includes('*') && !StellarSdk.StrKey.isValidEd25519PublicKey(value) && !StellarSdk.StrKey.isValidMed25519PublicKey(value))
           throw new Error('Invalid Stellar wallet address');
         return true;
       }),
