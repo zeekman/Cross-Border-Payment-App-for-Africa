@@ -35,6 +35,8 @@ const app = require('./app');
 const { initStreams } = require('./services/horizonWorker');
 const { detectTestnetReset } = require('./services/stellar');
 const { syncOfferEvents } = require('./jobs/syncOfferEvents');
+const { startTrustlineRetryJob } = require('./jobs/trustlineRetry');
+const { startPriceRefreshJob } = require('./services/priceOracle');
 const ledgerListener = require('./services/ledgerListener');
 const { Server: SocketIOServer } = require('socket.io');
 const jwt = require('jsonwebtoken');
@@ -54,6 +56,9 @@ const server = app.listen(PORT, () => {
       }
     }).catch(() => {});
   }
+  startTrustlineRetryJob();
+  startPriceRefreshJob();
+
   // Sync DEX offer events every 2 minutes
   const OFFER_SYNC_INTERVAL_MS = parseInt(process.env.OFFER_SYNC_INTERVAL_MS || '120000', 10);
   setInterval(() => {

@@ -34,7 +34,7 @@ const MAX_WALLETS_PER_USER = 5;
 async function resolveWallet(userId, walletId) {
   if (walletId) {
     const result = await db.query(
-      'SELECT id, public_key, encrypted_secret_key, label, is_default FROM wallets WHERE id = $1 AND user_id = $2',
+      'SELECT id, public_key, encrypted_secret_key, label, is_default, usdc_trustline_status FROM wallets WHERE id = $1 AND user_id = $2',
       [walletId, userId],
     );
     if (!result.rows[0]) return null;
@@ -43,7 +43,7 @@ async function resolveWallet(userId, walletId) {
 
   // Default wallet
   const result = await db.query(
-    'SELECT id, public_key, encrypted_secret_key, label, is_default FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
+    'SELECT id, public_key, encrypted_secret_key, label, is_default, usdc_trustline_status FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
     [userId],
   );
   return result.rows[0] || null;
@@ -63,13 +63,13 @@ async function getWallet(req, res, next) {
 
     const cached = await cache.get(cacheKey);
     if (cached) {
-      return res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, balances: cached, cached: true });
+      return res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, usdc_trustline_status: wallet.usdc_trustline_status, balances: cached, cached: true });
     }
 
     const balances = await getBalance(public_key);
     await cache.set(cacheKey, balances, cache.BALANCE_TTL);
 
-    res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, balances, cached: false });
+    res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, usdc_trustline_status: wallet.usdc_trustline_status, balances, cached: false });
   } catch (err) {
     next(err);
   }

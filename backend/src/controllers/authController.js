@@ -16,7 +16,7 @@ const {
   refreshTokenExpiresAt,
 } = require('../utils/tokens');
 const { sendOTP } = require('../services/sms');
-const { recordSession } = require('./sessionController');
+const { scheduleTrustlineRetry } = require('../jobs/trustlineRetry');
 const { recordSession } = require('./sessionController');
 
 const TOKEN_TTL_MS = 96 * 60 * 60 * 1000;
@@ -98,9 +98,14 @@ async function register(req, res, next) {
 
     // Auto-add USDC trustline so new accounts can receive USDC immediately
     if (process.env.USDC_ISSUER) {
-      addTrustline({ publicKey, encryptedSecretKey, asset: 'USDC' }).catch(e =>
-        logger.warn('Auto USDC trustline failed', { error: e.message })
-      );
+      // First attempt inline; on failure the persisted status drives retries
+      // in jobs/trustlineRetry.js (survives restarts, no secrets in closures).
+      addTrustline({ publicKey, encryptedSecretKey, asset: 'USDC' })
+        .then(() => db.query(`UPDATE wallets SET usdc_trustline_status = 'active' WHERE public_key = $1`, [publicKey]))
+        .catch(e => {
+          logger.warn('Auto USDC trustline failed, scheduled for retry', { error: e.message });
+          return scheduleTrustlineRetry(publicKey).catch(() => {});
+        });
     }
 
     await sendVerificationEmail(email, raw);

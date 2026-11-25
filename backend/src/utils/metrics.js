@@ -35,7 +35,15 @@ const wsConnections = new client.Gauge({
   registers: [registry],
 });
 
+const priceOracleFetchTotal = new client.Counter({
+  name: 'price_oracle_fetch_total',
+  help: 'Upstream price oracle fetches',
+  labelNames: ['source', 'status'],
+  registers: [registry],
+});
+
 module.exports = {
+  priceOracleFetchTotal,
   registry,
   httpRequestDuration,
   horizonRequestDuration,
