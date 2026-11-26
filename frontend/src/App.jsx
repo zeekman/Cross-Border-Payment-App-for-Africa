@@ -5,6 +5,7 @@ import { AuthProvider, useAuth, logoutState } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
 import { CurrencyProvider } from "./context/CurrencyContext";
 import { WalletProvider } from "./context/WalletContext";
+import { DataSaverProvider } from "./context/DataSaverContext";
 import OfflineBanner from "./components/OfflineBanner";
 
 import Welcome from "./pages/Welcome";
@@ -21,6 +22,7 @@ import SaveMoney from "./pages/SaveMoney";
 import RequestMoney from "./pages/RequestMoney";
 import ScheduledPayments from "./pages/ScheduledPayments";
 import TransactionHistory from "./pages/TransactionHistory";
+import TransactionDetail from "./pages/TransactionDetail";
 import Profile from "./pages/Profile";
 import KYCVerification from "./pages/KYCVerification";
 import BusinessSettings from "./pages/BusinessSettings";
@@ -157,6 +159,7 @@ function AppRoutes() {
           <Route path="request" element={<RequestMoney />} />
           <Route path="scheduled" element={<ScheduledPayments />} />
           <Route path="history" element={<TransactionHistory />} />
+          <Route path="history/:id" element={<TransactionDetail />} />
           <Route path="analytics" element={<Suspense fallback={<LoadingFallback />}><Analytics /></Suspense>} />
           <Route path="profile" element={<Profile />} />
           <Route path="sessions" element={<Sessions />} />
@@ -190,6 +193,7 @@ export default function App() {
         <ThemeProvider>
           <CurrencyProvider>
           <WalletProvider>
+          <DataSaverProvider>
           <BrowserRouter>
             <Toaster
               position="top-center"
@@ -207,6 +211,7 @@ export default function App() {
             <OfflineBanner />
             <UpdateBanner />
           </BrowserRouter>
+          </DataSaverProvider>
           </WalletProvider>
           </CurrencyProvider>
         </ThemeProvider>

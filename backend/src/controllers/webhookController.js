@@ -3,7 +3,7 @@ const db = require('../db');
 const { validatePublicUrl } = require('../utils/ssrfValidator');
 const { validateOutboundUrl } = require('../utils/ssrf');
 const { encryptSecret, decryptSecret } = require('../utils/symmetricEncryption');
-const { retryDelivery } = require('../services/webhook');
+const { retryDelivery, attemptDelivery } = require('../services/webhook');
 
 const { WEBHOOK_EVENTS: VALID_EVENTS, WEBHOOK_EVENT_DESCRIPTIONS } = require('../services/webhookEvents');
 
@@ -61,12 +61,38 @@ async function create(req, res, next) {
   }
 }
 
+// FE-203: summary of an endpoint's delivery health for the Webhooks page.
+function buildHealth(wh, stats) {
+  const total = Number(stats.total_24h) || 0;
+  const delivered = Number(stats.delivered_24h) || 0;
+  let status = 'healthy';
+  if (wh.disabled_at || !wh.active) status = 'disabled';
+  else if ((wh.consecutive_failures || 0) > 0) status = 'failing';
+  return {
+    status,
+    success_rate_24h: total ? Math.round((delivered / total) * 1000) / 10 : null,
+    deliveries_24h: total,
+    last_success_at: stats.last_success_at || null,
+    consecutive_failures: wh.consecutive_failures || 0,
+    pending_deliveries: Number(stats.pending_count) || 0,
+  };
+}
+
 async function list(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, url, events, active, created_at, secret,
-              consecutive_failures, disabled_at, disabled_reason
-       FROM webhooks WHERE user_id = $1 ORDER BY created_at DESC`,
+      `SELECT w.id, w.url, w.events, w.active, w.created_at, w.secret,
+              w.consecutive_failures, w.disabled_at, w.disabled_reason,
+              h.total_24h, h.delivered_24h, h.last_success_at, h.pending_count
+       FROM webhooks w
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) FILTER (WHERE wd.created_at > NOW() - INTERVAL '24 hours' AND wd.status IN ('delivered', 'failed'))::int AS total_24h,
+                COUNT(*) FILTER (WHERE wd.created_at > NOW() - INTERVAL '24 hours' AND wd.status = 'delivered')::int AS delivered_24h,
+                MAX(COALESCE(wd.completed_at, wd.created_at)) FILTER (WHERE wd.status = 'delivered') AS last_success_at,
+                COUNT(*) FILTER (WHERE wd.status = 'pending')::int AS pending_count
+         FROM webhook_deliveries wd WHERE wd.webhook_id = w.id
+       ) h ON TRUE
+       WHERE w.user_id = $1 ORDER BY w.created_at DESC`,
       [req.user.userId]
     );
 
@@ -80,8 +106,12 @@ async function list(req, res, next) {
           secretMasked = '****';
         }
       }
-      const { secret: _omit, ...rest } = wh;
-      return { ...rest, secret_masked: secretMasked };
+      const { secret: _omit, total_24h, delivered_24h, last_success_at, pending_count, ...rest } = wh;
+      return {
+        ...rest,
+        secret_masked: secretMasked,
+        health: buildHealth(rest, { total_24h, delivered_24h, last_success_at, pending_count }),
+      };
     });
 
     res.json({ webhooks });
@@ -106,9 +136,20 @@ async function listDeliveries(req, res, next) {
       params.push(webhook_id);
       query += ` AND wd.webhook_id = $${params.length}`;
     }
-    query += ` ORDER BY wd.created_at DESC LIMIT 100`;
+    if (['delivered', 'failed', 'pending'].includes(req.query.status)) {
+      params.push(req.query.status);
+      query += ` AND wd.status = $${params.length}`;
+    }
+    if (req.query.event_type) {
+      params.push(String(req.query.event_type));
+      query += ` AND wd.event_type = $${params.length}`;
+    }
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 100);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    params.push(limit + 1, offset);
+    query += ` ORDER BY wd.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`;
     const { rows } = await db.query(query, params);
-    res.json({ deliveries: rows });
+    res.json({ deliveries: rows.slice(0, limit), has_more: rows.length > limit });
   } catch (err) {
     next(err);
   }
@@ -222,4 +263,34 @@ function listEvents(req, res) {
   });
 }
 
-module.exports = { listEvents, create, update, list, listDeliveries, retry, rotateSecret };
+/**
+ * POST /api/webhooks/:id/reenable (FE-203)
+ * Sends a test delivery to an auto-disabled endpoint and only re-enables it
+ * (with a clean failure streak) when that delivery succeeds.
+ */
+async function reenable(req, res, next) {
+  try {
+    const { rows } = await db.query(
+      'SELECT * FROM webhooks WHERE id = $1 AND user_id = $2',
+      [req.params.id, req.user.userId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Webhook not found' });
+    const payload = { event: 'webhook.test', data: { webhook_id: rows[0].id }, timestamp: new Date().toISOString() };
+    try {
+      await attemptDelivery(rows[0], payload, 1, 1);
+    } catch (err) {
+      return res.status(422).json({ error: `Test delivery failed: ${err.message}` });
+    }
+    const { rows: updated } = await db.query(
+      `UPDATE webhooks SET active = TRUE, consecutive_failures = 0, disabled_at = NULL, disabled_reason = NULL
+       WHERE id = $1 AND user_id = $2
+       RETURNING id, url, events, active, created_at, consecutive_failures, disabled_at, disabled_reason`,
+      [req.params.id, req.user.userId]
+    );
+    res.json(updated[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listEvents, create, update, list, listDeliveries, retry, rotateSecret, reenable };

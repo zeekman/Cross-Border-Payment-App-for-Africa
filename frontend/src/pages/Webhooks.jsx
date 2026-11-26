@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Plus, Webhook, Copy, CheckCheck, RefreshCw, ChevronDown, ChevronUp, Clock } from 'lucide-react';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
@@ -14,18 +14,83 @@ const FALLBACK_EVENTS = [
   'claimable_balance.expiring_soon',
 ].map((name) => ({ name, description: '' }));
 
-function DeliveryLog({ webhookId }) {
+const HEALTH_STYLES = {
+  healthy: 'bg-green-500/20 text-green-400',
+  failing: 'bg-yellow-500/20 text-yellow-400',
+  disabled: 'bg-red-500/20 text-red-400',
+};
+const HEALTH_LABELS = { healthy: 'Healthy', failing: 'Failing', disabled: 'Disabled' };
+const PAGE_SIZE = 20;
+
+export function healthStatus(wh) {
+  if (wh.health?.status) return wh.health.status;
+  if (wh.disabled_at || !wh.active) return 'disabled';
+  return (wh.consecutive_failures || 0) > 0 ? 'failing' : 'healthy';
+}
+
+// FE-203: per-endpoint health summary.
+function EndpointHealth({ wh, onReenable, reenabling, locale }) {
+  const status = healthStatus(wh);
+  const h = wh.health || {};
+  const fmt = (d) => (d ? new Date(d).toLocaleString(locale) : 'Never');
+  return (
+    <div className="bg-gray-800 rounded-xl px-3 py-2 space-y-1.5" data-testid={`health-${wh.id}`}>
+      <div className="flex items-center justify-between">
+        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${HEALTH_STYLES[status]}`}>{HEALTH_LABELS[status]}</span>
+        <span className="text-xs text-gray-400">
+          24h success: {h.success_rate_24h != null ? `${h.success_rate_24h}%` : '—'}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-x-3 text-xs text-gray-500">
+        <span>Last success: {fmt(h.last_success_at)}</span>
+        <span>Consecutive failures: {h.consecutive_failures ?? wh.consecutive_failures ?? 0}</span>
+        {h.pending_deliveries > 0 && <span>Queued for retry: {h.pending_deliveries}</span>}
+      </div>
+      {status === 'disabled' && (
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <span className="text-xs text-red-400">
+            {wh.disabled_reason || 'Disabled after repeated delivery failures'}
+            {wh.disabled_at && ` (${fmt(wh.disabled_at)})`}
+          </span>
+          <button
+            onClick={() => onReenable(wh.id)}
+            disabled={reenabling}
+            className="shrink-0 text-xs text-primary-400 hover:text-primary-300 disabled:opacity-50 flex items-center gap-1"
+          >
+            <RefreshCw size={10} className={reenabling ? 'animate-spin' : ''} />
+            {reenabling ? 'Testing…' : 'Re-enable'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DeliveryLog({ webhookId, events = [] }) {
   const { t } = useTranslation();
   const [deliveries, setDeliveries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [retrying, setRetrying] = useState(null);
+  const [statusFilter, setStatusFilter] = useState('');
+  const [eventFilter, setEventFilter] = useState('');
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
 
   const loadDeliveries = async () => {
     setLoading(true);
     try {
-      const { data } = await api.get(`/webhooks/deliveries?webhook_id=${webhookId}`);
+      const { data } = await api.get('/webhooks/deliveries', {
+        params: {
+          webhook_id: webhookId,
+          limit: PAGE_SIZE,
+          offset: page * PAGE_SIZE,
+          ...(statusFilter ? { status: statusFilter } : {}),
+          ...(eventFilter ? { event_type: eventFilter } : {}),
+        },
+      });
       setDeliveries(data.deliveries);
+      setHasMore(Boolean(data.has_more));
     } catch {
       toast.error(t('webhooks.loadLogsFailed'));
     } finally {
@@ -48,7 +113,7 @@ function DeliveryLog({ webhookId }) {
 
   useEffect(() => {
     if (expanded) loadDeliveries();
-  }, [expanded, webhookId]); // eslint-disable-line react-hooks/exhaustive-deps -- loader only depends on webhookId
+  }, [expanded, webhookId, statusFilter, eventFilter, page]); // eslint-disable-line react-hooks/exhaustive-deps -- loader reads these via closure
 
   return (
     <div className="border-t border-gray-700 pt-2 mt-2">
@@ -64,6 +129,28 @@ function DeliveryLog({ webhookId }) {
       </button>
       {expanded && (
         <div className="mt-2">
+          <div className="flex gap-2 mb-2">
+            <select
+              aria-label="Filter deliveries by status"
+              value={statusFilter}
+              onChange={(e) => { setStatusFilter(e.target.value); setPage(0); }}
+              className="bg-gray-800 text-xs text-gray-300 rounded-lg px-2 py-1"
+            >
+              <option value="">All statuses</option>
+              <option value="delivered">Delivered</option>
+              <option value="failed">Failed</option>
+              <option value="pending">Pending</option>
+            </select>
+            <select
+              aria-label="Filter deliveries by event"
+              value={eventFilter}
+              onChange={(e) => { setEventFilter(e.target.value); setPage(0); }}
+              className="bg-gray-800 text-xs text-gray-300 rounded-lg px-2 py-1"
+            >
+              <option value="">All events</option>
+              {events.map((ev) => <option key={ev} value={ev}>{ev}</option>)}
+            </select>
+          </div>
           {loading ? (
             <div className="flex justify-center py-4">
               <div className="w-4 h-4 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
@@ -110,6 +197,13 @@ function DeliveryLog({ webhookId }) {
               ))}
             </div>
           )}
+          {(page > 0 || hasMore) && (
+            <div className="flex justify-between mt-2 text-xs">
+              <button onClick={() => setPage((p) => Math.max(p - 1, 0))} disabled={page === 0 || loading} className="text-gray-400 disabled:opacity-40">Previous</button>
+              <span className="text-gray-500">Page {page + 1}</span>
+              <button onClick={() => setPage((p) => p + 1)} disabled={!hasMore || loading} className="text-gray-400 disabled:opacity-40">Next</button>
+            </div>
+          )}
           <button
             onClick={loadDeliveries}
             disabled={loading}
@@ -136,17 +230,44 @@ export default function Webhooks() {
   const revealTimerRef = useRef(null);
   const [copied, setCopied] = useState(null);
   const [availableEvents, setAvailableEvents] = useState(FALLBACK_EVENTS);
+  const [reenabling, setReenabling] = useState(null);
+
+  const loadWebhooks = useCallback(() => api.get('/webhooks')
+    .then(r => {
+      const list = r.data.webhooks.map(({ secret: _secret, ...webhook }) => webhook);
+      setWebhooks(list);
+      return list;
+    }), []);
 
   useEffect(() => {
     api.get('/webhooks/events')
       .then(r => setAvailableEvents(r.data.events))
       .catch(() => {});
-    api.get('/webhooks')
-      .then(r => setWebhooks(r.data.webhooks.map(({ secret: _secret, ...webhook }) => webhook)))
+    loadWebhooks()
+      .then((list) => {
+        // In-app notice when the backend has auto-disabled an endpoint.
+        const disabled = list.filter((wh) => healthStatus(wh) === 'disabled' && wh.disabled_at);
+        if (disabled.length) {
+          toast.error(`${disabled.length} webhook endpoint${disabled.length > 1 ? 's were' : ' was'} disabled after repeated failures.`, { id: 'webhooks-disabled' });
+        }
+      })
       .catch(() => toast.error(t('webhooks.loadFailed')))
       .finally(() => setLoading(false));
     return () => clearTimeout(revealTimerRef.current);
-  }, [t]);
+  }, [t, loadWebhooks]);
+
+  const handleReenable = async (webhookId) => {
+    setReenabling(webhookId);
+    try {
+      await api.post(`/webhooks/${webhookId}/reenable`);
+      toast.success('Test delivery succeeded. Endpoint re-enabled.');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Re-enable failed');
+    } finally {
+      await loadWebhooks().catch(() => {});
+      setReenabling(null);
+    }
+  };
 
   const revealSecretOnce = (webhookId, secret, overlapHours = null) => {
     clearTimeout(revealTimerRef.current);
@@ -334,7 +455,8 @@ export default function Webhooks() {
               <div className="flex items-center justify-between">
                 <p className="text-xs text-gray-600">{t('webhooks.created', { date: new Date(wh.created_at).toLocaleDateString(i18n.language) })}</p>
               </div>
-              <DeliveryLog webhookId={wh.id} />
+              <EndpointHealth wh={wh} onReenable={handleReenable} reenabling={reenabling === wh.id} locale={i18n.language} />
+              <DeliveryLog webhookId={wh.id} events={wh.events} />
             </div>
           ))}
         </div>

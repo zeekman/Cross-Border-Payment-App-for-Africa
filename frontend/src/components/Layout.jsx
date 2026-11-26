@@ -8,6 +8,7 @@ import { useTheme } from '../context/ThemeContext';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import { useStellarStatus } from '../hooks/useStellarStatus';
 import NotificationBell from './NotificationBell';
+import { useDataSaver } from '../context/DataSaverContext';
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Home' },
@@ -77,6 +78,7 @@ function NavItem({ to, icon: Icon, labelKey, user }) {
 
 export default function Layout() {
   const { t } = useTranslation();
+  const { dataSaver } = useDataSaver();
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -146,6 +148,11 @@ export default function Layout() {
           <button onClick={toggleTheme} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition-colors" title={t('layout.toggleTheme')} aria-label={t('layout.toggleTheme')}>
             {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           </button>
+          {dataSaver && (
+            <span data-testid="data-saver-indicator" className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-500 font-medium" title="Data saver on: background refreshes are paused">
+              Data saver on
+            </span>
+          )}
           <NotificationBell />
           {supported && (
             <button

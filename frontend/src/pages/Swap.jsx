@@ -5,6 +5,7 @@ import api from '../utils/api';
 import { createIdempotencyKey, postWithIdempotency } from '../utils/idempotency';
 import useStepUp from '../hooks/useStepUp';
 import { useVisibleInterval } from '../hooks/useVisibleInterval';
+import { useDataSaver } from '../context/DataSaverContext';
 import toast from 'react-hot-toast';
 
 const REFRESH_INTERVAL = 15; // seconds
@@ -71,6 +72,8 @@ export default function Swap() {
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // FE-204: data saver mode makes quotes manual-refresh only.
+  const { dataSaver } = useDataSaver();
   const [result, setResult] = useState(null);
   const [slippage, setSlippage] = useState(getSavedSlippage);
   const [customSlippage, setCustomSlippage] = useState('');
@@ -175,7 +178,7 @@ export default function Swap() {
   useVisibleInterval(
     () => setRefreshCountdown((prev) => (prev <= 1 ? REFRESH_INTERVAL : prev - 1)),
     1000,
-    { enabled: !confirmOpen, runOnVisible: false, resetKey: refreshCycle },
+    { enabled: !confirmOpen && !dataSaver, runOnVisible: false, resetKey: refreshCycle },
   );
   useVisibleInterval(
     () => {
@@ -183,7 +186,7 @@ export default function Swap() {
       setRefreshCountdown(REFRESH_INTERVAL);
     },
     REFRESH_INTERVAL * 1000,
-    { enabled: !confirmOpen, resetKey: refreshCycle },
+    { enabled: !confirmOpen && !dataSaver, resetKey: refreshCycle },
   );
 
   const handleManualRefresh = () => {
@@ -378,8 +381,8 @@ export default function Swap() {
               </span>
             </div>
             <div className="flex justify-between text-gray-500 dark:text-gray-400">
-              <span>Auto-refresh in</span>
-              <span className="font-medium text-gray-900 dark:text-white">{refreshCountdown}s</span>
+              <span>{dataSaver ? 'Data saver: tap refresh for a new quote' : 'Auto-refresh in'}</span>
+              {!dataSaver && <span className="font-medium text-gray-900 dark:text-white">{refreshCountdown}s</span>}
             </div>
             <div className="h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
               <div className="h-full bg-primary-500 transition-all" style={{ width: `${progressPct}%` }} />

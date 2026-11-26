@@ -6,6 +6,7 @@ import {
 } from '../utils/currency';
 import api from '../utils/api';
 import { useVisibleInterval } from './useVisibleInterval';
+import { useDataSaver, DATA_SAVER_RATES_INTERVAL_MS } from '../context/DataSaverContext';
 
 const PRICES_PATH = '/prices/xlm';
 const TTL_MS = 60_000;
@@ -62,6 +63,10 @@ function mergeWithFallback(partial) {
  * localStorage fallback (`usingApproximateRates` is true while on fallback).
  */
 export function useExchangeRates() {
+  const { dataSaver } = useDataSaver();
+  const ttl = dataSaver ? DATA_SAVER_RATES_INTERVAL_MS : TTL_MS;
+  const ttlRef = useRef(ttl);
+  ttlRef.current = ttl;
   const stored = readStoredRates();
   const initialRates = mergeWithFallback(stored?.rates ?? {});
 
@@ -76,7 +81,7 @@ export function useExchangeRates() {
 
   const fetchRates = useCallback(async () => {
     const now = Date.now();
-    if (fetchedAtRef.current && now - fetchedAtRef.current < TTL_MS) {
+    if (fetchedAtRef.current && now - fetchedAtRef.current < ttlRef.current) {
       setRates(lastGoodRef.current);
       setUsingApproximateRates(false);
       setError(null);
@@ -107,7 +112,8 @@ export function useExchangeRates() {
   }, [fetchRates]);
 
   // Refresh on a timer, but not while the tab is hidden (and straight away on return).
-  useVisibleInterval(fetchRates, TTL_MS);
+  // FE-204: every 10 minutes in data saver mode.
+  useVisibleInterval(fetchRates, ttl);
 
   const convertFromXLM = useCallback(
     (xlmAmount, targetCurrency) =>
