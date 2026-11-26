@@ -16,6 +16,12 @@ export default function NotificationBell() {
 
   const onItemClick = (n) => {
     if (!n.read_at) markRead(n.id);
+    const ticketId = n.data?.ticketId || n.data?.ticket_id;
+    if (ticketId) {
+      setOpen(false);
+      navigate(`/support/${encodeURIComponent(ticketId)}`);
+      return;
+    }
     const hash = n.data?.txHash || n.data?.tx_hash;
     if (hash) {
       setOpen(false);

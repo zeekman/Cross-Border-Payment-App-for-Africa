@@ -63,7 +63,9 @@ services:
       start_period: 40s
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      target: dev  # production image: docker build ./frontend (serves via nginx)
     restart: unless-stopped
     ports:
       - "3000:3000"

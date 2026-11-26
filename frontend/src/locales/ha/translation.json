@@ -510,5 +510,60 @@
     "submit": "Aika don tabbatarwa",
     "submitted": "An aika KYC cikin nasara. Za mu duba aikace-aikacenka nan ba da jimawa ba.",
     "submitFailed": "Aikawa ya gaza. Da fatan a sake gwadawa."
+  },
+  "request": {
+    "invalid_amount": "Da fatan za a shigar da adadi mai inganci",
+    "success": "An ƙirƙiri buƙatar biya!",
+    "create_another": "Ƙirƙiri wani"
+  },
+  "scheduled": {
+    "error": "An sami matsala da biyan da aka tsara",
+    "invalid": "Da fatan za a shigar da adadi mai inganci",
+    "list_view": "Duban jeri",
+    "calendar_view": "Duban kalanda"
+  },
+  "support": {
+    "title": "Tikitocin Tallafi",
+    "new": "Sabon Tikiti",
+    "select_type": "Zaɓi nau’in matsala",
+    "transaction": "Ciniki",
+    "no_transaction": "Babu ciniki (na zaɓi)",
+    "selected_transaction": "Cinikin da aka zaɓa",
+    "describe": "Bayyana matsalarka...",
+    "attachments_hint": "Haɗe-haɗe (fayiloli 3 na PNG, JPEG ko PDF, MB 5 kowanne)",
+    "remove_file": "Cire {{name}}",
+    "too_many_files": "Fayiloli 3 kawai za a iya haɗawa",
+    "invalid_file_type": "PNG, JPEG da PDF kawai ake karɓa",
+    "file_too_large": "Kowane fayil kada ya wuce MB 5",
+    "created": "An ƙirƙiri tikiti",
+    "create_error": "An kasa ƙirƙirar tikiti",
+    "submit": "Aika",
+    "submitting": "Ana aikawa…",
+    "none": "Babu tikiti tukuna.",
+    "unread": "Amsoshi {{count}} da ba a karanta ba",
+    "report_problem": "Kai rahoton matsala",
+    "load_error": "An kasa loda wannan tikiti.",
+    "retry": "Sake gwadawa",
+    "view_transaction": "Duba ciniki",
+    "attachment_error": "An kasa buɗe haɗe-haɗe",
+    "no_messages": "Babu amsa tukuna",
+    "team": "Tallafi",
+    "you": "Kai",
+    "reply_placeholder": "Rubuta amsa…",
+    "send_reply": "Aika amsa",
+    "reply_error": "An kasa aika amsa",
+    "types": {
+      "wrong_address": "Adireshi mara daidai",
+      "wrong_amount": "Adadi mara daidai",
+      "failed_deducted": "Ya gaza amma an cire kuɗi",
+      "other": "Wani"
+    },
+    "statuses": {
+      "open": "A buɗe",
+      "in_progress": "Ana aiki",
+      "waiting_on_user": "Ana jiranka",
+      "resolved": "An warware",
+      "closed": "An rufe"
+    }
   }
 }

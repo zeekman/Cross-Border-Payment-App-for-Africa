@@ -1016,7 +1016,7 @@ export default function SendMoney() {
             type="text"
             required
             readOnly={!!requestId}
-            placeholder={t('send.recipient_placeholder') || 'Wallet address or username*domain'}
+            placeholder={t('send.recipient_placeholder', 'Wallet address or username*domain')}
             value={form.recipient_address}
             onChange={(e) => {
               setForm({ ...form, recipient_address: e.target.value });

@@ -312,7 +312,7 @@ export default function ReceiveMoney() {
         {federationAddress && (
           <div className="bg-primary-500/10 border border-primary-500/30 rounded-xl p-4">
             <p className="text-xs text-gray-400 mb-2">
-              {t('receive.federation_label') || 'Federation Address'}
+              {t('receive.federation_label', 'Federation Address')}
             </p>
             <p className="text-white font-mono text-sm break-all leading-relaxed">
               {federationAddress}

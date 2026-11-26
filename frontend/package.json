@@ -41,6 +41,7 @@
     "start": "react-scripts start",
     "build": "npm run lint:build && DISABLE_ESLINT_PLUGIN=true react-scripts build",
     "lint:build": "eslint src --ext .js,.jsx --no-eslintrc -c .eslintrc.build.js --max-warnings=0",
+    "check:i18n": "node scripts/check-i18n-keys.js",
     "test": "react-scripts test",
     "lint": "eslint src/**/*.{js,jsx}",
     "lint:fix": "eslint src/**/*.{js,jsx} --fix",

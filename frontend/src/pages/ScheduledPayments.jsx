@@ -36,7 +36,7 @@ export default function ScheduledPayments() {
       const res = await api.get('/scheduled-payments');
       setPayments(res.data.payments || []);
     } catch (err) {
-      toast.error(t('scheduled.error') || 'Failed to load scheduled payments');
+      toast.error(t('scheduled.error', 'Failed to load scheduled payments'));
     } finally {
       setLoading(false);
     }
@@ -53,7 +53,7 @@ export default function ScheduledPayments() {
     }
 
     if (!form.amount || parseFloat(form.amount) <= 0) {
-      toast.error(t('scheduled.invalid') || 'Please enter a valid amount');
+      toast.error(t('scheduled.invalid', 'Please enter a valid amount'));
       return;
     }
 
@@ -82,7 +82,7 @@ export default function ScheduledPayments() {
         frequency: form.frequency,
         memo: form.memo || undefined
       }, { headers: { 'X-Step-Up-Token': stepUpToken } });
-      toast.success(t('scheduled.created') || 'Scheduled payment created');
+      toast.success(t('scheduled.created', 'Scheduled payment created'));
       setForm({ recipient_wallet: '', amount: '', asset: 'XLM', frequency: 'monthly', memo: '' });
       setShowForm(false);
       fetchPayments();
@@ -95,7 +95,7 @@ export default function ScheduledPayments() {
     if (!(await confirm(t('scheduled.confirm_delete', 'Delete this scheduled payment? It will no longer run.'), { title: t('confirm.delete_scheduled_title', 'Delete scheduled payment'), confirmLabel: t('confirm.delete', 'Delete') }))) return;
     try {
       await api.delete(`/scheduled-payments/${id}`);
-      toast.success(t('scheduled.deleted') || 'Deleted');
+      toast.success(t('scheduled.deleted', 'Deleted'));
       fetchPayments();
     } catch (err) {
       toast.error(t('scheduled.error'));
@@ -126,7 +126,7 @@ export default function ScheduledPayments() {
       </button>
 
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold text-white">{t('scheduled.title') || 'Scheduled Payments'}</h2>
+        <h2 className="text-2xl font-bold text-white">{t('scheduled.title', 'Scheduled Payments')}</h2>
         <button
           onClick={() => setShowForm(!showForm)}
           className="bg-primary-500 hover:bg-primary-600 text-white p-2 rounded-lg transition-colors"
@@ -200,7 +200,7 @@ export default function ScheduledPayments() {
             view === 'list' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'
           }`}
         >
-          <List size={15} /> {t('scheduled.list_view') || 'List View'}
+          <List size={15} /> {t('scheduled.list_view', 'List View')}
         </button>
         <button
           onClick={() => setView('calendar')}
@@ -208,14 +208,14 @@ export default function ScheduledPayments() {
             view === 'calendar' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'
           }`}
         >
-          <Calendar size={15} /> {t('scheduled.calendar_view') || 'Calendar View'}
+          <Calendar size={15} /> {t('scheduled.calendar_view', 'Calendar View')}
         </button>
       </div>
 
       {view === 'calendar' ? (
         <ScheduledPaymentsCalendar payments={payments} />
       ) : payments.length === 0 ? (
-        <p className="text-gray-400 text-center py-8">{t('scheduled.none') || 'No scheduled payments'}</p>
+        <p className="text-gray-400 text-center py-8">{t('scheduled.none', 'No scheduled payments')}</p>
       ) : (
         <div className="space-y-3">
           {payments.map(p => (

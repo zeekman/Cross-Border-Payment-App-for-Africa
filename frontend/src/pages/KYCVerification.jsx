@@ -238,9 +238,8 @@ export default function KYCVerification() {
         setFieldErrors(map);
         toast.error("Please correct the highlighted fields.");
       } else {
-        toast.error(err.response?.data?.error || "Submission failed. Please try again.");
+        toast.error(err.response?.data?.error || t('kyc.submitFailed'));
       }
-      toast.error(err.response?.data?.error || t('kyc.submitFailed'));
     } finally {
       setSubmitting(false);
     }
@@ -295,12 +294,9 @@ export default function KYCVerification() {
                 {/* Step 1 — Personal Info */}
                 {currentStep === 1 && (
                   <>
-                    <h3 className="text-white font-semibold">Step 1 of 3 — Personal Info</h3>
-                    <div>
-                      <label htmlFor="kyc-dob" className="text-sm text-gray-400 mb-1 block">Date of Birth</label>
                     <h3 className="text-white font-semibold">{t('kyc.stepOf', { n: 1, label: t('kyc.step1') })}</h3>
                     <div>
-                      <label className="text-sm text-gray-400 mb-1 block">{t('kyc.dob')}</label>
+                      <label htmlFor="kyc-dob" className="text-sm text-gray-400 mb-1 block">{t('kyc.dob')}</label>
                       <input
                         id="kyc-dob"
                         type="date"
@@ -325,7 +321,6 @@ export default function KYCVerification() {
                 {/* Step 2 — Document Upload */}
                 {currentStep === 2 && (
                   <>
-                    <h3 className="text-white font-semibold">Step 2 of 3 — Document Upload</h3>
                     <h3 className="text-white font-semibold">{t('kyc.stepOf', { n: 2, label: t('kyc.step2') })}</h3>
                     <div>
                       <label className="text-sm text-gray-400 mb-1 block">{t('kyc.idType')}</label>
@@ -363,36 +358,6 @@ export default function KYCVerification() {
                       />
                       {form.document_file && (
                         <p className="text-green-400 text-xs mt-1">✓ {form.document_file.name}</p>
-                    <button
-                      type="button"
-                      disabled={!form.id_type || !form.id_number}
-                      onClick={advanceStep}
-                      className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-xl transition-colors"
-                    >
-                      {t('kyc.continue')}
-                    </button>
-                  </>
-                )}
-
-                {/* Step 3 — Selfie Capture */}
-                {currentStep === 3 && (
-                  <>
-                    <h3 className="text-white font-semibold">{t('kyc.stepOf', { n: 3, label: t('kyc.step3') })}</h3>
-                    <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 text-center text-gray-400 text-sm space-y-3">
-                      <Camera size={32} className="mx-auto text-primary-400" />
-                      <p>{t('kyc.selfieHint')}</p>
-                      <label className="inline-block cursor-pointer bg-primary-500/20 hover:bg-primary-500/30 text-primary-300 px-4 py-2 rounded-lg text-sm transition-colors">
-                        {t('kyc.uploadSelfie')}
-                        <input
-                          type="file"
-                          accept="image/*"
-                          capture="user"
-                          className="sr-only"
-                          onChange={(e) => setForm({ ...form, selfie_file: e.target.files?.[0] ?? null })}
-                        />
-                      </label>
-                      {form.selfie_file && (
-                        <p className="text-green-400 text-xs">✓ {form.selfie_file.name}</p>
                       )}
                       {fieldErrors.document && <p role="alert" className="text-red-400 text-xs mt-1">{fieldErrors.document}</p>}
                     </div>
@@ -421,8 +386,7 @@ export default function KYCVerification() {
                 {/* Step 3 — Review & Submit */}
                 {currentStep === 3 && (
                   <>
-                    <h3 className="text-white font-semibold">Step 3 of 3 — Review &amp; Submit</h3>
-                    <h3 className="text-white font-semibold">{t('kyc.stepOf', { n: 4, label: t('kyc.step4') })}</h3>
+                    <h3 className="text-white font-semibold">{t('kyc.stepOf', { n: 3, label: t('kyc.step4') })}</h3>
                     <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-2 text-sm">
                       <div className="flex justify-between">
                         <span className="text-gray-400">{t('kyc.dob')}</span>
