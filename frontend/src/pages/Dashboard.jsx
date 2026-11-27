@@ -1,5 +1,3 @@
-import React from 'react';
-import { RefreshCw } from 'lucide-react';
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -454,7 +452,7 @@ export default function Dashboard() {
             )}
           </div>
           <span className="font-semibold text-green-600 dark:text-green-400">
-            {t('dashboard.add_money') || 'Add Money'}
+            {t('dashboard.add_money', 'Add Money')}
           </span>
         </button>
         <button
@@ -470,7 +468,7 @@ export default function Dashboard() {
             )}
           </div>
           <span className="font-semibold text-blue-600 dark:text-blue-400">
-            {t('dashboard.withdraw') || 'Withdraw'}
+            {t('dashboard.withdraw', 'Withdraw')}
           </span>
         </button>
       </div>

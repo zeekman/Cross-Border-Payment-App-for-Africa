@@ -1102,6 +1102,7 @@ export default function SendMoney() {
             type="text"
             required
             readOnly={!!requestId}
+            placeholder={t('send.recipient_placeholder', 'Wallet address or username*domain')}
             data-testid="send-recipient-input"
             placeholder={t('send.recipient_placeholder') || 'Wallet address or username*domain'}
             value={form.recipient_address}

@@ -227,6 +227,9 @@
     "create": "Créer une demande",
     "created": "Demande créée",
     "error": "Impossible de créer la demande",
+    "invalid_amount": "Veuillez saisir un montant valide",
+    "success": "Demande de paiement créée !",
+    "create_another": "Créer une autre"
     "invalid_amount": "Entrez un montant valide avec jusqu'à 7 décimales",
     "link_copied": "Lien de demande copié dans le presse-papiers",
     "copy_failed": "Échec de la copie du lien de demande",
@@ -236,7 +239,11 @@
     "title": "Paiements programmés",
     "created": "Paiement programmé créé",
     "deleted": "Paiement programmé supprimé",
-    "none": "Aucun paiement programmé"
+    "none": "Aucun paiement programmé",
+    "error": "Une erreur est survenue avec les paiements programmés",
+    "invalid": "Veuillez saisir un montant valide",
+    "list_view": "Vue liste",
+    "calendar_view": "Vue calendrier"
   },
   "receiveMoney": {
     "copied": "Adresse copiée dans le presse-papiers",
@@ -622,5 +629,49 @@
     "submit": "Envoyer pour vérification",
     "submitted": "KYC envoyé avec succès. Nous examinerons votre demande sous peu.",
     "submitFailed": "Échec de l'envoi. Veuillez réessayer."
+  },
+  "support": {
+    "title": "Tickets d’assistance",
+    "new": "Nouveau ticket",
+    "select_type": "Choisir le type de problème",
+    "transaction": "Transaction",
+    "no_transaction": "Aucune transaction (facultatif)",
+    "selected_transaction": "Transaction sélectionnée",
+    "describe": "Décrivez votre problème...",
+    "attachments_hint": "Pièces jointes (3 fichiers PNG, JPEG ou PDF max., 5 Mo chacun)",
+    "remove_file": "Retirer {{name}}",
+    "too_many_files": "3 fichiers maximum",
+    "invalid_file_type": "Seuls les fichiers PNG, JPEG et PDF sont acceptés",
+    "file_too_large": "Chaque fichier doit faire 5 Mo maximum",
+    "created": "Ticket créé",
+    "create_error": "Impossible de créer le ticket",
+    "submit": "Envoyer",
+    "submitting": "Envoi…",
+    "none": "Aucun ticket.",
+    "unread": "{{count}} réponses non lues",
+    "report_problem": "Signaler un problème",
+    "load_error": "Impossible de charger ce ticket.",
+    "retry": "Réessayer",
+    "view_transaction": "Voir la transaction",
+    "attachment_error": "Impossible d’ouvrir la pièce jointe",
+    "no_messages": "Aucune réponse",
+    "team": "Assistance",
+    "you": "Vous",
+    "reply_placeholder": "Écrire une réponse…",
+    "send_reply": "Répondre",
+    "reply_error": "Impossible d’envoyer la réponse",
+    "types": {
+      "wrong_address": "Mauvaise adresse",
+      "wrong_amount": "Mauvais montant",
+      "failed_deducted": "Échoué mais débité",
+      "other": "Autre"
+    },
+    "statuses": {
+      "open": "Ouvert",
+      "in_progress": "En cours",
+      "waiting_on_user": "En attente de vous",
+      "resolved": "Résolu",
+      "closed": "Fermé"
+    }
   }
 }

@@ -54,7 +54,7 @@ export default function Analytics() {
       setRefreshedAt(res.data?.refreshed_at ? new Date(res.data.refreshed_at) : new Date());
     } catch (err) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
-      toast.error(t('analytics.error') || 'Failed to load analytics');
+      toast.error(t('analytics.error', 'Failed to load analytics'));
     } finally {
       setLoading(false);
     }
@@ -203,7 +203,7 @@ export default function Analytics() {
 
         <div className="flex items-center gap-2 mb-4">
           <TrendingUp size={24} className="text-primary-500" />
-          <h2 className="text-2xl font-bold text-white">{t('analytics.title') || 'Analytics'}</h2>
+          <h2 className="text-2xl font-bold text-white">{t('analytics.title', 'Analytics')}</h2>
         </div>
 
         {/* Data-as-of timestamp + stale indicator + manual refresh */}

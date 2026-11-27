@@ -173,6 +173,7 @@ export default function Escrow() {
     if (!stepUpToken) return;
     setLoading(true);
     try {
+      const { data } = await postWithIdempotency('/escrow/create', createForm, createKeyRef.current.get(), { headers: { 'X-Step-Up-Token': stepUpToken } });
       const { data } = await postWithIdempotency(
         '/escrow/create',
         createForm,

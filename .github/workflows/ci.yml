@@ -146,6 +146,12 @@ jobs:
         cd frontend
         npm run lint:build
 
+    - name: Check translation keys (frontend, required)
+      if: matrix.component == 'frontend'
+      run: |
+        cd frontend
+        npm run check:i18n
+
     - name: Lint style (frontend)
       if: matrix.component == 'frontend'
       # continue-on-error: repo has pre-existing lint debt (~800 violations);

@@ -581,6 +581,60 @@
     "submitted": "A ti fi KYC ránṣẹ́ ní àṣeyọrí. A ó ṣàyẹ̀wò ìbéèrè rẹ láìpẹ́.",
     "submitFailed": "Ìfiránṣẹ́ kùnà. Jọ̀wọ́ tún gbìyànjú."
   },
+  "request": {
+    "invalid_amount": "Jọ̀wọ́ tẹ iye tó tọ́",
+    "success": "A ti ṣẹ̀dá ìbéèrè ìsanwó!",
+    "create_another": "Ṣẹ̀dá òmíràn"
+  },
+  "scheduled": {
+    "error": "Àṣìṣe ṣẹlẹ̀ pẹ̀lú ìsanwó tí a ṣètò",
+    "invalid": "Jọ̀wọ́ tẹ iye tó tọ́",
+    "list_view": "Ìwò àkójọ",
+    "calendar_view": "Ìwò kàlẹ́ńdà"
+  },
+  "support": {
+    "title": "Tíkẹ́ẹ̀tì Ìrànlọ́wọ́",
+    "new": "Tíkẹ́ẹ̀tì Tuntun",
+    "select_type": "Yan irú ìṣòro",
+    "transaction": "Ìdúnàádúrà",
+    "no_transaction": "Kò sí ìdúnàádúrà (kò pọndandan)",
+    "selected_transaction": "Ìdúnàádúrà tí a yàn",
+    "describe": "Ṣàlàyé ìṣòro rẹ...",
+    "attachments_hint": "Àsomọ́ (fáìlì 3 PNG, JPEG tàbí PDF, MB 5 ọ̀kọ̀ọ̀kan)",
+    "remove_file": "Yọ {{name}} kúrò",
+    "too_many_files": "Fáìlì 3 péré ni o lè so mọ́",
+    "invalid_file_type": "PNG, JPEG àti PDF nìkan ni a gbà",
+    "file_too_large": "Fáìlì kọ̀ọ̀kan kò gbọdọ̀ ju MB 5 lọ",
+    "created": "A ti ṣẹ̀dá tíkẹ́ẹ̀tì",
+    "create_error": "A kò lè ṣẹ̀dá tíkẹ́ẹ̀tì",
+    "submit": "Fi ránṣẹ́",
+    "submitting": "Ó ń fi ránṣẹ́…",
+    "none": "Kò sí tíkẹ́ẹ̀tì síbẹ̀.",
+    "unread": "Ìdáhùn {{count}} tí a kò tíì kà",
+    "report_problem": "Jábọ̀ ìṣòro",
+    "load_error": "A kò lè gbé tíkẹ́ẹ̀tì yìí jáde.",
+    "retry": "Gbìyànjú lẹ́ẹ̀kansi",
+    "view_transaction": "Wo ìdúnàádúrà",
+    "attachment_error": "A kò lè ṣí àsomọ́",
+    "no_messages": "Kò sí ìdáhùn síbẹ̀",
+    "team": "Ìrànlọ́wọ́",
+    "you": "Ìwọ",
+    "reply_placeholder": "Kọ ìdáhùn…",
+    "send_reply": "Fi ìdáhùn ránṣẹ́",
+    "reply_error": "A kò lè fi ìdáhùn ránṣẹ́",
+    "types": {
+      "wrong_address": "Àdírẹ́sì tí kò tọ́",
+      "wrong_amount": "Iye tí kò tọ́",
+      "failed_deducted": "Ó kùnà ṣùgbọ́n a yọ owó",
+      "other": "Òmíràn"
+    },
+    "statuses": {
+      "open": "Ṣíṣí",
+      "in_progress": "Ń lọ lọ́wọ́",
+      "waiting_on_user": "Ń dúró dè ọ́",
+      "resolved": "Ti yanjú",
+      "closed": "Ti pa"
+    }
   "escrow": {
     "created": "A ti ṣẹ̀dá escrow ní àṣeyọrí",
     "create_failed": "Kùnà láti ṣẹ̀dá escrow",

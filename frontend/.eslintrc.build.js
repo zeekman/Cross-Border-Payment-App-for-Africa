@@ -7,6 +7,13 @@ module.exports = {
   plugins: ['react', 'react-hooks', 'i18next'],
   settings: { react: { version: 'detect' } },
   rules: {
+    'no-restricted-syntax': [
+      'error',
+      {
+        selector: "LogicalExpression[operator='||'] > CallExpression.left[callee.name='t']",
+        message: "t() returns the key when missing, so || never falls back. Use t('key', 'Default').",
+      },
+    ],
     'no-undef': 'error',
     'no-unreachable': 'error',
     'no-dupe-keys': 'error',
