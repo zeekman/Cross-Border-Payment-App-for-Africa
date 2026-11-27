@@ -3,6 +3,7 @@ import toast from 'react-hot-toast';
 import { Mail } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../utils/api';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function ChangeEmail() {
   const { user } = useAuth();
@@ -21,7 +22,7 @@ export default function ChangeEmail() {
       setShowChangeEmail(false);
       setChangeEmailForm({ new_email: '', password: '' });
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to request email change');
+      toast.error(apiErrorMessage(err));
     } finally {
       setChangeEmailLoading(false);
     }

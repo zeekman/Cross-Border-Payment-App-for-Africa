@@ -14,6 +14,7 @@ import { useExchangeRates } from '../hooks/useExchangeRates';
 import { TransactionCardSkeleton } from '../components/Skeleton';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { setCacheEntry, getCacheEntry } from '../utils/offlineDB';
+import { apiErrorMessage } from '../utils/apiError';
 
 const STATUS_COLORS = {
   completed: 'text-primary-400 bg-primary-500/10',
@@ -333,6 +334,7 @@ export default function TransactionHistory() {
       setReportType('other');
       toast.success(t('history.report_success'));
     } catch (err) {
+      toast.error(apiErrorMessage(err));
       toast.error(err.response?.data?.error || t('history.report_failed'));
     } finally {
       setReportLoading(false);

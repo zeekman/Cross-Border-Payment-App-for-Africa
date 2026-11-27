@@ -7,6 +7,7 @@ import { Eye, EyeOff, ArrowLeft, ChevronDown, ChevronUp, Check, X, AlertCircle, 
 import { useTranslation } from 'react-i18next';
 import { getRegisterPasswordStrength, getPasswordChecklist, getPasswordError, getEmailError } from '../utils/passwordValidator';
 import { usePasswordPolicy } from '../hooks/usePasswordPolicy';
+import { apiErrorMessage } from '../utils/apiError';
 
 export default function Register() {
   const { register } = useAuth();
@@ -100,7 +101,7 @@ export default function Register() {
         }
       }
     } catch (err) {
-      toast.error(err.response?.data?.error || t('register.error'));
+      toast.error(apiErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -131,6 +132,7 @@ export default function Register() {
         navigate('/login', { state: { emailVerificationRequired: true } });
       }
     } catch (err) {
+      toast.error(apiErrorMessage(err));
       toast.error(err.response?.data?.error || t('register.phone_verify_failed'));
     } finally {
       setPhoneVerifyLoading(false);

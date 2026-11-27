@@ -14,6 +14,7 @@ import { usePushNotifications } from '../hooks/usePushNotifications';
 import { getQueueCountForUser } from '../utils/offlineDB';
 import { IS_TESTNET } from '../config/network';
 import { safeAnchorUrl } from '../utils/anchorUrl';
+import { apiErrorMessage } from '../utils/apiError';
 import { useDataSaver } from '../context/DataSaverContext';
 
 
@@ -251,12 +252,44 @@ export function useDashboard() {
       setWallets(walletsData);
       setWalletError(walletsData.length === 0);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Funding failed');
+      toast.error(apiErrorMessage(err));
     } finally {
       setFunding(false);
     }
   };
 
+  const handleAnchorAction = async (action) => {
+    setAnchorLoading(true);
+    setAnchorAction(action);
+    const win = window.open('', 'anchor', 'width=500,height=600');
+    // Prevent reverse tabnabbing: the third-party anchor must not get a handle to this tab.
+    if (win) win.opener = null;
+    try {
+      const asset = 'USDC';
+      const endpoint = action === 'deposit' ? '/anchor/deposit' : '/anchor/withdraw';
+      const res = await api.post(endpoint, { asset });
+      const url = safeAnchorUrl(res.data?.url);
+      if (!url) throw new Error('Refusing to open an untrusted anchor URL');
+      if (win) {
+        win.location.href = url;
+      } else {
+        toast(
+          (tst) => (
+            <a href={url} target="_blank" rel="noopener noreferrer" onClick={() => toast.dismiss(tst.id)}>
+              Continue to anchor
+            </a>
+          ),
+          { duration: 15000 }
+        );
+      }
+    } catch (err) {
+      if (win) win.close();
+      toast.error(apiErrorMessage(err));
+    } finally {
+      setAnchorLoading(false);
+      setAnchorAction(null);
+    }
+  };
   const handleAnchorAction = (action) => navigate(`/ramp?type=${action}`);
 
   const handleCreateWallet = async (e) => {
@@ -272,7 +305,7 @@ export function useDashboard() {
       setWallets(walletsRes.data.wallets);
       setActiveWalletId(res.data.wallet.id);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to create wallet');
+      toast.error(apiErrorMessage(err));
     } finally {
       setCreatingWallet(false);
     }

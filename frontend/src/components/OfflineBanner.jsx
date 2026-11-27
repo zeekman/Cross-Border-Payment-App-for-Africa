@@ -24,6 +24,7 @@ import {
 } from '../utils/offlineDB';
 import api from '../utils/api';
 import PINVerificationModal from './PINVerificationModal';
+import { apiErrorMessage } from '../utils/apiError';
 
 function describeItem(item) {
   return `${item.payload.amount} ${item.payload.asset || 'XLM'}`;
@@ -133,12 +134,7 @@ export default function OfflineBanner({ onPaymentSynced }) {
         // Mark as 'failed' so the user can retry it (with the same
         // idempotency key still intact) or discard it.
         await updateQueuedPaymentStatus(item.id, 'failed').catch(() => {});
-        toast.error(
-          `Failed to send queued payment (${describeItem(item)}): ${
-            err.response?.data?.error || err.message || 'Unknown error'
-          }`,
-          { duration: 8000, id: `queue-fail-${item.id}` }
-        );
+        toast.error(apiErrorMessage(err));
       }
     }
     setSyncing(false);

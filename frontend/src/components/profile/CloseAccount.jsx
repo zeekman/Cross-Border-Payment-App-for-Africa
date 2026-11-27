@@ -6,6 +6,7 @@ import { AlertTriangle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../utils/api';
 import { useConfirm } from '../../context/ConfirmContext';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function CloseAccount() {
   const confirm = useConfirm();
@@ -39,7 +40,7 @@ export default function CloseAccount() {
       logout();
       navigate('/');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Account merge failed');
+      toast.error(apiErrorMessage(err));
     } finally {
       setCloseLoading(false);
     }

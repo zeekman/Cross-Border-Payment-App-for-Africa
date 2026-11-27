@@ -4,6 +4,7 @@ import api from '../utils/api';
 import toast from 'react-hot-toast';
 import WebhookVerifyPanel from '../components/WebhookVerifyPanel';
 import { useTranslation } from 'react-i18next';
+import { apiErrorMessage } from '../utils/apiError';
 
 // Fallback used until GET /webhooks/events (the source of truth) responds.
 const FALLBACK_EVENTS = [
@@ -313,7 +314,7 @@ export default function Webhooks() {
       setShowForm(false);
       toast.success(t('webhooks.createdToast'));
     } catch (err) {
-      toast.error(err.response?.data?.error || t('webhooks.createFailed'));
+      toast.error(apiErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -335,7 +336,7 @@ export default function Webhooks() {
       setRotateConfirm(null);
       toast.success(t('webhooks.rotatedToast', { hours: data.rotation_overlap_hours || 24 }));
     } catch (err) {
-      toast.error(err.response?.data?.error || t('webhooks.rotateFailed'));
+      toast.error(apiErrorMessage(err));
     } finally {
       setRotating(null);
     }

@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { truncateAddress } from '../utils/currency';
 import ConfirmModal from '../components/ConfirmModal';
 import toast from 'react-hot-toast';
+import { apiErrorMessage } from '../utils/apiError';
 
 export default function BusinessSettings() {
   const confirm = useConfirm();
@@ -77,6 +78,7 @@ export default function BusinessSettings() {
       setRevealedSecret(webhookId);
       toast.success(t('business_settings.toast.secret_rotated', 'Secret rotated successfully'));
     } catch (err) {
+      toast.error(apiErrorMessage(err));
       toast.error(err.response?.data?.error || t('business_settings.toast.rotate_secret_failed', 'Failed to rotate secret'));
     } finally {
       setRotating(null);
@@ -98,6 +100,7 @@ export default function BusinessSettings() {
       updateUser({ account_type: 'business' });
       toast.success(t('business_settings.toast.upgraded', 'Account upgraded to Business'));
     } catch (err) {
+      toast.error(apiErrorMessage(err));
       toast.error(err.response?.data?.error || t('business_settings.toast.upgrade_failed', 'Upgrade failed'));
     } finally {
       setUpgrading(false);
@@ -140,6 +143,7 @@ export default function BusinessSettings() {
       toast.success(t('business_settings.toast.signer_added', 'Signer added'));
     } catch (err) {
       // Keep the typed key/label so the user does not have to re-enter them.
+      toast.error(apiErrorMessage(err));
       toast.error(err.response?.data?.error || err.response?.data?.errors?.[0]?.msg || t('business_settings.toast.add_signer_failed', 'Failed to add signer'));
     } finally {
       setAdding(false);
@@ -165,6 +169,7 @@ export default function BusinessSettings() {
         toast.success(t('business_settings.toast.signer_removed', 'Signer removed'));
       }
     } catch (err) {
+      toast.error(apiErrorMessage(err));
       toast.error(err.response?.data?.error || t('business_settings.toast.remove_signer_failed', 'Failed to remove signer'));
     } finally {
       setRemoving(null);

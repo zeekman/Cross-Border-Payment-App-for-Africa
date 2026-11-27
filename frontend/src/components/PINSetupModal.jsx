@@ -3,6 +3,7 @@ import { Lock, X, Fingerprint } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import { apiErrorMessage } from '../utils/apiError';
 import { getWeakPinReason } from '../utils/pinPolicy';
 
 const WEAK_REASONS = ['repeated', 'sequential', 'common', 'personal'];
@@ -98,7 +99,7 @@ export default function PINSetupModal({ isOpen, onClose, onSuccess }) {
         return;
       }
       setError(err.response?.data?.error || t('auth.pin_error'));
-      toast.error(err.response?.data?.error || t('auth.pin_error'));
+      toast.error(apiErrorMessage(err));
     } finally {
       setLoading(false);
     }

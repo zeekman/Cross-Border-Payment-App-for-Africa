@@ -8,6 +8,7 @@ import useContractStates from '../hooks/useContractStates';
 import ContractStatusBanners from '../components/ContractStatusBanners';
 import useStepUp from '../hooks/useStepUp';
 import { useVisibleInterval } from '../hooks/useVisibleInterval';
+import { apiErrorMessage } from '../utils/apiError';
 
 /** Calculate remaining seconds from now until unlockTimestamp (unix seconds). */
 function secondsUntil(unlockTimestamp) {
@@ -145,6 +146,7 @@ export default function SaveMoney() {
       setForm({ amount: '', lock_period_days: '30' });
       fetchVaults();
     } catch (err) {
+      toast.error(apiErrorMessage(err));
       toast.error(err.response?.data?.error || t('saveMoney.createFailed'));
     } finally {
       setLoading(false);

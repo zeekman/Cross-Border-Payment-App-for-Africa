@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Plus, AlertCircle } from 'lucide-react';
 import api from '../../utils/api';
+import { apiErrorMessage } from '../../utils/apiError';
 import { truncateAddress } from '../../utils/currency';
 import AttachmentInput from '../AttachmentInput';
 
@@ -31,6 +32,8 @@ export default function SupportTickets() {
     try {
       const res = await api.get('/support/tickets');
       setTickets(res.data.tickets || []);
+    } catch (err) {
+      toast.error(apiErrorMessage(err));
     } catch {
       // non-critical, silently ignore
     } finally {

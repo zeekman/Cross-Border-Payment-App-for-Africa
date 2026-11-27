@@ -32,6 +32,9 @@ import ManageAssets from '../components/profile/ManageAssets';
 import TwoFactorAuth from '../components/profile/TwoFactorAuth';
 import ImportHistory from '../components/profile/ImportHistory';
 import CloseAccount from '../components/profile/CloseAccount';
+import PrivacySettings from '../components/profile/PrivacySettings';
+import { AutoLockSetting } from '../components/AppLock';
+import { apiErrorMessage } from '../utils/apiError';
 import { useDataSaver } from '../context/DataSaverContext';
 
 const SecuritySigners = lazy(() => import('../components/profile/SecuritySigners'));
@@ -93,6 +96,20 @@ export default function Profile() {
 
 
 
+  const handleRedeemLoyalty = async () => {
+    const tier = confirmTier;
+    setRedeemLoading(true);
+    try {
+      await api.post('/loyalty/redeem', { tier_index: tier.index });
+      toast.success(t('loyalty.redeemed', { points: tier.threshold, percent: tier.discount_bps / 100 }));
+      setConfirmTier(null);
+      await refreshLoyalty();
+    } catch (err) {
+      toast.error(apiErrorMessage(err));
+    } finally {
+      setRedeemLoading(false);
+    }
+  };
 
 
 
@@ -432,6 +449,12 @@ export default function Profile() {
           </div>
         );
       })()}
+
+      {/* FE-214 */}
+      <AutoLockSetting />
+
+      {/* FE-211: data export + AfriPay account deletion (separate from closing the Stellar account) */}
+      <PrivacySettings />
 
       <CloseAccount />
 

@@ -14,6 +14,7 @@ import {
 import api from "../utils/api";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
+import { apiErrorMessage } from '../utils/apiError';
 
 // ── Step definitions ──────────────────────────────────────────────────────────
 const STEPS = [
@@ -238,6 +239,9 @@ export default function KYCVerification() {
         setFieldErrors(map);
         toast.error("Please correct the highlighted fields.");
       } else {
+        toast.error(apiErrorMessage(err));
+      }
+      toast.error(apiErrorMessage(err));
         toast.error(err.response?.data?.error || t('kyc.submitFailed'));
       }
     } finally {

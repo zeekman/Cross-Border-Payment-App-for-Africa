@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Plus, Trash2, Coins } from 'lucide-react';
 import api from '../../utils/api';
 import { useConfirm } from '../../context/ConfirmContext';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function ManageAssets() {
   const confirm = useConfirm();
@@ -23,11 +24,7 @@ export default function ManageAssets() {
       setNewAsset('');
       toast.success('Trustline added');
     } catch (err) {
-      toast.error(
-        err.response?.data?.error ||
-          err.response?.data?.errors?.[0]?.msg ||
-          'Failed to add trustline'
-      );
+      toast.error(apiErrorMessage(err));
     } finally {
       setTrustlineLoading(false);
     }
@@ -40,7 +37,7 @@ export default function ManageAssets() {
       setTrustlines((prev) => prev.filter((t) => t.asset !== asset));
       toast.success(`${asset} trustline removed`);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to remove trustline');
+      toast.error(apiErrorMessage(err));
     }
   };
 

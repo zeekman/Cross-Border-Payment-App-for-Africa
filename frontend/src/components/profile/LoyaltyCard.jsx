@@ -3,6 +3,7 @@ import toast from 'react-hot-toast';
 import { Gift } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import api from '../../utils/api';
+import { apiErrorMessage } from '../../utils/apiError';
 import ConfirmModal from '../ConfirmModal';
 
 export default function LoyaltyCard() {
@@ -34,6 +35,7 @@ export default function LoyaltyCard() {
       setConfirmTier(null);
       await refreshLoyalty();
     } catch (err) {
+      toast.error(apiErrorMessage(err));
       toast.error(err.response?.data?.error || t('loyalty.redeemFailed'));
     } finally {
       setRedeemLoading(false);

@@ -9,6 +9,7 @@ import useStepUp from '../hooks/useStepUp';
 import { useConfirm } from '../context/ConfirmContext';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
+import { apiErrorMessage } from '../utils/apiError';
 
 const CONTRACTS = ['escrow', 'agentEscrow'];
 const formatCountdown = (ms) => {
@@ -187,7 +188,7 @@ export default function Escrow() {
       fetchEscrows();
     } catch (err) {
       createKeyRef.current.resetUnlessLost(err);
-      toast.error(err.response?.data?.error || 'Failed to create escrow');
+      toast.error(apiErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -209,7 +210,7 @@ export default function Escrow() {
       fetchEscrows();
       setSelectedEscrow(null);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to confirm escrow');
+      toast.error(apiErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -235,7 +236,7 @@ export default function Escrow() {
       fetchEscrows();
       setSelectedEscrow(null);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to cancel escrow');
+      toast.error(apiErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -273,7 +274,7 @@ export default function Escrow() {
       );
       closePartialRelease();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to release escrow');
+      toast.error(apiErrorMessage(err));
     } finally {
       setPartialLoading(false);
     }

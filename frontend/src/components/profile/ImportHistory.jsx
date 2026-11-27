@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import api from '../../utils/api';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function ImportHistory() {
 
@@ -13,7 +14,7 @@ export default function ImportHistory() {
       const res = await api.post('/wallet/import-history');
       toast.success(`Import complete — ${res.data.imported} new transactions added`);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Import failed');
+      toast.error(apiErrorMessage(err));
     } finally {
       setImportingHistory(false);
     }
