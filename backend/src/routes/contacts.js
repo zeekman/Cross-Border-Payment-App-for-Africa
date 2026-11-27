@@ -17,7 +17,6 @@ const validate = (req, res, next) => {
   next();
 };
 const { readLimiter } = require('../middleware/rateLimiter');
-const { importContacts, getImportTemplate } = require('../controllers/contactsController');
 
 // ---------------------------------------------------------------------------
 // Multer: in-memory storage, CSV files only, 5 MB size limit.

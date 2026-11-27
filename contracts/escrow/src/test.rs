@@ -168,7 +168,7 @@ fn test_escrow_records_readable_after_ttl_activity() {
 }
 
 #[test]
-#[should_panic(expected = "Only admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_non_admin_cannot_migrate() {
     let (env, client, _, _) = setup();
     let non_admin = Address::generate(&env);
@@ -176,7 +176,7 @@ fn test_non_admin_cannot_migrate() {
 }
 
 #[test]
-#[should_panic(expected = "Contract already initialized")]
+#[should_panic(expected = "Error(Contract, #2)")]
 fn test_double_initialize() {
     let (_, client, admin, usdc_id) = setup();
     client.initialize(&admin, &usdc_id);
@@ -227,7 +227,7 @@ fn test_create_multiple_escrows() {
 // --- #352: fee boundary and minimum amount tests ---
 
 #[test]
-#[should_panic(expected = "Amount below minimum (100 stroops)")]
+#[should_panic(expected = "Error(Contract, #9)")]
 fn test_amount_below_minimum() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -238,7 +238,7 @@ fn test_amount_below_minimum() {
 }
 
 #[test]
-#[should_panic(expected = "Platform fee exceeds max_fee_bps")]
+#[should_panic(expected = "Error(Contract, #18)")]
 fn test_direct_call_cannot_set_zero_fee() {
     // #1364: a sender calling the contract directly cannot opt out of the fee.
     let (env, client, admin, usdc_id) = setup();
@@ -276,14 +276,14 @@ fn test_fee_at_max_1000_accepted() {
 }
 
 #[test]
-#[should_panic(expected = "Fee exceeds maximum of 1000 bps (10%)")]
+#[should_panic(expected = "Error(Contract, #17)")]
 fn test_fee_bps_1001_rejected() {
     let (_, client, admin, _) = setup();
     client.set_fee_bps(&admin, &1001);
 }
 
 #[test]
-#[should_panic(expected = "Amount exceeds maximum escrow amount")]
+#[should_panic(expected = "Error(Contract, #10)")]
 fn test_amount_above_max_rejected() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -350,7 +350,7 @@ fn test_fee_bps_999_accepted() {
 // --- #354: upgrade access control test ---
 
 #[test]
-#[should_panic(expected = "Only admin can upgrade the contract")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_non_admin_cannot_upgrade() {
     let (env, client, _, _) = setup();
     let non_admin = Address::generate(&env);
@@ -361,7 +361,7 @@ fn test_non_admin_cannot_upgrade() {
 // --- existing tests ---
 
 #[test]
-#[should_panic(expected = "Amount below minimum (100 stroops)")]
+#[should_panic(expected = "Error(Contract, #9)")]
 fn test_invalid_amount() {
     let (env, client, _, _) = setup();
     let sender = Address::generate(&env);
@@ -371,14 +371,14 @@ fn test_invalid_amount() {
 }
 
 #[test]
-#[should_panic(expected = "Fee exceeds maximum of 1000 bps (10%)")]
+#[should_panic(expected = "Error(Contract, #17)")]
 fn test_invalid_fee() {
     let (_, client, admin, _) = setup();
     client.set_fee_bps(&admin, &10001);
 }
 
 #[test]
-#[should_panic(expected = "Only admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_set_fee_bps_non_admin_panics() {
     let (env, client, _, _) = setup();
     let impostor = Address::generate(&env);
@@ -427,7 +427,7 @@ fn test_batch_create_uses_configured_fee() {
 }
 
 #[test]
-#[should_panic(expected = "Platform fee exceeds max_fee_bps")]
+#[should_panic(expected = "Error(Contract, #18)")]
 fn test_batch_create_rejects_zero_fee_guard() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -551,7 +551,7 @@ fn test_multiple_partial_releases_release_remaining_amount() {
 }
 
 #[test]
-#[should_panic(expected = "Release amount exceeds escrow balance")]
+#[should_panic(expected = "Error(Contract, #20)")]
 fn test_partial_release_over_release_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -629,7 +629,7 @@ fn test_partial_release_multiple() {
 }
 
 #[test]
-#[should_panic(expected = "Release amount exceeds escrow balance")]
+#[should_panic(expected = "Error(Contract, #20)")]
 fn test_partial_release_exceeds_balance() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -642,7 +642,7 @@ fn test_partial_release_exceeds_balance() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow is not in pending state")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_partial_release_wrong_status() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -657,7 +657,7 @@ fn test_partial_release_wrong_status() {
 }
 
 #[test]
-#[should_panic(expected = "Only the agent can release escrow")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn test_partial_release_wrong_caller() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -762,7 +762,7 @@ fn test_cleanup_escrow_is_permissionless() {
 }
 
 #[test]
-#[should_panic(expected = "Only the agent can release escrow")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn test_release_wrong_caller() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -776,7 +776,7 @@ fn test_release_wrong_caller() {
 }
 
 #[test]
-#[should_panic(expected = "Only the sender can cancel escrow")]
+#[should_panic(expected = "Error(Contract, #15)")]
 fn test_cancel_wrong_caller() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -790,7 +790,7 @@ fn test_cancel_wrong_caller() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow is not in pending state")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_double_release() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -804,7 +804,7 @@ fn test_double_release() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow is not in pending state")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_cancel_after_release() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -883,7 +883,7 @@ fn test_withdraw_fees_emits_event() {
 }
 
 #[test]
-#[should_panic(expected = "Only admin can withdraw fees")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_withdraw_fees_wrong_caller() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -898,7 +898,7 @@ fn test_withdraw_fees_wrong_caller() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow 999 not found")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_get_nonexistent_escrow() {
     let (_, client, _, _) = setup();
     client.get_escrow(&999);
@@ -907,7 +907,7 @@ fn test_get_nonexistent_escrow() {
 // ── #346: distinct addresses ──────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Sender, recipient, and agent must be distinct addresses")]
+#[should_panic(expected = "Error(Contract, #11)")]
 fn test_create_escrow_sender_equals_agent() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -917,7 +917,7 @@ fn test_create_escrow_sender_equals_agent() {
 }
 
 #[test]
-#[should_panic(expected = "Sender, recipient, and agent must be distinct addresses")]
+#[should_panic(expected = "Error(Contract, #11)")]
 fn test_create_escrow_sender_equals_recipient() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -927,7 +927,7 @@ fn test_create_escrow_sender_equals_recipient() {
 }
 
 #[test]
-#[should_panic(expected = "Sender, recipient, and agent must be distinct addresses")]
+#[should_panic(expected = "Error(Contract, #11)")]
 fn test_create_escrow_agent_equals_recipient() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -939,7 +939,7 @@ fn test_create_escrow_agent_equals_recipient() {
 // ── #347: withdraw_fees amount > 0 ───────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "Amount must be positive")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_withdraw_fees_zero_amount_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -969,7 +969,7 @@ fn test_deposit_into_active_escrow() {
 
 // fix #334: release_escrow now enforces expiry — agent cannot release after the 30-day window.
 #[test]
-#[should_panic(expected = "Escrow has expired")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_release_escrow_after_expiry_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -988,7 +988,7 @@ fn test_release_escrow_after_expiry_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow has expired")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_release_escrow_at_exact_expiry_boundary_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -1051,7 +1051,7 @@ fn test_expire_escrow_after_expiry() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow has not expired yet")]
+#[should_panic(expected = "Error(Contract, #7)")]
 fn test_expire_escrow_before_expiry_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -1071,7 +1071,7 @@ fn test_expire_escrow_before_expiry_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow has not expired yet")]
+#[should_panic(expected = "Error(Contract, #7)")]
 fn test_expire_escrow_still_before_boundary_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -1091,7 +1091,7 @@ fn test_expire_escrow_still_before_boundary_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow is not in pending state")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_expire_escrow_on_cancelled_escrow_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -1109,7 +1109,7 @@ fn test_expire_escrow_on_cancelled_escrow_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Insufficient accumulated fees")]
+#[should_panic(expected = "Error(Contract, #32)")]
 fn test_withdraw_fees_exceeds_accumulated_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -1126,7 +1126,7 @@ fn test_withdraw_fees_exceeds_accumulated_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow has expired")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_deposit_into_expired_escrow_is_rejected() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -1343,7 +1343,7 @@ fn test_disputed_escrow_cannot_be_cancelled_or_released() {
 }
 
 #[test]
-#[should_panic(expected = "Only the sender or recipient can dispute escrow")]
+#[should_panic(expected = "Error(Contract, #16)")]
 fn test_dispute_escrow_third_party_panics() {
     let (env, escrow, _, _, admin, usdc_id, _) = setup_with_dispute();
 
@@ -1441,7 +1441,7 @@ fn test_dispute_escrow_filing_fee_forfeited_when_opener_loses() {
 }
 
 #[test]
-#[should_panic(expected = "Dispute resolution contract not configured")]
+#[should_panic(expected = "Error(Contract, #30)")]
 fn test_dispute_escrow_unconfigured_panics() {
     let (env, client, admin, usdc_id) = setup();
 
@@ -1459,7 +1459,7 @@ fn test_dispute_escrow_unconfigured_panics() {
 // ── SC-117: partial_release expiry, fee truncation, and state ordering ──────
 
 #[test]
-#[should_panic(expected = "Escrow has expired")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_partial_release_panics_after_expiry() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -1728,7 +1728,7 @@ fn test_create_escrow_succeeds_for_attested_users() {
 }
 
 #[test]
-#[should_panic(expected = "Sender KYC verification required")]
+#[should_panic(expected = "Error(Contract, #12)")]
 fn test_create_escrow_panics_for_unattested_sender() {
     let (env, client, kyc, admin, usdc_id, _) = setup_with_kyc();
     let sender = Address::generate(&env);
@@ -1743,7 +1743,7 @@ fn test_create_escrow_panics_for_unattested_sender() {
 }
 
 #[test]
-#[should_panic(expected = "Agent KYC verification required")]
+#[should_panic(expected = "Error(Contract, #13)")]
 fn test_create_escrow_panics_for_unattested_agent() {
     let (env, client, kyc, admin, usdc_id, _) = setup_with_kyc();
     let sender = Address::generate(&env);
@@ -1758,7 +1758,7 @@ fn test_create_escrow_panics_for_unattested_agent() {
 }
 
 #[test]
-#[should_panic(expected = "Sender KYC verification required")]
+#[should_panic(expected = "Error(Contract, #12)")]
 fn test_create_escrow_panics_for_expired_attestation() {
     let (env, client, kyc, admin, usdc_id, _) = setup_with_kyc();
     let sender = Address::generate(&env);
@@ -1818,7 +1818,7 @@ fn test_disable_kyc_requires_admin_and_emits_event() {
 }
 
 #[test]
-#[should_panic(expected = "Only admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_disable_kyc_requires_admin() {
     let (env, client, _, _, _, _) = setup_with_kyc();
     let impostor = Address::generate(&env);
@@ -1826,7 +1826,7 @@ fn test_disable_kyc_requires_admin() {
 }
 
 #[test]
-#[should_panic(expected = "KYC required but no KYC contract configured")]
+#[should_panic(expected = "Error(Contract, #12)")]
 fn test_kyc_required_without_contract_fails_closed() {
     // KYC is required by default; without a configured contract the gate must
     // fail closed rather than silently allowing the transfer.
@@ -1892,7 +1892,7 @@ fn test_admin_rotation_requires_new_admin_auth() {
 }
 
 #[test]
-#[should_panic(expected = "Only admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_admin_rotation_propose_requires_current_admin() {
     let (env, client, _, _) = setup();
     let impostor = Address::generate(&env);
@@ -1918,7 +1918,7 @@ fn test_admin_rotation_cancel_clears_proposal() {
 }
 
 #[test]
-#[should_panic(expected = "Only admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_old_admin_loses_privileges_after_rotation() {
     let (env, client, admin, _) = setup();
     let new_admin = Address::generate(&env);
@@ -1963,7 +1963,7 @@ fn create_default_escrow(
 }
 
 #[test]
-#[should_panic(expected = "New fee exceeds maximum of 1000 bps (10%)")]
+#[should_panic(expected = "Error(Contract, #17)")]
 fn test_update_fee_above_max_rejected() {
     let (env, client, admin, usdc_id) = setup();
     let escrow_id = create_default_escrow(&env, &client, &admin, &usdc_id);
@@ -1971,7 +1971,7 @@ fn test_update_fee_above_max_rejected() {
 }
 
 #[test]
-#[should_panic(expected = "Fee on an existing escrow can only be lowered")]
+#[should_panic(expected = "Error(Contract, #19)")]
 fn test_update_fee_increase_rejected() {
     let (env, client, admin, usdc_id) = setup();
     let escrow_id = create_default_escrow(&env, &client, &admin, &usdc_id);
@@ -1993,7 +1993,7 @@ fn test_update_fee_decrease_applies_and_emits_event() {
 }
 
 #[test]
-#[should_panic(expected = "Only admin can update escrow fees")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_update_fee_non_admin_rejected() {
     let (env, client, admin, usdc_id) = setup();
     let escrow_id = create_default_escrow(&env, &client, &admin, &usdc_id);
@@ -2020,7 +2020,7 @@ fn confirmed_escrow(
 }
 
 #[test]
-#[should_panic(expected = "Delivery confirmed: only the recipient can dispute")]
+#[should_panic(expected = "Error(Contract, #22)")]
 fn test_sender_cannot_dispute_after_confirm_delivery() {
     let (env, escrow, _, _, admin, usdc_id, _) = setup_with_dispute();
     let (escrow_id, sender, _, _) = confirmed_escrow(&env, &escrow, &admin, &usdc_id);
@@ -2240,7 +2240,7 @@ fn test_close_disputed_escrow_rejects_other_callers() {
 // ── Cancel hold period (sender front-running protection) ─────────────────────
 
 #[test]
-#[should_panic(expected = "Cannot cancel: hold period has not elapsed")]
+#[should_panic(expected = "Error(Contract, #24)")]
 fn test_cancel_before_hold_period_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -2253,7 +2253,7 @@ fn test_cancel_before_hold_period_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Cannot cancel: hold period has not elapsed")]
+#[should_panic(expected = "Error(Contract, #24)")]
 fn test_cancel_one_second_before_hold_ends_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -2328,7 +2328,7 @@ fn test_admin_can_update_cancel_hold_period() {
 }
 
 #[test]
-#[should_panic(expected = "Escrow has no dispute")]
+#[should_panic(expected = "Error(Contract, #31)")]
 fn test_close_disputed_escrow_requires_dispute() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -2346,7 +2346,7 @@ fn test_close_disputed_escrow_requires_dispute() {
 }
 
 #[test]
-#[should_panic(expected = "Only admin can perform this action")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_non_admin_cannot_set_cancel_hold_period() {
     let (env, client, _, _) = setup();
     let impostor = Address::generate(&env);
@@ -2354,7 +2354,7 @@ fn test_non_admin_cannot_set_cancel_hold_period() {
 }
 
 #[test]
-#[should_panic(expected = "Hold period exceeds maximum of 7 days")]
+#[should_panic(expected = "Error(Contract, #25)")]
 fn test_cancel_hold_period_above_max_panics() {
     let (_, client, admin, _) = setup();
     client.set_cancel_hold_period(&admin, &(7 * 24 * 60 * 60 + 1));

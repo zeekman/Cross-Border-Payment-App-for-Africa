@@ -43,6 +43,8 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Sym
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_events;
 
 // ── TTL policy ────────────────────────────────────────────────────────────────
 //
@@ -61,14 +63,10 @@ pub const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[contracttype]
-#[repr(u32)]
-pub enum KycTier {
-    Basic = 0,
-    Enhanced = 1,
-    Business = 2,
-}
+/// KYC tier. Defined once in the shared `afripay-types` crate (SC-214) so
+/// every contract that passes a tier across a contract boundary uses the same
+/// encoding.
+pub use afripay_types::KycTier;
 
 #[derive(Debug)]
 #[contracttype]
@@ -638,6 +636,16 @@ impl KycAttestationContract {
     // ── Internal helpers ──────────────────────────────────────────────────────
 
 /* … truncated 1568 chars — edit only what you need near the top … */
+
+// SC-214: this contract implements its interface from `afripay-types`, so the
+// compiler checks the exported signature against the one consumers call.
+// Changing the entry point without updating the shared trait breaks this build;
+// updating the trait breaks every consumer still using the old signature.
+impl afripay_types::KycAttestationInterface for KycAttestationContract {
+    fn is_valid_and_unexpired(env: Env, user: Address, tier: KycTier) -> bool {
+        KycAttestationContract::is_valid_and_unexpired(env, user, tier)
+    }
+}
 
 mod governance;
 pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};

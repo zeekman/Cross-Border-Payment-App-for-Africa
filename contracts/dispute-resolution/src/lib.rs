@@ -44,10 +44,13 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, String, Symbol,
     Vec,
+    contract, contractimpl, contracttype, token, Address, Bytes, Env, Symbol, Vec,
 };
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -380,11 +383,8 @@ fn notify_escrow(env: &Env, dispute_id: u64, winner: &Address) {
         bump_persistent(env, &DataKey::EscrowRef(dispute_id));
     }
     if let Some((escrow_contract, escrow_id)) = escrow_ref {
-        env.invoke_contract::<()>(
-            &escrow_contract,
-            &Symbol::new(env, "close_disputed_escrow"),
-            soroban_sdk::vec![env, escrow_id.into_val(env), winner.into_val(env)],
-        );
+        afripay_types::EscrowClient::new(env, &escrow_contract)
+            .close_disputed_escrow(&escrow_id, winner);
     }
 }
 
@@ -1694,6 +1694,36 @@ impl DisputeResolutionContract {
             result.push_back(i + 1); // Dispute IDs are 1-indexed
         }
         result
+    }
+}
+
+// SC-214: this contract implements its interface from `afripay-types`, so the
+// compiler checks the exported signature against the one consumers call.
+// Changing the entry point without updating the shared trait breaks this build;
+// updating the trait breaks every consumer still using the old signature.
+impl afripay_types::DisputeResolutionInterface for DisputeResolutionContract {
+    fn open_escrow_dispute(
+        env: Env,
+        escrow_contract: Address,
+        opener: Address,
+        escrow_id: u64,
+        sender: Address,
+        recipient: Address,
+        agent: Address,
+        amount: i128,
+        payout_confirmed: bool,
+    ) -> u64 {
+        DisputeResolutionContract::open_escrow_dispute(
+            env,
+            escrow_contract,
+            opener,
+            escrow_id,
+            sender,
+            recipient,
+            agent,
+            amount,
+            payout_confirmed,
+        )
     }
 }
 

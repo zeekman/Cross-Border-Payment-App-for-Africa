@@ -12,11 +12,6 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-/**
- * Record a new session on login.
- * Called from authController.login after issuing the JWT.
- */
-async function recordSession(userId, token, req, familyId = null) {
 function detectDeviceType(ua) {
   if (!ua) return 'unknown';
   const s = ua.toLowerCase();
@@ -56,35 +51,15 @@ async function isJtiBlacklisted(jti) {
 }
 
 // Record a new session; enforce SESSION_CAP by invalidating the oldest if needed.
-async function recordSession(userId, token, req) {
+// `familyId` links the session to its refresh-token family (BE-182) so that
+// revoking the session also revokes that device's refresh tokens.
+async function recordSession(userId, token, req, familyId = null) {
   const tokenHash = hashToken(token);
   const userAgent = req.headers['user-agent'] || null;
   const ipAddress = getClientIp(req);
   const deviceType = detectDeviceType(userAgent);
   const location = getLocation(ipAddress);
 
-  await db.query(
-    `INSERT INTO sessions (user_id, token_hash, device_info, ip_address, family_id)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (token_hash) DO UPDATE SET last_active = NOW()`,
-    [userId, tokenHash, deviceInfo, ipAddress, familyId]
-  );
-}
-
-/**
- * Revoke the refresh-token families linked to the given sessions so a revoked
- * device cannot mint new access tokens via POST /auth/refresh.
- */
-async function revokeFamilies(rows) {
-  const familyIds = rows.map((r) => r.family_id).filter(Boolean);
-  if (familyIds.length === 0) return;
-  await db.query(`DELETE FROM refresh_tokens WHERE family_id = ANY($1::uuid[])`, [familyIds]);
-}
-
-/**
- * Update last_active for an existing session.
- * Can be called from auth middleware on each request.
- */
   // Extract JTI from decoded token payload (base64 middle section)
   let jti = null;
   try {
@@ -124,14 +99,14 @@ async function revokeFamilies(rows) {
 
     await client.query(
       `INSERT INTO sessions
-         (user_id, token_hash, token_jti, device_info, device_type, ip_address, location, user_agent, is_active, last_active_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, NOW())
+         (user_id, token_hash, token_jti, device_info, device_type, ip_address, location, user_agent, family_id, is_active, last_active_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, NOW())
        ON CONFLICT (token_hash) DO UPDATE SET last_active_at = NOW(), is_active = TRUE`,
       [
         userId, tokenHash, jti,
         userAgent, deviceType, ipAddress,
         location ? JSON.stringify(location) : null,
-        userAgent,
+        userAgent, familyId,
       ]
     );
 
@@ -142,6 +117,16 @@ async function revokeFamilies(rows) {
   } finally {
     client.release();
   }
+}
+
+/**
+ * Revoke the refresh-token families linked to the given sessions so a revoked
+ * device cannot mint new access tokens via POST /auth/refresh.
+ */
+async function revokeFamilies(rows) {
+  const familyIds = rows.map((r) => r.family_id).filter(Boolean);
+  if (familyIds.length === 0) return;
+  await db.query(`DELETE FROM refresh_tokens WHERE family_id = ANY($1::uuid[])`, [familyIds]);
 }
 
 // Debounced touch: update last_active_at at most once per 5 minutes per token
@@ -220,10 +205,9 @@ async function revokeSession(req, res, next) {
   try {
     const { id } = req.params;
     const { rows, rowCount } = await db.query(
-      `DELETE FROM sessions WHERE id = $1 AND user_id = $2 RETURNING family_id`,
       `UPDATE sessions SET is_active = FALSE
        WHERE id = $1 AND user_id = $2 AND is_active = TRUE
-       RETURNING token_jti`,
+       RETURNING token_jti, family_id`,
       [id, req.user.userId]
     );
 
@@ -262,31 +246,23 @@ async function revokeAllSessions(req, res, next) {
       ? hashToken(req.headers.authorization.replace('Bearer ', ''))
       : null;
 
-    if (keepCurrent && req.headers.authorization) {
-      const currentHash = hashToken(req.headers.authorization.replace('Bearer ', ''));
-      const { rows } = await db.query(
-        `DELETE FROM sessions WHERE user_id = $1 AND token_hash != $2 RETURNING family_id`,
-        [userId, currentHash]
-      );
-      await revokeFamilies(rows);
-    } else {
-      await db.query(`DELETE FROM sessions WHERE user_id = $1`, [userId]);
-      await db.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [userId]);
     let rows;
     if (!includeCurrent && currentHash) {
       ({ rows } = await db.query(
         `UPDATE sessions SET is_active = FALSE
          WHERE user_id = $1 AND is_active = TRUE AND token_hash != $2
-         RETURNING token_jti`,
+         RETURNING token_jti, family_id`,
         [userId, currentHash]
       ));
+      await revokeFamilies(rows);
     } else {
       ({ rows } = await db.query(
         `UPDATE sessions SET is_active = FALSE
          WHERE user_id = $1 AND is_active = TRUE
-         RETURNING token_jti`,
+         RETURNING token_jti, family_id`,
         [userId]
       ));
+      await db.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [userId]);
     }
 
     for (const row of rows) {
