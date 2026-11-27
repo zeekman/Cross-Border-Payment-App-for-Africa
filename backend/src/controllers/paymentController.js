@@ -32,6 +32,7 @@ const logger = require("../utils/logger");
 const { cancelEscrow } = require("../services/agentEscrow");
 const audit = require("../services/audit");
 const { amlRescreenForPayment } = require("./kycController");
+const { persistSnapshots, fiatValueAtSend } = require("../utils/txSnapshots");
 
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
 
@@ -237,6 +238,7 @@ async function insertTransactionRecord({
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, ledger_close_time, fee_amount, fee_breakdown ? JSON.stringify(fee_breakdown) : null],
   );
+  if (status !== "failed") await persistSnapshots(id, asset);
   return id;
 }
 
@@ -525,6 +527,8 @@ async function send(req, res, next) {
       } else {
         await db.query(insertTransactionSql, transactionParams);
       }
+
+      await persistSnapshots(txId, asset, updated_fee_breakdown);
 
       txResult = { transactionHash, ledger, type, claimableBalanceId, expiresAt, fee_breakdown: updated_fee_breakdown, txStatus };
     });
@@ -883,7 +887,7 @@ async function history(req, res, next) {
     }
     const whereClause = conditions.join(" AND ");
 
-      const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at, created_at::text AS cursor_created_at, ledger_close_time, fee_breakdown
+      const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at, created_at::text AS cursor_created_at, ledger_close_time, fee_breakdown, fx_snapshot, fee_snapshot
          FROM transactions
          WHERE ${whereClause}
          ORDER BY created_at DESC, id DESC LIMIT $${baseParams.length + 1}`;
@@ -892,9 +896,13 @@ async function history(req, res, next) {
 
     const rows = result.rows;
     const hasMore = rows.length > limit;
+    const displayFiat = String(req.query.fiat || "USD").toUpperCase();
     const transactions = rows.slice(0, limit).map(({ cursor_created_at, ...tx }) => ({
       ...tx,
       direction: tx.sender_wallet === public_key ? "sent" : "received",
+      // BE-227: fiat value at send time; null => "rate unavailable"
+      fiat_value_at_send: fiatValueAtSend(tx, displayFiat),
+      fiat_currency: displayFiat,
     }));
 
     const lastRow = rows[limit - 1];
@@ -1007,6 +1015,7 @@ async function sendPath(req, res, next) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [txId, public_key, recipient_address, source_amount, source_asset, memoStr || null, transactionHash, txStatus, req.requestId, is_encrypted, encrypted_memo, new Date(), confirmationExpiresAt, fee_breakdown.platform_fee_amount, JSON.stringify(fee_breakdown)],
     );
+    await persistSnapshots(txId, source_asset);
     collectPlatformFee(fee_breakdown, public_key);
 
     // Invalidate sender's cached balance after successful path payment
@@ -1125,6 +1134,7 @@ async function sendStrictReceivePath(req, res, next) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [txId, public_key, recipient_address, destination_amount, destination_asset, memoStr || null, transactionHash, txStatus, req.requestId, is_encrypted, encrypted_memo, new Date(), confirmationExpiresAt, fee_breakdown.platform_fee_amount, JSON.stringify(fee_breakdown)],
     );
+    await persistSnapshots(txId, destination_asset);
     collectPlatformFee(fee_breakdown, public_key);
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, sender: public_key, recipient: recipient_address };
@@ -1184,7 +1194,7 @@ async function exportCSV(req, res, next) {
 
     const stringifier = stringifyStream({
       header: true,
-      columns: ["date", "direction", "amount", "asset", "recipient_or_sender", "memo", "tx_hash", "status"],
+      columns: ["date", "direction", "amount", "asset", "recipient_or_sender", "memo", "tx_hash", "status", "usd_value_at_send", "fx_rate_usd", "platform_fee", "network_fee_xlm"],
     });
     stringifier.pipe(res);
 
@@ -1202,7 +1212,7 @@ async function exportCSV(req, res, next) {
     await client.query("BEGIN");
     await client.query(
       `DECLARE ${cursorName} CURSOR FOR
-       SELECT created_at, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status
+       SELECT created_at, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fx_snapshot, fee_snapshot
        FROM transactions
        WHERE (sender_wallet = $1 OR recipient_wallet = $1)${filters}
        ORDER BY created_at DESC
@@ -1223,6 +1233,10 @@ async function exportCSV(req, res, next) {
           memo: tx.memo || "",
           tx_hash: tx.tx_hash || "",
           status: tx.status,
+          usd_value_at_send: fiatValueAtSend(tx, "USD") ?? "rate unavailable",
+          fx_rate_usd: tx.fx_snapshot?.rates?.USD ?? "",
+          platform_fee: tx.fee_snapshot?.platform_fee_usdc ?? "",
+          network_fee_xlm: tx.fee_snapshot?.stellar_base_fee_xlm ?? "",
         });
         if (!ok) await new Promise((resolve) => stringifier.once("drain", resolve));
       }
@@ -1263,7 +1277,7 @@ async function getPaymentById(req, res, next) {
 
     const result = await db.query(
       `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type,
-              tx_hash, status, created_at, ledger_close_time, fee_breakdown
+              tx_hash, status, created_at, ledger_close_time, fee_breakdown, fx_snapshot, fee_snapshot
        FROM transactions
        WHERE id = $1 AND (sender_wallet = ANY($2) OR recipient_wallet = ANY($2))`,
       [req.params.id, publicKeys],
@@ -1416,4 +1430,54 @@ async function cancelPendingEscrow(req, res, next) {
   return require("./agentEscrowController").cancel(req, res, next);
 }
 
-module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee, estimateFees, getFeeStats, getFeeRate, findReceivePathHandler, sendStrictReceivePath, getPaymentById, cancelPendingEscrow, checkSufficientBalance };
+/**
+ * GET /api/payments/:id/receipt?format=pdf|png|json  (BE-226)
+ * Sender or recipient only; everyone else gets 404.
+ */
+async function getReceipt(req, res, next) {
+  try {
+    const walletResult = await db.query("SELECT public_key FROM wallets WHERE user_id = $1", [req.user.userId]);
+    const publicKeys = walletResult.rows.map((r) => r.public_key);
+    if (publicKeys.length === 0) return res.status(404).json({ error: "Payment not found" });
+
+    const result = await db.query(
+      `SELECT t.id, t.sender_wallet, t.recipient_wallet, t.amount, t.asset, t.memo, t.tx_hash, t.status,
+              t.created_at, t.ledger_close_time, t.fee_breakdown, t.fx_snapshot, t.fee_snapshot,
+              su.full_name AS sender_name, ru.full_name AS recipient_name
+       FROM transactions t
+       LEFT JOIN wallets sw ON sw.public_key = t.sender_wallet
+       LEFT JOIN users su ON su.id = sw.user_id
+       LEFT JOIN wallets rw ON rw.public_key = t.recipient_wallet
+       LEFT JOIN users ru ON ru.id = rw.user_id
+       WHERE t.id = $1 AND (t.sender_wallet = ANY($2) OR t.recipient_wallet = ANY($2))
+       LIMIT 1`,
+      [req.params.id, publicKeys],
+    );
+    const tx = result.rows[0];
+    if (!tx) return res.status(404).json({ error: "Payment not found" });
+
+    const { toDisplayName } = require("./paymentRequestController");
+    const receiptSvc = require("../services/receipt");
+    const receipt = receiptSvc.buildReceipt(tx, {
+      fiat: req.query.fiat || "USD",
+      senderName: tx.sender_name ? toDisplayName(tx.sender_name) : null,
+      recipientName: tx.recipient_name ? toDisplayName(tx.recipient_name) : null,
+    });
+
+    const format = req.query.format || "pdf";
+    if (format === "json") return res.json(receipt);
+
+    const filename = `afripay-receipt-${receipt.reference}.${format}`;
+    const body = format === "png"
+      ? await receiptSvc.renderPng(receipt)
+      : await receiptSvc.renderPdf(receipt, receiptSvc.pickLocale(req.headers["accept-language"]));
+    res.setHeader("Content-Type", format === "png" ? "image/png" : "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.send(body);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee, estimateFees, getFeeStats, getFeeRate, findReceivePathHandler, sendStrictReceivePath, getPaymentById, cancelPendingEscrow, checkSufficientBalance, getReceipt };

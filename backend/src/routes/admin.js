@@ -14,6 +14,7 @@ const {
   getStellarNetworkStats,
   clawback,
   approveKYC,
+  getKYCDocument,
   revokeKYC,
   setWalletFlags,
   announceContractUpgrade,
@@ -115,6 +116,7 @@ router.post('/clawback',
   clawback
 );
 
+router.get('/kyc/:userId/document', param('userId').isUUID(), (req, res, next) => (validationResult(req).isEmpty() ? next() : res.status(400).json({ error: 'Invalid userId' })), getKYCDocument);
 router.post('/kyc/:userId/approve', approveKYC);
 router.post('/kyc/:userId/revoke', revokeKYC);
 

@@ -11,6 +11,7 @@ const { remindScheduledFeeConfigs } = require('./jobs/remindScheduledFeeConfigs'
 const { processLoyaltyMintQueue } = require('./jobs/loyaltyMintJob');
 const { cleanupOldNotifications } = require('./jobs/cleanupOldNotifications');
 const { checkKycDocumentExpiry } = require('./jobs/kycExpiryJob');
+const { runKycDocumentRetention } = require('./jobs/kycDocumentRetentionJob');
 const { reconcileTransactionConfirmations } = require('./jobs/transactionConfirmationJob');
 
 // Configurable cron expressions — fall back to sensible defaults
@@ -21,6 +22,7 @@ const OFFER_SYNC_CRON     = process.env.CRON_OFFER_SYNC            || '*/2 * * *
 const PUSH_RETRY_CRON     = process.env.CRON_PUSH_RETRY            || '* * * * *';   // every 60 seconds
 
 const KYC_EXPIRY_CRON      = process.env.CRON_KYC_EXPIRY            || '0 0 * * *';   // daily at midnight
+const KYC_RETENTION_CRON   = process.env.CRON_KYC_RETENTION         || '30 2 * * *';  // daily 02:30
 const ANALYTICS_REFRESH_CRON = process.env.CRON_ANALYTICS_REFRESH   || '0 * * * *';   // hourly
 const LOYALTY_MINT_CRON    = process.env.CRON_LOYALTY_MINT          || '* * * * *';   // every minute
 const FEE_CONFIG_ACTIVATE_CRON = process.env.CRON_FEE_CONFIG_ACTIVATE || '* * * * *'; // every minute
@@ -65,6 +67,8 @@ function startScheduler() {
   logger.info('Push notification retry job registered', { cron: PUSH_RETRY_CRON });
   cron.schedule(KYC_EXPIRY_CRON, safeJob('kycExpiryJob', checkKycDocumentExpiry));
   logger.info('KYC document expiry job registered', { cron: KYC_EXPIRY_CRON });
+  cron.schedule(KYC_RETENTION_CRON, safeJob('kycDocumentRetentionJob', runKycDocumentRetention));
+  logger.info('KYC document retention job registered', { cron: KYC_RETENTION_CRON });
 
   cron.schedule(LOYALTY_MINT_CRON, safeJob('loyaltyMintJob', processLoyaltyMintQueue));
   logger.info('Loyalty mint queue job registered', { cron: LOYALTY_MINT_CRON });
