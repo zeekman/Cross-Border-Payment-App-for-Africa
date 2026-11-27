@@ -92,14 +92,14 @@ function normalizeTopic(topic) {
  * Resolve the canonical event type from the raw event topics.
  * Falls back to the first topic (or 'generic') when unrecognized.
  */
-function resolveEventType(topics = []) {
+function resolveEventType(topics = [], fallbackName = null) {
   for (const topic of topics) {
     const key = normalizeTopic(topic);
     if (EVENT_TYPE_MAP[key]) {
       return EVENT_TYPE_MAP[key];
     }
   }
-  return topics[0] || 'generic';
+  return fallbackName || topics[0] || 'generic';
 }
 
 /**
@@ -488,11 +488,11 @@ async function indexContractEvents(contractId, contractName = null) {
           }
         }
 
-        // Determine event type from topics
-        const eventType = resolveEventType(eventData.topics);
+        // Canonical event type from topics (admin rotation / multisig names);
+        // otherwise the normalized event name, so unmapped events keep the
+        // lowercase name the rest of the indexer (e.g. KYC) expects.
+        const eventType = resolveEventType(eventData.topics, eventData.eventName);
         const eventSubject = extractEventSubject(eventData.topics);
-        // Determine event type from topics (normalized event name)
-        const eventType = eventData.eventName || 'generic';
 
         // Insert into database
         await db.query(

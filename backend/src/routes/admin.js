@@ -14,6 +14,7 @@ const {
   getStellarNetworkStats,
   clawback,
   approveKYC,
+  getKYCDocument,
   revokeKYC,
   setWalletFlags,
   announceContractUpgrade,
@@ -35,8 +36,19 @@ const {
   getGeoDenialsReport,
   overrideAmlFlag,
   getAmlOverrides,
+  getCorridorConfigs,
+  saveCorridorConfig,
+  getTransactionMonitoringCases,
+  updateTransactionMonitoringCase,
 } = require('../controllers/adminController');
 const { getDeadLetterNotifications } = require('../controllers/notificationController');
+const {
+  VALID_STATUSES: SUPPORT_STATUSES,
+  adminListTickets,
+  adminGetTicket,
+  adminUpdateTicket,
+  adminAddMessage,
+} = require('../controllers/supportController');
 const {
   listConfigs,
   createFeeConfig,
@@ -108,6 +120,13 @@ router.post('/clawback',
   clawback
 );
 
+router.post(
+  '/kyc/:userId/approve',
+  [body('tier').optional().isIn(['basic', 'enhanced', 'business'])],
+  validate,
+  approveKYC
+);
+router.get('/kyc/:userId/document', param('userId').isUUID(), (req, res, next) => (validationResult(req).isEmpty() ? next() : res.status(400).json({ error: 'Invalid userId' })), getKYCDocument);
 router.post('/kyc/:userId/approve', approveKYC);
 router.post('/kyc/:userId/revoke', revokeKYC);
 
@@ -206,6 +225,7 @@ router.post('/fraud-rules',
     body('parameters').isObject(),
     // BE-033: optional at creation — defaults to 'shadow' in the controller.
     body('mode').optional().isIn(['shadow', 'active']),
+    body('action').optional().isIn(['block', 'hold', 'allow']),
   ],
   validate,
   createFraudRule
@@ -217,6 +237,7 @@ router.patch('/fraud-rules/:id',
     body('parameters').optional().isObject(),
     body('is_active').optional().isBoolean(),
     body('mode').optional().isIn(['shadow', 'active']),
+    body('action').optional().isIn(['block', 'hold', 'allow']),
   ],
   validate,
   updateFraudRule
@@ -325,6 +346,39 @@ router.post(
  *         description: List of overrides
  */
 router.get('/aml/overrides', getAmlOverrides);
+
+router.get('/corridors', getCorridorConfigs);
+router.put(
+  '/corridors',
+  [
+    body('origin_country').matches(/^[A-Za-z]{2}$/),
+    body('destination_country').matches(/^[A-Za-z]{2}$/),
+    body('required_kyc_tier').isIn(['basic', 'enhanced', 'business']),
+    body('allowed_assets').isArray({ min: 1 }),
+    body('daily_limit_usd').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('single_transaction_limit_usd').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('kyc_threshold_usd').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('phone_verification_threshold_usd').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('is_active').optional().isBoolean(),
+  ],
+  validate,
+  saveCorridorConfig
+);
+
+router.get('/tm/cases', getTransactionMonitoringCases);
+router.patch(
+  '/tm/cases/:id',
+  [
+    param('id').isUUID(),
+    body('status').optional().isIn(['open', 'under_review', 'closed']),
+    body('disposition').optional().isIn(['released', 'rejected', 'confirmed', 'false_positive']),
+    body('reason').optional().isString().trim().isLength({ max: 2000 }),
+    body('assigned_to').optional({ nullable: true }).isUUID(),
+    body('str_reference').optional().isString().trim().isLength({ min: 1, max: 128 }),
+  ],
+  validate,
+  updateTransactionMonitoringCase
+);
 
 // ---------------------------------------------------------------------------
 // Fee Configuration CRUD with Audit Trail
@@ -539,6 +593,107 @@ router.patch(
   ],
   validate,
   updateFeeConfig
+);
+
+/**
+ * @swagger
+ * /api/admin/support/tickets:
+ *   get:
+ *     summary: List/filter support tickets (admin only)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: status, schema: { type: string, enum: [open, in_progress, resolved, closed] } }
+ *       - { in: query, name: type, schema: { type: string } }
+ *       - { in: query, name: q, schema: { type: string }, description: Search description or user email }
+ *       - { in: query, name: assigned_to, schema: { type: string, format: uuid } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50, maximum: 200 } }
+ *       - { in: query, name: offset, schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: Tickets
+ * /api/admin/support/tickets/{id}:
+ *   get:
+ *     summary: Get a support ticket with attachments and messages (admin only)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: integer } }
+ *     responses:
+ *       200: { description: Ticket detail }
+ *       404: { description: Ticket not found }
+ *   patch:
+ *     summary: Change a ticket's status and/or assignee (admin only, audit-logged)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: integer } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               status: { type: string, enum: [open, in_progress, resolved, closed] }
+ *               assigned_to: { type: string, format: uuid, nullable: true }
+ *     responses:
+ *       200: { description: Ticket updated }
+ *       404: { description: Ticket not found }
+ *       409: { description: Invalid status transition }
+ * /api/admin/support/tickets/{id}/messages:
+ *   post:
+ *     summary: Reply to a support ticket (admin only, audit-logged, notifies the user)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: integer } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [body]
+ *             properties:
+ *               body: { type: string, maxLength: 5000 }
+ *     responses:
+ *       201: { description: Message added }
+ *       404: { description: Ticket not found }
+ */
+const supportTicketId = param('id').isInt({ min: 1 }).withMessage('id must be a positive integer');
+router.get(
+  '/support/tickets',
+  [
+    require('express-validator').query('status').optional().isIn(SUPPORT_STATUSES),
+    require('express-validator').query('assigned_to').optional().isUUID(),
+    require('express-validator').query('q').optional().isLength({ max: 200 }),
+  ],
+  validate,
+  adminListTickets
+);
+router.get('/support/tickets/:id', [supportTicketId], validate, adminGetTicket);
+router.patch(
+  '/support/tickets/:id',
+  adminLimiter,
+  [
+    supportTicketId,
+    body('status').optional().isIn(SUPPORT_STATUSES),
+    body('assigned_to').optional({ nullable: true }).isUUID(),
+  ],
+  validate,
+  adminUpdateTicket
+);
+router.post(
+  '/support/tickets/:id/messages',
+  adminLimiter,
+  [supportTicketId, body('body').trim().notEmpty().isLength({ max: 5000 })],
+  validate,
+  adminAddMessage
 );
 
 module.exports = router;

@@ -1,8 +1,8 @@
 exports.up = (pgm) => {
   pgm.createTable('support_tickets', {
     id: { type: 'serial', primaryKey: true },
-    user_id: { type: 'integer', notNull: true, references: '"users"', onDelete: 'CASCADE' },
-    transaction_id: { type: 'integer', references: '"transactions"', onDelete: 'SET NULL' },
+    user_id: { type: 'uuid', notNull: true, references: '"users"', onDelete: 'CASCADE' },
+    transaction_id: { type: 'uuid', references: '"transactions"', onDelete: 'SET NULL' },
     type: {
       type: 'varchar(50)',
       notNull: true,

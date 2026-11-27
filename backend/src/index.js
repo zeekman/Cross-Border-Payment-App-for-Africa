@@ -36,9 +36,11 @@ const { detectTestnetReset, startFallbackDurationMonitor, stopFallbackDurationMo
 const { initEmailQueue, drainEmailQueue } = require('./services/email');
 const { initWebhookQueue, drainWebhookQueue } = require('./services/webhookQueue');
 const { startPriceRefreshJob, stopPriceRefreshJob } = require('./services/priceOracle');
+const { startTrustlineRetryJob } = require('./jobs/trustlineRetry');
 const ledgerListener = require('./services/ledgerListener');
 const { Server: SocketIOServer } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const { isAccessTokenPayload } = require('./utils/tokens');
 const { startScheduler, stopScheduler } = require('./scheduler');
 const { setSocketIO } = require('./services/notificationInbox');
 const { isJtiBlacklisted } = require('./controllers/sessionController');
@@ -73,6 +75,7 @@ const server = app.listen(PORT, () => {
       }
     }).catch(() => {});
   }
+  startTrustlineRetryJob(); // BE-200: persistent USDC trustline retries
 });
 
 // Socket.IO — scoped per authenticated user (JWT-based room)
@@ -85,7 +88,10 @@ io.use(async (socket, next) => {
   if (!token) return next(new Error('Authentication required'));
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    
+    if (!isAccessTokenPayload(payload)) {
+      return next(new Error('Invalid token'));
+    }
+
     // Check if JTI is blacklisted (token revoked via session management)
     if (payload.jti) {
       const blacklisted = await isJtiBlacklisted(payload.jti);

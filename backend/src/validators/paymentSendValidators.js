@@ -20,7 +20,7 @@ const paymentSendFieldSpec = [
     name: 'recipient_address',
     type: 'string',
     required: true,
-    description: 'Recipient Stellar wallet address (Ed25519 public key, G...)',
+    description: 'Recipient Stellar wallet address (G... public key or M... muxed account)',
   },
   {
     name: 'amount',
@@ -58,7 +58,10 @@ const paymentSendValidators = [
   body('recipient_address')
     .notEmpty().withMessage('Recipient address is required')
     .custom((value) => {
-      if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
+      if (
+        !StellarSdk.StrKey.isValidEd25519PublicKey(value) &&
+        !StellarSdk.StrKey.isValidMed25519PublicKey(value)
+      ) {
         throw new Error('Invalid Stellar wallet address');
       }
       return true;

@@ -42,7 +42,11 @@
     "sign_in": "Se connecter",
     "success": "Compte créé ! Votre portefeuille est prêt.",
     "error": "Échec de l'inscription",
-    "verify_email_notice": "Vérifiez votre e-mail pour confirmer votre compte."
+    "verify_email_notice": "Vérifiez votre e-mail pour confirmer votre compte.",
+    "phone_verified": "Numéro de téléphone vérifié avec succès !",
+    "phone_verify_failed": "Échec de la vérification du numéro de téléphone",
+    "otp_sent": "Code de vérification envoyé à votre téléphone",
+    "otp_send_failed": "Échec de l'envoi du code de vérification"
   },
   "login": {
     "title": "Bon retour",
@@ -78,7 +82,8 @@
     "reset_success_toast": "Mot de passe mis à jour. Vous pouvez vous connecter.",
     "back_to_login": "Retour à la connexion",
     "missing_token": "Lien invalide. Demandez-en un nouveau depuis la connexion.",
-    "error_generic": "Une erreur s'est produite. Réessayez."
+    "error_generic": "Une erreur s'est produite. Réessayez.",
+    "reset_success_toast": "Mot de passe réinitialisé avec succès. Vous pouvez maintenant vous connecter."
   },
   "dashboard": {
     "greeting": "Bonjour,",
@@ -163,19 +168,87 @@
   "analytics": {
     "title": "Analytique",
     "error": "Impossible de charger les analytiques",
-    "no_data": "Aucune donnée disponible"
+    "no_data": "Aucune donnée disponible",
+    "export_success": "Données analytiques exportées avec succès",
+    "export_failed": "Échec de l'exportation des données analytiques",
+    "filter_applied": "Filtre appliqué",
+    "refresh_success": "Données analytiques actualisées"
   },
   "request": {
     "title": "Demander un paiement",
     "create": "Créer une demande",
     "created": "Demande créée",
-    "error": "Impossible de créer la demande"
+    "error": "Impossible de créer la demande",
+    "invalid_amount": "Entrez un montant valide avec jusqu'à 7 décimales",
+    "link_copied": "Lien de demande copié dans le presse-papiers",
+    "copy_failed": "Échec de la copie du lien de demande",
+    "qr_generated": "Code QR de demande généré"
   },
   "scheduled": {
     "title": "Paiements programmés",
     "created": "Paiement programmé créé",
     "deleted": "Paiement programmé supprimé",
     "none": "Aucun paiement programmé"
+  },
+  "receiveMoney": {
+    "copied": "Adresse copiée dans le presse-papiers",
+    "copy_failed": "Échec de la copie de l'adresse",
+    "share_success": "Adresse partagée avec succès",
+    "share_failed": "Échec du partage de l'adresse",
+    "qr_downloaded": "Code QR téléchargé"
+  },
+  "sendMoney": {
+    "invalid_amount": "Entrez un montant valide avec jusqu'à 7 décimales",
+    "insufficient_balance": "Solde insuffisant pour ce paiement",
+    "contact_saved": "Contact enregistré avec succès"
+  },
+  "swap": {
+    "success": "Échange effectué avec succès",
+    "error": "Échec de l'échange",
+    "invalid_amount": "Entrez un montant valide avec jusqu'à 7 décimales"
+  },
+  "saveMoney": {
+    "success": "Épargne effectuée avec succès",
+    "error": "Échec de l'opération d'épargne"
+  },
+  "transactionHistory": {
+    "export_success": "Historique des transactions exporté avec succès",
+    "export_failed": "Échec de l'exportation de l'historique des transactions"
+  },
+  "profile": {
+    "updated": "Profil mis à jour avec succès",
+    "update_failed": "Échec de la mise à jour du profil",
+    "avatar_updated": "Photo de profil mise à jour",
+    "avatar_failed": "Échec de la mise à jour de la photo de profil",
+    "password_changed": "Mot de passe modifié avec succès"
+  },
+  "escrow": {
+    "created": "Séquestre créé avec succès",
+    "create_failed": "Échec de la création du séquestre",
+    "released": "Fonds du séquestre libérés avec succès",
+    "release_failed": "Échec de la libération des fonds du séquestre",
+    "cancelled": "Séquestre annulé",
+    "cancel_failed": "Échec de l'annulation du séquestre",
+    "invalid_amount": "Entrez un montant valide avec jusqu'à 7 décimales"
+  },
+  "adminDashboard": {
+    "user_approved": "Utilisateur approuvé avec succès",
+    "user_approve_failed": "Échec de l'approbation de l'utilisateur",
+    "user_suspended": "Utilisateur suspendu",
+    "user_suspend_failed": "Échec de la suspension de l'utilisateur",
+    "settings_saved": "Paramètres enregistrés avec succès",
+    "settings_save_failed": "Échec de l'enregistrement des paramètres",
+    "export_success": "Données exportées avec succès"
+  },
+  "businessSettings": {
+    "saved": "Paramètres de l'entreprise enregistrés",
+    "save_failed": "Échec de l'enregistrement des paramètres de l'entreprise",
+    "logo_updated": "Logo mis à jour avec succès",
+    "logo_failed": "Échec de la mise à jour du logo",
+    "webhook_added": "Webhook ajouté avec succès",
+    "webhook_failed": "Échec de l'ajout du webhook",
+    "api_key_regenerated": "Clé API régénérée avec succès",
+    "api_key_failed": "Échec de la régénération de la clé API"
   },
   "auth": {
     "setup_pin_title": "Définir le code PIN de transaction",

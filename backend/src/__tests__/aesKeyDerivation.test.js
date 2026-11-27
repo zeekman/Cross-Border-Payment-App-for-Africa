@@ -50,7 +50,7 @@ jest.mock('@stellar/stellar-sdk', () => {
     })),
     nativeToScVal: jest.fn(v => v),
     scValToNative: jest.fn(() => true),
-    xdr: { ScVal: { scvBytes: jest.fn(v => v) } },
+    xdr: { ScVal: { scvBytes: jest.fn(v => v), scvVoid: jest.fn(() => null) } },
   };
 });
 

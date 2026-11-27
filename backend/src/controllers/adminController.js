@@ -3,7 +3,12 @@ const db = require('../db');
 const { getStellarStats } = require('../services/stellar');
 const { attestKyc, revokeKyc } = require('../services/kycAttestation');
 const audit = require('../services/audit');
+const fs = require('fs');
+const { createDocumentDecipher } = require('../utils/symmetricEncryption');
+const { retentionYears, resolveDocumentPath } = require('../utils/kycStorage');
 const { disconnectUser } = require('../services/socketRegistry');
+const corridorConfigService = require('../services/corridorConfigService');
+const transactionMonitoring = require('../services/transactionMonitoring');
 
 // Cache for Stellar stats (10 seconds)
 let stellarStatsCache = null;
@@ -206,6 +211,10 @@ module.exports = { getStats, getUsers, getTransactions, getDailyTransactionStats
 async function approveKYC(req, res, next) {
   try {
     const { userId } = req.params;
+    const tier = req.body?.tier || 'basic';
+    if (!corridorConfigService.VALID_TIERS.includes(tier)) {
+      return res.status(400).json({ error: `tier must be one of: ${corridorConfigService.VALID_TIERS.join(', ')}` });
+    }
 
     const userResult = await db.query(
       `SELECT u.id, u.kyc_status, u.kyc_data, w.public_key
@@ -234,24 +243,69 @@ async function approveKYC(req, res, next) {
 
     // Best-effort on-chain attestation — DB update proceeds regardless
     try {
-      txHash = await attestKyc(adminPublicKey, user.public_key, userId, idType);
+      txHash = await attestKyc(adminPublicKey, user.public_key, userId, idType, { tier });
     } catch (attestErr) {
       // Log but don't block the approval
       console.error("On-chain attestation failed:", attestErr.message);
     }
 
     await db.query(
-      `UPDATE users SET kyc_status = 'verified', updated_at = NOW() WHERE id = $1`,
-      [userId]
+      `UPDATE users SET kyc_status = 'verified', kyc_tier = $2, updated_at = NOW() WHERE id = $1`,
+      [userId, tier]
+      `UPDATE users
+          SET kyc_status = 'verified',
+              kyc_retain_until = NOW() + make_interval(years => $2),
+              updated_at = NOW()
+        WHERE id = $1`,
+      [userId, retentionYears()]
     );
 
     await audit.auditLog(req, 'kyc_approved', {
       type: 'user',
       id: userId,
-      newValue: { kyc_status: 'verified', tx_hash: txHash },
+      newValue: { kyc_status: 'verified', kyc_tier: tier, tx_hash: txHash },
     });
 
-    res.json({ message: "KYC approved", tx_hash: txHash });
+    res.json({ message: "KYC approved", kyc_tier: tier, tx_hash: txHash });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/admin/kyc/:userId/document
+ * BE-225: streams the decrypted KYC document to an authorized admin.
+ */
+async function getKYCDocument(req, res, next) {
+  try {
+    const { rows } = await db.query(
+      'SELECT kyc_data, kyc_document_deleted_at FROM users WHERE id = $1',
+      [req.params.userId],
+    );
+    const data = rows[0]?.kyc_data;
+    const filePath = resolveDocumentPath(data?.document_filename);
+    if (!rows[0] || rows[0].kyc_document_deleted_at || !filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'KYC document not found' });
+    }
+
+    await audit.auditLog(req, 'kyc_document_viewed', { type: 'user', id: req.params.userId });
+
+    res.setHeader('Content-Type', data.document_mimetype || 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'inline');
+    res.setHeader('Cache-Control', 'no-store');
+
+    const source = fs.createReadStream(filePath);
+    if (!data.document_encryption) return source.pipe(res); // legacy plaintext upload
+
+    const decipher = createDocumentDecipher(data.document_encryption);
+    const onError = (err) => {
+      source.destroy();
+      if (!res.headersSent) return next(err);
+      res.destroy(err);
+    };
+    source.on('error', onError);
+    decipher.on('error', onError);
+    source.pipe(decipher).pipe(res);
   } catch (err) {
     next(err);
   }
@@ -266,7 +320,7 @@ async function revokeKYC(req, res, next) {
     const { userId } = req.params;
 
     const userResult = await db.query(
-      `SELECT u.id, u.kyc_status, w.public_key
+      `SELECT u.id, u.kyc_status, u.kyc_tier, w.public_key
        FROM users u JOIN wallets w ON w.user_id = u.id
        WHERE u.id = $1`,
       [userId]
@@ -286,7 +340,7 @@ async function revokeKYC(req, res, next) {
 
     let txHash = null;
     try {
-      txHash = await revokeKyc(adminPublicKey, user.public_key);
+      txHash = await revokeKyc(adminPublicKey, user.public_key, user.kyc_tier || 'basic');
     } catch (revokeErr) {
       console.error("On-chain revocation failed:", revokeErr.message);
     }
@@ -708,7 +762,7 @@ const { loadRules, invalidateRulesCache, getShadowRuleReport } = require('../ser
 async function getFraudRules(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, name, rule_type, parameters, is_active, mode, created_at FROM fraud_rules ORDER BY created_at ASC`
+      `SELECT id, name, rule_type, parameters, is_active, mode, action, created_at FROM fraud_rules ORDER BY created_at ASC`
     );
     res.json(rows);
   } catch (err) {
@@ -718,15 +772,15 @@ async function getFraudRules(req, res, next) {
 
 async function createFraudRule(req, res, next) {
   try {
-    const { name, rule_type, parameters, mode } = req.body;
+    const { name, rule_type, parameters, mode, action } = req.body;
     // BE-033: new rules default to 'shadow' unless explicitly created as
     // 'active', so a rule can be validated against live traffic (logged, not
     // enforced) before an admin promotes it via updateFraudRule.
     const ruleMode = mode === 'active' ? 'active' : 'shadow';
     const { rows } = await db.query(
-      `INSERT INTO fraud_rules (name, rule_type, parameters, mode)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [name, rule_type, JSON.stringify(parameters), ruleMode]
+      `INSERT INTO fraud_rules (name, rule_type, parameters, mode, action)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [name, rule_type, JSON.stringify(parameters), ruleMode, action || 'block']
     );
     await invalidateRulesCache();
     await audit.log(req.user.userId, 'fraud_rule_created', req.ip, req.headers['user-agent'],
@@ -741,7 +795,7 @@ async function createFraudRule(req, res, next) {
 async function updateFraudRule(req, res, next) {
   try {
     const { id } = req.params;
-    const { name, parameters, is_active, mode } = req.body;
+    const { name, parameters, is_active, mode, action } = req.body;
     if (mode !== undefined && mode !== 'shadow' && mode !== 'active') {
       const err = new Error("mode must be 'shadow' or 'active'");
       err.status = 400;
@@ -753,9 +807,10 @@ async function updateFraudRule(req, res, next) {
            parameters = COALESCE($2, parameters),
            is_active = COALESCE($3, is_active),
            mode = COALESCE($4, mode),
+           action = COALESCE($5, action),
            updated_at = NOW()
-       WHERE id = $5 RETURNING *`,
-      [name || null, parameters ? JSON.stringify(parameters) : null, is_active ?? null, mode || null, id]
+       WHERE id = $6 RETURNING *`,
+      [name || null, parameters ? JSON.stringify(parameters) : null, is_active ?? null, mode || null, action || null, id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Rule not found' });
     await invalidateRulesCache();
@@ -1242,6 +1297,69 @@ async function getAmlOverrides(req, res, next) {
   }
 }
 
+async function getCorridorConfigs(req, res, next) {
+  try {
+    res.json({ data: await corridorConfigService.listCorridorConfigs() });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function saveCorridorConfig(req, res, next) {
+  try {
+    const config = await corridorConfigService.upsertCorridorConfig(req.body, req.user.userId);
+    await audit.log(req.user.userId, 'corridor_config_updated', req.ip, req.headers['user-agent'], {
+      origin_country: config.origin_country,
+      destination_country: config.destination_country,
+    });
+    res.json(config);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getTransactionMonitoringCases(req, res, next) {
+  try {
+    const { status, overdue, limit, offset } = req.query;
+    if (status && !['open', 'under_review', 'closed'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid case status' });
+    }
+    const data = await transactionMonitoring.listCases({
+      status: status || null,
+      overdueOnly: overdue === 'true',
+      limit,
+      offset,
+    });
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateTransactionMonitoringCase(req, res, next) {
+  try {
+    const { disposition, reason, status, assigned_to, str_reference } = req.body;
+    const result = await transactionMonitoring.updateCase(req.params.id, {
+      disposition,
+      reason,
+      status,
+      assignedTo: assigned_to || null,
+      strReference: str_reference,
+    });
+    if (!result) return res.status(404).json({ error: 'Transaction-monitoring case not found' });
+    await audit.log(req.user.userId, 'tm_case_updated', req.ip, req.headers['user-agent'], {
+      case_id: result.id,
+      status: result.status,
+      disposition: result.disposition,
+      reason: reason || null,
+      str_reference: result.str_reference || null,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getStats,
   getUsers,
@@ -1251,6 +1369,7 @@ module.exports = {
   clawback,
   approveKYC,
   revokeKYC,
+  getKYCDocument,
   setWalletFlags,
   announceContractUpgrade,
   executeContractUpgrade,
@@ -1276,4 +1395,8 @@ module.exports = {
   // #979 (BE-032)
   overrideAmlFlag,
   getAmlOverrides,
+  getCorridorConfigs,
+  saveCorridorConfig,
+  getTransactionMonitoringCases,
+  updateTransactionMonitoringCase,
 };

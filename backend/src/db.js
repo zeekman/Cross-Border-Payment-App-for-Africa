@@ -7,13 +7,12 @@ const SLOW_QUERY_THRESHOLD_MS = 500;
 const POOL_STATS_INTERVAL_MS = parseInt(process.env.DB_POOL_STATS_INTERVAL_MS) || 60_000;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  // Maximum number of clients in the pool (default: 20)
-  max: parseInt(process.env.DB_POOL_MAX) || 20,
-  // How long a client is allowed to remain idle before being closed (default: 30000ms)
-  idleTimeoutMillis: parseInt(process.env.DB_POOL_IDLE_TIMEOUT_MS) || 30000,
-  // How long to wait for a connection before timing out (default: 5000ms)
-  connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT_MS) || 5000,
+  connectionString,
+  max, idleTimeoutMillis, connectionTimeoutMillis,
+  statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS) || 15000,
+  idle_in_transaction_session_timeout: 30000,
+  application_name: `afripay-${process.env.PROCESS_ROLE || 'api'}`,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true, ca: process.env.DB_SSL_CA } : undefined,
 });
 
 // Emitted each time a new physical client is connected to the PostgreSQL server.
@@ -63,9 +62,17 @@ pool.on('error', (err) => {
 });
 
 // Periodic pool health snapshot — unref'd so it doesn't prevent process exit.
-setInterval(() => {
-  logger.info('DB pool stats', getPoolStats());
-}, POOL_STATS_INTERVAL_MS).unref();
+// Not started under Jest: a timer firing after a test has mocked the logger
+// used to throw outside any test and crash the whole --runInBand process.
+if (process.env.NODE_ENV !== 'test') {
+  setInterval(() => {
+    try {
+      logger.info('DB pool stats', getPoolStats());
+    } catch (_) {
+      // Logging must never take the process down.
+    }
+  }, POOL_STATS_INTERVAL_MS).unref();
+}
 
 /**
  * Executes a SQL query using a client from the pool.
