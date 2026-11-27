@@ -50,7 +50,7 @@ export default function Register() {
 
     // Validate required fields
     if (!form.full_name.trim()) {
-      toast.error('Full name is required');
+      toast.error(t('register.full_name_required'));
       return;
     }
     if (getEmailError(form.email)) {
@@ -62,7 +62,7 @@ export default function Register() {
       return;
     }
     if (confirmPassword !== form.password) {
-      toast.error('Passwords do not match');
+      toast.error(t('register.passwords_do_not_match'));
       return;
     }
 
@@ -70,7 +70,7 @@ export default function Register() {
       // Validate Stellar secret key: starts with 'S', 56 chars, base32
       const isValid = /^S[A-Z2-7]{55}$/.test(secretKey);
       if (!isValid) {
-        setSecretKeyError('Invalid Stellar secret key. It must start with S and be 56 characters.');
+        setSecretKeyError(t('register.invalid_secret_key'));
         return;
       }
     }
@@ -105,13 +105,13 @@ export default function Register() {
   const handlePhoneVerify = async (e) => {
     e.preventDefault();
     if (!phoneOtp || phoneOtp.length !== 6) {
-      toast.error('Please enter a valid 6-digit OTP');
+      toast.error(t('register.invalid_otp'));
       return;
     }
     setPhoneVerifyLoading(true);
     try {
       await api.post('/auth/verify-phone', { phone: registeredPhone, otp: phoneOtp });
-      toast.success('Phone number verified successfully!');
+      toast.success(t('register.phone_verified'));
       setShowPhoneVerify(false);
       const redirect = sessionStorage.getItem('afripay_redirect');
       if (redirect) {
@@ -121,7 +121,7 @@ export default function Register() {
         navigate('/login', { state: { emailVerificationRequired: true } });
       }
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to verify phone. Please check your OTP and try again.');
+      toast.error(err.response?.data?.error || t('register.phone_verify_failed'));
     } finally {
       setPhoneVerifyLoading(false);
     }
@@ -145,7 +145,7 @@ export default function Register() {
         </h2>
         <p className="text-gray-600 dark:text-gray-400 mb-8">{t('register.subtitle')}</p>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4" data-testid="register-form">
           <div>
             <label className="text-sm text-gray-600 dark:text-gray-400 mb-1 block">
               {t('register.full_name')}
@@ -153,6 +153,7 @@ export default function Register() {
             <input
               type="text"
               required
+              data-testid="register-full-name"
               placeholder="[Full Name]"
               value={form.full_name}
               onChange={(e) => setForm({ ...form, full_name: e.target.value })}
@@ -161,7 +162,7 @@ export default function Register() {
             />
             {touched.full_name && !form.full_name.trim() && (
               <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
-                <AlertCircle size={12} /> Full name is required
+                <AlertCircle size={12} /> {t('register.full_name_required')}
               </p>
             )}
           </div>
@@ -173,6 +174,7 @@ export default function Register() {
             <input
               type="email"
               required
+              data-testid="register-email"
               placeholder="[email]"
               value={form.email}
               onChange={(e) => setForm({ ...form, email: e.target.value })}
@@ -194,6 +196,7 @@ export default function Register() {
             </label>
             <input
               type="tel"
+              data-testid="register-phone"
               placeholder="+234..."
               value={form.phone}
               onChange={(e) => setForm({ ...form, phone: e.target.value })}
@@ -210,6 +213,7 @@ export default function Register() {
                 type={showPass ? 'text' : 'password'}
                 required
                 minLength={policy.min_length}
+                data-testid="register-password"
                 placeholder={t('register.password_placeholder')}
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
@@ -260,12 +264,13 @@ export default function Register() {
           {/* Confirm password (issue #656) */}
           <div>
             <label className="text-sm text-gray-600 dark:text-gray-400 mb-1 block">
-              Confirm password
+              {t('register.confirm_password')}
             </label>
             <div className="relative">
               <input
                 type={showPass ? 'text' : 'password'}
-                placeholder="Re-enter your password"
+                data-testid="register-confirm-password"
+                placeholder={t('register.confirm_password_placeholder')}
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 className={`w-full bg-white dark:bg-gray-800 border rounded-xl px-4 py-3 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors pr-12 shadow-sm ${
@@ -282,13 +287,14 @@ export default function Register() {
             </div>
             {passwordsMismatch && (
               <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
-                <AlertCircle size={12} /> Passwords do not match
+                <AlertCircle size={12} /> {t('register.passwords_do_not_match')}
               </p>
             )}
           </div>
 
           <button
             type="submit"
+            data-testid="register-submit"
             disabled={submitDisabled}
             className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3.5 rounded-xl transition-colors mt-2"
           >
@@ -307,18 +313,19 @@ export default function Register() {
               }}
               className="w-full flex items-center justify-between px-4 py-3 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
             >
-              <span>Already have a Stellar wallet? Import it</span>
+              <span>{t('register.import_wallet')}</span>
               {showImport ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
             </button>
             {showImport && (
               <div className="px-4 pb-4 space-y-2 bg-gray-50 dark:bg-gray-800/50">
                 <p className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/30 rounded-lg p-2">
-                  ⚠️ Never share your secret key.
+                  {t('register.secret_key_warning')}
                 </p>
                 <div className="relative">
                   <input
                     type={showSecretKey ? 'text' : 'password'}
-                    placeholder="Stellar secret key (starts with S…)"
+                    data-testid="register-secret-key"
+                    placeholder={t('register.secret_key_placeholder')}
                     value={secretKey}
                     onChange={(e) => {
                       setSecretKey(e.target.value);
@@ -330,7 +337,7 @@ export default function Register() {
                     type="button"
                     onClick={() => setShowSecretKey((v) => !v)}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-white transition-colors"
-                    aria-label={showSecretKey ? 'Hide secret key' : 'Show secret key'}
+                    aria-label={showSecretKey ? t('register.hide_secret_key') : t('register.show_secret_key')}
                   >
                     {showSecretKey ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
@@ -351,13 +358,13 @@ export default function Register() {
 
       {/* Phone Verification Step (issue #478) */}
       {showPhoneVerify && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4" data-testid="phone-verify-modal">
           <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 w-full max-w-sm space-y-4">
             <div className="text-center">
               <Phone size={32} className="text-primary-500 mx-auto mb-3" />
-              <h3 className="text-lg font-bold text-gray-900 dark:text-white">Verify Your Phone</h3>
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white">{t('register.verify_phone_title')}</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
-                We sent a 6-digit OTP to {registeredPhone}
+                {t('register.otp_sent_to', { phone: registeredPhone })}
               </p>
             </div>
             <form onSubmit={handlePhoneVerify} className="space-y-4">
@@ -367,31 +374,34 @@ export default function Register() {
                 pattern="\d{6}"
                 maxLength={6}
                 required
-                placeholder="Enter 6-digit OTP"
+                data-testid="phone-otp-input"
+                placeholder={t('register.otp_placeholder')}
                 value={phoneOtp}
                 onChange={(e) => setPhoneOtp(e.target.value.replace(/\D/g, ''))}
                 className="w-full bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-white text-center text-xl font-mono tracking-widest placeholder-gray-400 focus:outline-none focus:border-primary-500"
               />
               <p className="text-xs text-gray-500 dark:text-gray-400 text-center">
-                For security, please log in first to complete phone verification.
+                {t('register.phone_verify_security_note')}
               </p>
               <div className="flex gap-3">
                 <button
                   type="button"
+                  data-testid="phone-verify-skip"
                   onClick={() => {
                     setShowPhoneVerify(false);
                     navigate('/login');
                   }}
                   className="flex-1 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-900 dark:text-white text-sm font-medium py-2.5 rounded-xl transition-colors"
                 >
-                  Skip for Now
+                  {t('register.skip_for_now')}
                 </button>
                 <button
                   type="submit"
+                  data-testid="phone-verify-submit"
                   disabled={phoneVerifyLoading || phoneOtp.length !== 6}
                   className="flex-1 bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors"
                 >
-                  {phoneVerifyLoading ? 'Verifying…' : 'Verify & Login'}
+                  {phoneVerifyLoading ? t('register.verifying') : t('register.verify_and_login')}
                 </button>
               </div>
             </form>

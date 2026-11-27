@@ -100,7 +100,8 @@ async function listEscrows(req, res, next) {
     const listResult = await db.query(
       `SELECT id, contract_escrow_id, sender_wallet, recipient_wallet, agent_wallet,
               amount, asset, fee_bps, status, tx_hash, confirm_tx_hash,
-              created_at, confirmed_at
+              created_at, confirmed_at, expires_at, payout_confirmed,
+              cancellable_at
          FROM agent_escrows
          ${where}
         ORDER BY created_at DESC
@@ -108,7 +109,31 @@ async function listEscrows(req, res, next) {
       params
     );
 
-    res.json({ escrows: listResult.rows, page, limit, total });
+    // Derive the contract-enforced cancellation window for each escrow so the
+    // frontend can show a countdown and disable Cancel until it elapses.
+    // `cancellable_at` is preferred when the index has it; otherwise fall back
+    // to `expires_at`, then to created_at + the 48 h cancel hold period.
+    const CANCEL_HOLD_PERIOD_MS = 48 * 60 * 60 * 1000;
+    const escrows = listResult.rows.map((row) => {
+      const createdAt = row.created_at ? new Date(row.created_at) : null;
+      const cancellableAt = row.cancellable_at
+        ? new Date(row.cancellable_at)
+        : row.expires_at
+        ? new Date(row.expires_at)
+        : createdAt
+        ? new Date(createdAt.getTime() + CANCEL_HOLD_PERIOD_MS)
+        : null;
+
+      return {
+        ...row,
+        status: row.status,
+        payout_confirmed: Boolean(row.payout_confirmed),
+        expires_at: row.expires_at || null,
+        cancellable_at: cancellableAt ? cancellableAt.toISOString() : null,
+      };
+    });
+
+    res.json({ escrows, page, limit, total });
   } catch (err) {
     next(err);
   }

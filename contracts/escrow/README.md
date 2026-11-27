@@ -179,6 +179,8 @@ Panics / Errors:
 - `Amount must be positive` if `amount <= 0`.
 - `Escrow {id} not found` if the escrow does not exist.
 - `Escrow is not in pending state` if the escrow is already released or cancelled.
+- `delivery not confirmed` if the agent has not called `confirm_delivery`.
+- `release challenge window has not elapsed` if called inside the configured challenge window.
 - `Escrow has expired` if the current ledger timestamp is greater than or equal to `expires_at`.
 - Panics from the underlying USDC transfer if the sender has insufficient allowance or balance.
 
@@ -196,6 +198,12 @@ fn release_escrow(env: Env, agent: Address, escrow_id: u64)
 
 Description:
 - Releases escrow funds to the assigned agent and records fees.
+- Requires a prior `confirm_delivery` by the agent (SC-210), so every release
+  has a `DeliveryConfirmed` event and the post-confirmation dispute rules apply.
+- If a release challenge window is configured with
+  `set_release_challenge_period(admin, secs)` (default `0`, max 7 days), release
+  is blocked until that many seconds after `confirm_delivery`. During the window
+  the recipient may still call `dispute_escrow`.
 
 Parameters:
 - `agent` (`Address`) - must be the escrow-assigned agent and authorize the call.
@@ -761,8 +769,8 @@ async function createEscrow(senderKeypair, recipientAddress, agentAddress, amoun
 1. Deploy and initialize the contract with `initialize(admin, usdc_address)`.
 2. Call `create_escrow(sender, recipient, agent, amount, max_fee_bps)`.
 3. Optionally call `deposit(sender, escrow_id, amount)` to add funds.
-4. Call `confirm_delivery(agent, escrow_id)` after the agent confirms off-chain payout.
-5. Call `partial_release(agent, escrow_id, amount)` to release funds in installments, or `release_escrow(agent, escrow_id)` to release the remaining balance.
+4. Call `confirm_delivery(agent, escrow_id)` after the agent confirms off-chain payout. This is required before `release_escrow`.
+5. Call `partial_release(agent, escrow_id, amount)` to release funds in installments, or `release_escrow(agent, escrow_id)` (after `confirm_delivery` and any configured challenge window) to release the remaining balance.
 6. Call `cancel_escrow(sender, escrow_id)` to refund pending escrow before delivery confirmation.
 7. Admin calls `withdraw_fees(admin, amount)` to collect fees.
 

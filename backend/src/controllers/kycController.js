@@ -47,6 +47,8 @@ async function submitKYC(req, res, next) {
       date_of_birth,
       document_filename: req.file.filename,
       document_mimetype: req.file.mimetype,
+      // BE-225: envelope-encryption metadata { algorithm, iv, tag, wrapped_key }
+      document_encryption: req.kycDocument?.encryption || null,
       submitted_at: new Date().toISOString(),
     };
 

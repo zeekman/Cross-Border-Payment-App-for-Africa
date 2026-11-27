@@ -35,10 +35,24 @@ const {
   webauthnLoginOptions,
   webauthnVerify,
   completeOnboarding,
+  resendPhoneOTP,
+  FORGOT_PASSWORD_MESSAGE,
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
+const phoneVerificationAuth = require('../middleware/phoneVerificationAuth');
+const { phoneOtpLimiter } = require('../middleware/rateLimiter');
 const geoRestriction = require('../middleware/geoRestriction');
 const { verifyCsrf } = require('../middleware/csrf');
+const {
+  authLimiter,
+  createEmailSendLimiter,
+  emailSendLimiter,
+  tokenVerifyLimiter,
+  secondFactorLimiter,
+  phoneOtpVerifyLimiter,
+  smsSendLimiter,
+  authActionLimiter,
+} = require('../middleware/rateLimiter');
 const { listSessions, revokeSession, revokeAllSessions } = require('../controllers/sessionController');
 
 const { getPolicy, checkPasswordStrength } = require('../services/passwordPolicy');
@@ -60,10 +74,16 @@ const passwordStrengthCheck = (message) => (value) => {
 
 // Public config: the exact policy the backend enforces, served for the
 // frontend to derive its validation from (single source of truth).
+// Every route below mounts an explicit rate limiter (BE-194). forgot-password
+// answers a throttled request with its usual generic 200 so the limiter can't
+// be used to probe whether an email is registered.
+const forgotPasswordLimiter = createEmailSendLimiter({ limitedResponse: FORGOT_PASSWORD_MESSAGE });
+
 router.get('/password-policy', (req, res) => res.json(getPolicy()));
 
 router.post(
   '/register',
+  authLimiter,
   geoRestriction,
   [
     body('full_name').trim().notEmpty().withMessage('Full name is required'),
@@ -78,6 +98,7 @@ router.post(
 
 router.post(
   '/login',
+  authLimiter,
   geoRestriction,
   [body('email').isEmail().normalizeEmail(), body('password').notEmpty()],
   validate,
@@ -86,6 +107,7 @@ router.post(
 
 router.post(
   '/forgot-password',
+  forgotPasswordLimiter,
   [body('email').isEmail().normalizeEmail()],
   validate,
   forgotPassword
@@ -93,6 +115,7 @@ router.post(
 
 router.post(
   '/reset-password',
+  tokenVerifyLimiter,
   [
     body('token').trim().notEmpty().withMessage('Reset token is required'),
     body('password')
@@ -103,29 +126,68 @@ router.post(
   resetPassword
 );
 
-router.get('/reset-password/validate', validateResetToken);
+router.get('/reset-password/validate', tokenVerifyLimiter, validateResetToken);
 
-router.post('/refresh', verifyCsrf, refresh);
-router.post('/logout', verifyCsrf, logout);
+router.post('/refresh', authActionLimiter, verifyCsrf, refresh);
+router.post('/logout', authActionLimiter, verifyCsrf, logout);
 
 // Token-bearing endpoints: POST is preferred; GET variants are deprecated.
 const noReferrer = (_req, res, next) => { res.set('Referrer-Policy', 'no-referrer'); next(); };
 const deprecatedGet = (_req, res, next) => { res.set('Deprecation', 'true'); next(); };
-router.post('/verify-email', noReferrer, [body('token').trim().notEmpty()], validate, verifyEmail);
-router.get('/verify-email', noReferrer, deprecatedGet, verifyEmail);
+router.post('/verify-email', tokenVerifyLimiter, noReferrer, [body('token').trim().notEmpty()], validate, verifyEmail);
+router.get('/verify-email', tokenVerifyLimiter, noReferrer, deprecatedGet, verifyEmail);
 router.post(
   '/resend-verification',
+  emailSendLimiter,
   [body('email').isEmail().normalizeEmail()],
   validate,
   resendVerification
 );
+// BE-197: accepts the phone_verification_token from /register (no session
+// exists yet at that point) or a normal access token.
 router.post(
   '/verify-phone',
+  phoneVerificationAuth,
+  phoneOtpLimiter,
   authMiddleware,
+  secondFactorLimiter,
+  phoneOtpVerifyLimiter,
   [body('otp').matches(/^\d{6}$/).withMessage('OTP must be 6 digits')],
   validate,
   verifyPhone
 );
+/**
+ * @openapi
+ * /api/auth/phone/resend-otp:
+ *   post:
+ *     summary: Resend the phone verification OTP
+ *     description: >
+ *       Issues a new 6-digit OTP to the user's unverified phone number. The
+ *       previous code stops working and the failed-attempt counter resets.
+ *       Limited to one send per 60 seconds, 5 per day per user and 10 per
+ *       day per phone number across accounts.
+ *     tags: [Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: OTP sent
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message: { type: string }
+ *                 resend_available_at: { type: string, format: date-time }
+ *                 expires_at: { type: string, format: date-time }
+ *       400:
+ *         description: No phone on file (PHONE_NOT_SET) or already verified (PHONE_ALREADY_VERIFIED)
+ *       429:
+ *         description: Cooldown (OTP_RESEND_COOLDOWN) or daily cap (OTP_RESEND_LIMIT) hit; body includes resend_available_at
+ *       502:
+ *         description: SMS provider failed to deliver the code (SMS_DELIVERY_FAILED)
+ */
+router.post('/phone/resend-otp', authMiddleware, smsSendLimiter, resendPhoneOTP);
 router.get('/me', authMiddleware, getMe);
 router.patch(
   '/me',
@@ -134,9 +196,11 @@ router.patch(
   validate,
   updateProfile
 );
+router.patch('/me', authMiddleware, authActionLimiter, updateProfile);
 router.post(
   '/change-email',
   authMiddleware,
+  emailSendLimiter,
   [
     body('new_email').isEmail().normalizeEmail().withMessage('Valid email required'),
     body('password').notEmpty().withMessage('Password is required'),
@@ -144,14 +208,15 @@ router.post(
   validate,
   changeEmail
 );
-router.post('/verify-email-change', noReferrer, [body('token').trim().notEmpty()], validate, verifyEmailChange);
-router.get('/verify-email-change', noReferrer, deprecatedGet, verifyEmailChange);
+router.post('/verify-email-change', tokenVerifyLimiter, noReferrer, [body('token').trim().notEmpty()], validate, verifyEmailChange);
+router.get('/verify-email-change', tokenVerifyLimiter, noReferrer, deprecatedGet, verifyEmailChange);
 router.get('/activity', authMiddleware, getActivity);
-router.post('/onboarding-completed', authMiddleware, completeOnboarding);
+router.post('/onboarding-completed', authMiddleware, authActionLimiter, completeOnboarding);
 
 router.post(
   '/set-pin',
   authMiddleware,
+  authActionLimiter,
   [body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')],
   validate,
   setPIN
@@ -160,6 +225,8 @@ router.post(
 router.post(
   '/verify-pin',
   authMiddleware,
+  (req, res, next) => secondFactorLimiter(req, res, next),
+  secondFactorLimiter,
   [body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')],
   validate,
   verifyPIN
@@ -168,6 +235,7 @@ router.post(
 router.post(
   '/biometric/register',
   authMiddleware,
+  authActionLimiter,
   [
     body('credential_id').notEmpty().withMessage('credential_id is required'),
     body('device_label').optional().isString().trim(),
@@ -181,16 +249,18 @@ router.get('/biometric/status', authMiddleware, getBiometricStatus);
 router.post(
   '/biometric/disable',
   authMiddleware,
+  authActionLimiter,
   [body('credential_id').optional().isString()],
   validate,
   disableBiometric
 );
 
-router.post('/2fa/setup', authMiddleware, setup2FA);
+router.post('/2fa/setup', authMiddleware, authActionLimiter, setup2FA);
 
 router.post(
   '/2fa/verify',
   authMiddleware,
+  secondFactorLimiter,
   [body('totp_code').matches(/^\d{6}$/).withMessage('TOTP code must be 6 digits')],
   validate,
   verify2FA
@@ -199,6 +269,7 @@ router.post(
 router.post(
   '/2fa/disable',
   authMiddleware,
+  secondFactorLimiter,
   [body('password').notEmpty().withMessage('Password is required')],
   validate,
   disable2FA
@@ -207,12 +278,79 @@ router.post(
 router.post(
   '/2fa/backup-codes/regenerate',
   authMiddleware,
+  secondFactorLimiter,
   [body('totp_code').matches(/^\d{6}$/).withMessage('TOTP code must be 6 digits')],
   validate,
   regenerateBackupCodes
 );
 
 router.get('/2fa/backup-codes/count', authMiddleware, getBackupCodeCount);
+const rateLimit = require('express-rate-limit');
+const {
+  getPinPolicy,
+  webauthnStepUpOptions,
+  webauthnStepUpVerify,
+} = require('../controllers/securityController');
+
+// Second-factor limiter: protects PIN / WebAuthn step-up endpoints from brute force.
+const secondFactorLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: parseInt(process.env.SECOND_FACTOR_RATE_LIMIT, 10) || 10,
+  keyGenerator: (req) => req.user?.userId || req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+
+/**
+ * @openapi
+ * /api/auth/pin-policy:
+ *   get:
+ *     summary: PIN rules (min length and weak-PIN rules) for client-side validation
+ *     tags: [Auth]
+ *     responses:
+ *       200: { description: Policy with min_length, max_length and rules[] }
+ */
+router.get('/pin-policy', getPinPolicy);
+
+/**
+ * @openapi
+ * /api/auth/webauthn/step-up/options:
+ *   post:
+ *     summary: Start biometric step-up — returns WebAuthn assertion options (challenge valid 2 min, single use)
+ *     tags: [Auth]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               transaction: { type: object, properties: { amount: { type: string }, recipient: { type: string } } }
+ *     responses:
+ *       200: { description: PublicKeyCredentialRequestOptions (userVerification required) }
+ *       404: { description: No credential registered }
+ * /api/auth/webauthn/step-up/verify:
+ *   post:
+ *     summary: Verify a WebAuthn assertion (UV flag required) and receive a step-up token
+ *     description: Send the returned token as X-Step-Up-Token on money-moving routes.
+ *     tags: [Auth]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [assertion]
+ *             properties:
+ *               assertion: { type: object, description: AuthenticationResponseJSON }
+ *               transaction: { type: object, description: Must match the transaction bound in options }
+ *     responses:
+ *       200: { description: "{ step_up_token }" }
+ *       401: { description: Invalid, replayed or non-UV assertion }
+ */
+router.post('/webauthn/step-up/options', authMiddleware, secondFactorLimiter, webauthnStepUpOptions);
+router.post('/webauthn/step-up/verify', authMiddleware, secondFactorLimiter, webauthnStepUpVerify);
 
 // Avatar upload — 5 MB limit, memory storage (magic bytes checked in controller)
 const avatarUpload = multer({
@@ -228,6 +366,7 @@ const avatarUpload = multer({
 router.patch(
   '/password',
   authMiddleware,
+  secondFactorLimiter,
   [
     body('current_password').notEmpty().withMessage('Current password is required'),
     body('new_password')
@@ -241,20 +380,22 @@ router.patch(
 router.post(
   '/avatar',
   authMiddleware,
+  authActionLimiter,
   avatarUpload.single('avatar'),
   uploadAvatar
 );
 
 // WebAuthn / biometric credentials
-router.post('/webauthn/register/options', authMiddleware, webauthnRegisterOptions);
-router.post('/webauthn/register', authMiddleware, webauthnRegister);
+router.post('/webauthn/register/options', authMiddleware, authActionLimiter, webauthnRegisterOptions);
+router.post('/webauthn/register', authMiddleware, authActionLimiter, webauthnRegister);
 router.post(
   '/webauthn/verify/options',
+  authActionLimiter,
   [body('email').isEmail().normalizeEmail()],
   validate,
   webauthnLoginOptions
 );
-router.post('/webauthn/verify', webauthnVerify);
+router.post('/webauthn/verify', secondFactorLimiter, webauthnVerify);
 
 // Session management
 router.get('/sessions', authMiddleware, listSessions);

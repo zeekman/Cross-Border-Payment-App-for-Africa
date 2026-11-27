@@ -1,0 +1,14 @@
+[package]
+name = "afripay-types"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Shared `#[contracttype]` definitions and `#[contractclient]` interfaces for
+# cross-contract calls between AfriPay contracts (SC-214). Library only: it is
+# linked into the contracts, never deployed on its own.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }

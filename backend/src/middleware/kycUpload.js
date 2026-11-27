@@ -9,11 +9,12 @@ const {
   cleanupFile,
   computeSha256,
 } = require("../utils/fileValidation");
+const { encryptDocument } = require("../utils/symmetricEncryption");
 
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "application/pdf"];
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
-const uploadDir = path.resolve(__dirname, "../../../uploads/kyc");
+const { KYC_UPLOAD_DIR: uploadDir } = require("../utils/kycStorage");
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
@@ -78,11 +79,30 @@ function kycUploadMiddleware(req, res, next) {
       });
     }
 
+    // BE-225: encrypt at rest. The plaintext only exists on disk for the
+    // duration of validation/scanning, then is replaced by ciphertext.
+    let encryption;
+    let sha256;
+    try {
+      sha256 = await computeSha256(req.file.path);
+      const { ciphertext, ...meta } = encryptDocument(await fs.promises.readFile(req.file.path));
+      const encPath = `${req.file.path}.enc`;
+      await fs.promises.writeFile(encPath, ciphertext, { mode: 0o600 });
+      cleanupFile(req.file.path);
+      req.file.path = encPath;
+      req.file.filename = path.basename(encPath);
+      encryption = { algorithm: "aes-256-gcm", ...meta };
+    } catch (encErr) {
+      cleanupFile(req.file.path);
+      return next(encErr);
+    }
+
     // Attach metadata for the controller
     req.kycDocument = {
       path: req.file.path,
       originalName: req.file.originalname,
-      sha256Promise: computeSha256(req.file.path),
+      sha256Promise: Promise.resolve(sha256),
+      encryption,
     };
 
     next();

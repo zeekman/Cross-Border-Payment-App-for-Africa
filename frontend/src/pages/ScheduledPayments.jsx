@@ -64,7 +64,7 @@ export default function ScheduledPayments() {
       const assetBalance = balances.find(b => b.asset === form.asset)?.balance || 0;
 
       if (parseFloat(form.amount) > parseFloat(assetBalance)) {
-        toast.error(`Insufficient ${form.asset} balance`);
+        toast.error(t('scheduled.insufficient_balance', { asset: form.asset, defaultValue: 'Insufficient {{asset}} balance' }));
         return;
       }
     } catch {
@@ -136,10 +136,11 @@ export default function ScheduledPayments() {
       </div>
 
       {showForm && (
-        <form onSubmit={handleCreate} className="bg-gray-900 rounded-xl p-4 mb-6 space-y-3">
+        <form onSubmit={handleCreate} data-testid="scheduled-form" className="bg-gray-900 rounded-xl p-4 mb-6 space-y-3">
           <input
             type="text"
-            placeholder="Recipient wallet"
+            data-testid="scheduled-recipient"
+            placeholder={t('scheduled.recipient_placeholder', 'Recipient wallet')}
             value={form.recipient_wallet}
             onChange={e => setForm({ ...form, recipient_wallet: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-500 text-sm"
@@ -147,7 +148,8 @@ export default function ScheduledPayments() {
           <div className="flex gap-2">
             <input
               type="number"
-              placeholder="Amount"
+              data-testid="scheduled-amount"
+              placeholder={t('scheduled.amount_placeholder', 'Amount')}
               min="0.0000001"
               step="any"
               value={form.amount}
@@ -155,6 +157,7 @@ export default function ScheduledPayments() {
               className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-500 text-sm"
             />
             <select
+              data-testid="scheduled-asset"
               value={form.asset}
               onChange={e => setForm({ ...form, asset: e.target.value })}
               className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
@@ -165,28 +168,30 @@ export default function ScheduledPayments() {
             </select>
           </div>
           <select
+            data-testid="scheduled-frequency"
             value={form.frequency}
             onChange={e => setForm({ ...form, frequency: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
           >
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
+            <option value="daily">{t('scheduled.frequency_daily', 'Daily')}</option>
+            <option value="weekly">{t('scheduled.frequency_weekly', 'Weekly')}</option>
+            <option value="monthly">{t('scheduled.frequency_monthly', 'Monthly')}</option>
           </select>
           <input
             type="text"
-            placeholder="Memo (optional)"
+            data-testid="scheduled-memo"
+            placeholder={t('scheduled.memo_placeholder', 'Memo (optional)')}
             maxLength={28}
             value={form.memo}
             onChange={e => setForm({ ...form, memo: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-500 text-sm"
           />
           <div className="flex gap-2">
-            <button type="submit" className="flex-1 bg-primary-500 hover:bg-primary-600 text-white py-2 rounded-lg text-sm font-medium">
-              Create
+            <button type="submit" data-testid="scheduled-submit" className="flex-1 bg-primary-500 hover:bg-primary-600 text-white py-2 rounded-lg text-sm font-medium">
+              {t('scheduled.create', 'Create')}
             </button>
             <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white py-2 rounded-lg text-sm">
-              Cancel
+              {t('common.cancel', 'Cancel')}
             </button>
           </div>
         </form>
@@ -232,14 +237,14 @@ export default function ScheduledPayments() {
                       p.active ? 'bg-green-500/20 text-green-400' : 'bg-gray-700 text-gray-400'
                     }`}
                   >
-                    {p.active ? 'Active' : 'Inactive'}
+                    {p.active ? t('scheduled.active', 'Active') : t('scheduled.inactive', 'Inactive')}
                   </button>
                   <button onClick={() => handleDelete(p.id)} className="text-red-400 hover:text-red-300">
                     <Trash2 size={16} />
                   </button>
                 </div>
               </div>
-              <p className="text-gray-500 text-xs">{p.frequency} • Next: {new Date(p.next_run_at).toLocaleDateString()}</p>
+              <p className="text-gray-500 text-xs">{p.frequency} • {t('scheduled.next_run', 'Next')}: {new Date(p.next_run_at).toLocaleDateString()}</p>
             </div>
           ))}
         </div>
