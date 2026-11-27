@@ -57,6 +57,19 @@
       "^@sentry/react$": "<rootDir>/src/__mocks__/@sentry/react.js",
       "^@ledgerhq/hw-transport-webusb$": "<rootDir>/src/__mocks__/@ledgerhq/hw-transport-webusb.js",
       "^@ledgerhq/hw-app-str$": "<rootDir>/src/__mocks__/@ledgerhq/hw-app-str.js"
+    },
+    "collectCoverageFrom": [
+      "src/pages/**/*.{js,jsx}",
+      "!src/pages/**/*.test.{js,jsx}",
+      "!src/pages/**/__tests__/**"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "lines": 60
+      },
+      "./src/pages/": {
+        "lines": 60
+      }
     }
   },
   "browserslist": {

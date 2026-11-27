@@ -273,12 +273,20 @@ jobs:
           cargo audit --file "$(dirname "$manifest")/Cargo.lock" || true
         done
 
+  # FE-219: End-to-end coverage for every step-up money flow (send, path send,
+  # swap, escrow create/cancel, batch, savings deposit, scheduled create).
+  # This job is a REQUIRED status check on `main` (see branch protection); it
+  # runs against the real backend + postgres + redis via docker-compose so that
+  # regressions like FE-184 (missing X-Step-Up-Token) and FE-185/FE-186 (merge
+  # collisions) fail CI instead of shipping.
   e2e:
     name: End-to-End Tests
     runs-on: ubuntu-latest
-    # Only run E2E tests on PRs to main to save CI resources
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    
+    # Run on every PR to main and on pushes to main so the required check is
+    # always reported (a skipped required check blocks merges indefinitely).
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+    timeout-minutes: 30
+
     services:
       postgres:
         image: postgres:16
@@ -292,7 +300,7 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      
+
       redis:
         image: redis:7
         ports:
@@ -303,39 +311,54 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+    env:
+      # Testnet-only helpers (/dev/fund-wallet) are gated on this; `mock` keeps
+      # CI hermetic while still exercising the real HTTP + header plumbing.
+      STELLAR_NETWORK: mock
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cbpa_test
+      REDIS_URL: redis://localhost:6379/1
+      JWT_SECRET: ci-e2e-jwt-secret
+      STEP_UP_TOKEN_SECRET: ci-e2e-step-up-secret
+      E2E_BASE_URL: http://localhost:3000
+      E2E_API_URL: http://localhost:5000/api
+      E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cbpa_test
+      E2E_REDIS_URL: redis://localhost:6379/1
+      CI: true
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Node 22.x
       uses: actions/setup-node@v4
       with:
         node-version: 22.x
         cache: 'npm'
         cache-dependency-path: '**/package-lock.json'
-    
+
     - name: Install backend dependencies
       run: |
         cd backend
         npm ci
-    
+
     - name: Install frontend dependencies
       run: |
         cd frontend
         npm ci
-    
+
     - name: Install E2E dependencies
       run: |
         cd e2e
         npm ci
-        npx playwright install --with-deps
-    
+        npx playwright install --with-deps chromium
+
     - name: Setup test database
       run: |
         cd backend
         npm run migrate
       env:
         DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cbpa_test
-    
+
     - name: Build frontend for E2E
       run: |
         cd frontend
@@ -345,11 +368,26 @@ jobs:
         # (api.js calls paths like /auth/login which resolve to /api/auth/login).
         REACT_APP_API_URL: http://localhost:5000/api
         REACT_APP_STELLAR_NETWORK: testnet
-    
+
     - name: Check e2e selectors and routes
       run: |
         cd e2e
         npm run check:selectors
+
+    - name: Start backend + frontend (docker-compose)
+      run: |
+        docker compose -f docker-compose.e2e.yml up -d --build
+        # Wait for the backend health endpoint before running specs.
+        for i in $(seq 1 60); do
+          if curl -fsS http://localhost:5000/api/health >/dev/null 2>&1; then
+            echo "backend is healthy"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "backend failed to become healthy" >&2
+        docker compose -f docker-compose.e2e.yml logs
+        exit 1
 
     - name: Run E2E tests
       run: |
@@ -357,10 +395,15 @@ jobs:
         npm run test:e2e
       env:
         E2E_BASE_URL: http://localhost:3000
+        E2E_API_URL: http://localhost:5000/api
         E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cbpa_test
         E2E_REDIS_URL: redis://localhost:6379/1
         CI: true
-    
+
+    - name: Dump service logs on failure
+      if: failure()
+      run: docker compose -f docker-compose.e2e.yml logs --no-color
+
     - name: Upload E2E test results
       uses: actions/upload-artifact@v4
       if: always()
@@ -370,11 +413,23 @@ jobs:
           e2e/test-results/
           e2e/playwright-report/
         retention-days: 7
-    
-    - name: Upload E2E screenshots
+
+    - name: Upload Playwright traces (failure)
+      uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: e2e-traces
+        path: e2e/test-results/**/trace.zip
+        retention-days: 7
+
+    - name: Upload E2E screenshots (failure)
       uses: actions/upload-artifact@v4
       if: failure()
       with:
         name: e2e-screenshots
         path: e2e/test-results/screenshots/
         retention-days: 7
+
+    - name: Tear down docker-compose
+      if: always()
+      run: docker compose -f docker-compose.e2e.yml down -v
