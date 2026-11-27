@@ -15,11 +15,12 @@ const {
   sendStrictReceivePathPayment,
   getBalance,
 } = require("../services/stellar");
+const { baseAccountAddress } = require("../utils/stellarAddress");
 const webhook = require("../services/webhook");
 const cache = require("../utils/cache");
 const { sendTransactionEmail, sendEscrowCancelledEmail } = require("../services/email");
 const { persistAndBroadcast } = require("../services/notificationInbox");
-const { checkVelocity, checkDailyLimit, checkFraud, logFraudBlock } = require("../services/fraudDetection");
+const { checkVelocity, checkFraud, logFraudBlock } = require("../services/fraudDetection");
 const { withLock } = require("../utils/distributedLock");
 const { parseHistoryFrom, parseHistoryTo, normalizeAsset, validateDateRange } = require("../utils/historyQuery");
 const { isMemoRequired } = require("../services/memoRequired");
@@ -32,6 +33,9 @@ const logger = require("../utils/logger");
 const { cancelEscrow } = require("../services/agentEscrow");
 const audit = require("../services/audit");
 const { amlRescreenForPayment } = require("./kycController");
+const { getUserCorridorConfig } = require("../services/corridorConfigService");
+const transactionMonitoring = require("../services/transactionMonitoring");
+const { persistSnapshots, fiatValueAtSend } = require("../utils/txSnapshots");
 
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
 
@@ -63,36 +67,7 @@ function encodeHistoryCursor(createdAt, id) {
   return Buffer.from(JSON.stringify({ created_at: timestamp, id }), "utf8").toString("base64url");
 }
 
-/**
- * Build the structured fee breakdown for a payment.
- * @param {string|number} grossAmount  - Amount the sender sent
- * @param {string}        asset        - e.g. "USDC" or "XLM"
- * @param {string|null}   feeCharged   - Stellar fee_charged in stroops (from Horizon result)
- */
-async function buildFeeBreakdown(grossAmount, asset, feeCharged) {
-  const gross = parseFloat(grossAmount);
-  let feeBps = FALLBACK_PLATFORM_FEE_BPS;
-  try {
-    const cfg = await getActiveConfig('platform', asset);
-    if (cfg) feeBps = cfg.fee_bps;
-  } catch (_) {
-    // fall back to env var if cache/DB is unavailable
-  }
-  const platformFee = parseFloat((gross * feeBps / 10000).toFixed(7));
-  const stellarBaseFeeXlm = feeCharged != null
-    ? parseFloat((parseInt(feeCharged, 10) / 1e7).toFixed(7))
-    : null;
-  const netAmount = parseFloat((gross - platformFee).toFixed(7));
-
-  return {
-    gross_amount_usdc: parseFloat(gross.toFixed(7)),
-    platform_fee_bps: feeBps,
-    platform_fee_usdc: platformFee,
-    stellar_base_fee_xlm: stellarBaseFeeXlm,
-    net_amount_usdc: parseFloat(netAmount.toFixed(7)),
-    asset,
-  };
-}
+// buildFeeBreakdown comes from services/fees (shared with scheduled payments).
 
 // Approximate XLM/USD rate  in production replace with a live price feed
 const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
@@ -127,7 +102,7 @@ function estimateUSDValue(amount, asset) {
   return parseFloat(amount);
 }
 
-async function dailyLimitExceeded(walletAddress, amount, asset) {
+async function dailyLimitExceeded(walletAddress, amount, asset, configuredLimit = DAILY_SEND_LIMIT) {
   const result = await db.query(
     `SELECT amount, asset
      FROM transactions
@@ -141,10 +116,10 @@ async function dailyLimitExceeded(walletAddress, amount, asset) {
   if (!hasAssetRows) {
     // Compatibility path for an older aggregate response; the old query
     // already represented the configured limit's units.
-    return parseFloat(result.rows[0]?.total || 0) + parseFloat(amount) > DAILY_SEND_LIMIT;
+    return parseFloat(result.rows[0]?.total || 0) + parseFloat(amount) > configuredLimit;
   }
   const totalToday = result.rows.reduce((total, row) => total + estimateUSDValue(row.amount, row.asset), 0);
-  return totalToday + estimateUSDValue(amount, asset) > DAILY_SEND_LIMIT;
+  return totalToday + estimateUSDValue(amount, asset) > configuredLimit;
 }
 
 /**
@@ -176,31 +151,31 @@ async function checkSufficientBalance(publicKey, amount, asset) {
   }
 }
 
-async function checkPaymentPreflight(publicKey, amount, asset) {
-  const overLimit = await dailyLimitExceeded(publicKey, amount, asset);
+async function checkPaymentPreflight(publicKey, amount, asset, corridor = null) {
+  const corridorDailyLimit = corridor && corridor.daily_limit_usd != null
+    ? Number(corridor.daily_limit_usd)
+    : DAILY_SEND_LIMIT;
+  const overLimit = await dailyLimitExceeded(publicKey, amount, asset, corridorDailyLimit);
   if (overLimit) {
-    throw Object.assign(new Error(`Daily send limit of ${DAILY_SEND_LIMIT} reached. Try again tomorrow.`), {
+    throw Object.assign(new Error(`Daily send limit of ${corridorDailyLimit} reached. Try again tomorrow.`), {
       status: 400, payload: { code: "DAILY_LIMIT_EXCEEDED" },
     });
   }
 
-  const [isSuspicious, limitExceeded] = await Promise.all([
-    checkVelocity(publicKey),
-    checkDailyLimit(publicKey, amount, asset),
-  ]);
+  const isSuspicious = await checkVelocity(publicKey);
   if (isSuspicious) {
     throw Object.assign(new Error("Transaction limit reached. Please wait before sending again."), { status: 429 });
   }
 
   const fraudCheck = await checkFraud(publicKey, amount, asset);
-  if (fraudCheck.blocked) {
+  if (fraudCheck.blocked && fraudCheck.action === 'hold') {
+    throw Object.assign(new Error(fraudCheck.reason), {
+      tmAlert: { source: 'fraud', ruleName: fraudCheck.rule, reason: fraudCheck.reason },
+    });
+  }
+  if (fraudCheck.blocked && fraudCheck.action !== 'allow') {
     await logFraudBlock(publicKey, fraudCheck.reason, amount, asset);
     throw Object.assign(new Error(fraudCheck.reason), { status: 429 });
-  }
-  if (limitExceeded) {
-    throw Object.assign(new Error("Daily send limit reached. Try again later."), {
-      status: 429, payload: { code: "DAILY_LIMIT_EXCEEDED" },
-    });
   }
 }
 
@@ -216,12 +191,19 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   }));
 }
 
-async function ensureKycIfNeeded(userId, amount, asset) {
-  const estimatedUSD = estimateUSDValue(amount, asset);
-  if (estimatedUSD < KYC_THRESHOLD_USD) return null;
+const KYC_TIER_RANK = { basic: 1, enhanced: 2, business: 3 };
 
-  const kycResult = await db.query("SELECT kyc_status FROM users WHERE id = $1", [userId]);
+async function ensureKycIfNeeded(userId, amount, asset, corridor = null) {
+  const estimatedUSD = estimateUSDValue(amount, asset);
+  const threshold = corridor && corridor.kyc_threshold_usd != null
+    ? Number(corridor.kyc_threshold_usd)
+    : KYC_THRESHOLD_USD;
+  const requiredTier = corridor?.required_kyc_tier || 'basic';
+  if (estimatedUSD < threshold) return null;
+
+  const kycResult = await db.query("SELECT kyc_status, kyc_tier FROM users WHERE id = $1", [userId]);
   const kycStatus = kycResult.rows[0]?.kyc_status || "unverified";
+  const kycTier = kycResult.rows[0]?.kyc_tier || 'basic';
   if (kycStatus === "expired") {
     const err = new Error("Your identity document has expired. Please re-verify to continue.");
     err.status = 403;
@@ -230,13 +212,71 @@ async function ensureKycIfNeeded(userId, amount, asset) {
   }
   if (kycStatus !== "verified") {
     const err = new Error(
-      `KYC verification required for transactions above $${KYC_THRESHOLD_USD} USD equivalent.`,
+      `KYC verification required for transactions above $${threshold} USD equivalent.`,
     );
     err.status = 403;
     err.payload = { kyc_status: kycStatus, code: "KYC_REQUIRED" };
     throw err;
   }
+  if ((KYC_TIER_RANK[kycTier] || 0) < (KYC_TIER_RANK[requiredTier] || 0)) {
+    const err = new Error(`KYC tier ${requiredTier} is required for this corridor.`);
+    err.status = 403;
+    err.payload = { kyc_status: kycStatus, kyc_tier: kycTier, required_kyc_tier: requiredTier, code: 'KYC_TIER_REQUIRED' };
+    throw err;
+  }
   return kycStatus;
+}
+
+async function loadCorridorForPayment(userId, recipientAddress, amount, asset) {
+  const corridor = await getUserCorridorConfig(userId, baseAccountAddress(recipientAddress));
+  if (!corridor) return null;
+  if (!corridor.is_active) {
+    const err = new Error('Payments are not enabled for this corridor.');
+    err.status = 403;
+    err.payload = { code: 'CORRIDOR_DISABLED' };
+    throw err;
+  }
+  if (!corridor.allowed_assets.includes(String(asset).toUpperCase())) {
+    const err = new Error(`Asset ${asset} is not allowed for this payment corridor.`);
+    err.status = 403;
+    err.payload = { code: 'CORRIDOR_ASSET_NOT_ALLOWED', allowed_assets: corridor.allowed_assets };
+    throw err;
+  }
+  if (
+    corridor.single_transaction_limit_usd != null &&
+    estimateUSDValue(amount, asset) > Number(corridor.single_transaction_limit_usd)
+  ) {
+    const err = new Error('Payment exceeds the single-transaction limit for this corridor.');
+    err.status = 400;
+    err.payload = {
+      code: 'CORRIDOR_TRANSACTION_LIMIT_EXCEEDED',
+      limit_usd: Number(corridor.single_transaction_limit_usd),
+    };
+    throw err;
+  }
+  return corridor;
+}
+
+async function openPaymentReviewCase(req, res, payment, alert) {
+  const reviewCase = await transactionMonitoring.openCase({
+    userId: req.user.userId,
+    senderWallet: payment.senderWallet,
+    recipientWallet: payment.recipientWallet,
+    amount: payment.amount,
+    asset: payment.asset,
+    source: alert.source,
+    ruleName: alert.ruleName || null,
+    reason: alert.reason,
+    paymentId: payment.paymentId,
+    metadata: alert.metadata || {},
+  });
+  return res.status(202).json({
+    code: 'PAYMENT_HELD_FOR_REVIEW',
+    status: 'pending_review',
+    case_id: reviewCase.id,
+    sla_due_at: reviewCase.sla_due_at,
+    message: 'Payment is held pending compliance review.',
+  });
 }
 
 async function getWalletForUser(userId) {
@@ -266,6 +306,7 @@ async function insertTransactionRecord({
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, ledger_close_time, fee_amount, fee_breakdown ? JSON.stringify(fee_breakdown) : null],
   );
+  if (status !== "failed") await persistSnapshots(id, asset);
   return id;
 }
 
@@ -412,46 +453,9 @@ async function send(req, res, next) {
 
     memo = typeof rawMemo === "string" ? rawMemo.trim() : "";
     memo_type = memo ? (rawMemoType || "text") : null;
-
-    await ensureKycIfNeeded(req.user.userId, amount, asset);
+    const recipientAccountAddress = baseAccountAddress(recipient_address);
 
     const estimatedUSD = estimateUSDValue(amount, asset);
-
-    if (estimatedUSD >= PHONE_VERIFICATION_THRESHOLD_USD) {
-      const userResult = await db.query(
-        "SELECT kyc_status, phone_verified FROM users WHERE id = $1",
-        [req.user.userId],
-      );
-      const { kyc_status: kycStatus, phone_verified: phoneVerified } = userResult.rows[0] || {};
-
-      if (!phoneVerified) {
-        return res.status(403).json({
-          error: "Phone verification required for transactions above $" + PHONE_VERIFICATION_THRESHOLD_USD + " USD equivalent.",
-          phone_verified: false,
-          code: "PHONE_VERIFICATION_REQUIRED",
-        });
-      }
-
-      if (estimatedUSD >= KYC_THRESHOLD_USD) {
-        if (kycStatus === "expired") {
-          webhook.deliver("payment.failed", req.user.userId, { code: "KYC_EXPIRED", error: "Your identity document has expired. Please re-verify to continue." }).catch(() => {});
-          return res.status(403).json({
-            error: "Your identity document has expired. Please re-verify to continue.",
-            kyc_status: kycStatus,
-            code: "KYC_EXPIRED",
-          });
-        }
-        if (kycStatus !== "verified") {
-          webhook.deliver("payment.failed", req.user.userId, { code: "KYC_REQUIRED", error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent." }).catch(() => {});
-          return res.status(403).json({
-            error: "KYC verification required for transactions above $" + KYC_THRESHOLD_USD + " USD equivalent.",
-            kyc_status: kycStatus,
-            code: "KYC_REQUIRED",
-          });
-        }
-      }
-    }
-
     let is_encrypted = false;
     let encrypted_memo = null;
     if (encrypt_memo && memo) {
@@ -460,7 +464,7 @@ async function send(req, res, next) {
       // too long with a clear error. Future: store encrypted data off-chain or
       // use memo_type=hash with a content-addressed reference.
       const { encryptMemo } = require("../utils/encryption");
-      encrypted_memo = encryptMemo(memo, recipient_address);
+      encrypted_memo = encryptMemo(memo, recipientAccountAddress);
       const encryptedBytes = Buffer.byteLength(encrypted_memo, 'utf8');
       if (encryptedBytes > 28) {
         return res.status(400).json({
@@ -481,21 +485,67 @@ async function send(req, res, next) {
 
     ({ public_key, encrypted_secret_key } = walletResult.rows[0]);
 
-    if (recipient_address === public_key) {
+    if (recipientAccountAddress === public_key) {
       return res.status(400).json({ error: "Cannot send payment to your own wallet" });
     }
 
-    // AML re-screen for high-value payments — fail closed when screening is unavailable
-    await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD);
+    const corridor = await loadCorridorForPayment(req.user.userId, recipient_address, amount, asset);
+    await ensureKycIfNeeded(req.user.userId, amount, asset, corridor);
+
+    const phoneThreshold = corridor && corridor.phone_verification_threshold_usd != null
+      ? Number(corridor.phone_verification_threshold_usd)
+      : PHONE_VERIFICATION_THRESHOLD_USD;
+    const kycThreshold = corridor && corridor.kyc_threshold_usd != null
+      ? Number(corridor.kyc_threshold_usd)
+      : KYC_THRESHOLD_USD;
+    if (estimatedUSD >= phoneThreshold) {
+      const userResult = await db.query(
+        "SELECT kyc_status, phone_verified FROM users WHERE id = $1",
+        [req.user.userId],
+      );
+      const { kyc_status: kycStatus, phone_verified: phoneVerified } = userResult.rows[0] || {};
+      if (!phoneVerified) {
+        return res.status(403).json({
+          error: `Phone verification required for transactions above $${phoneThreshold} USD equivalent.`,
+          phone_verified: false,
+          code: "PHONE_VERIFICATION_REQUIRED",
+        });
+      }
+      if (estimatedUSD >= kycThreshold && kycStatus !== "verified") {
+        const code = kycStatus === "expired" ? "KYC_EXPIRED" : "KYC_REQUIRED";
+        const message = kycStatus === "expired"
+          ? "Your identity document has expired. Please re-verify to continue."
+          : `KYC verification required for transactions above $${kycThreshold} USD equivalent.`;
+        webhook.deliver("payment.failed", req.user.userId, { code, error: message }).catch(() => {});
+        return res.status(403).json({ error: message, kyc_status: kycStatus || "unverified", code });
+      }
+    }
+
+    const amlResult = await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD, {
+      paymentId: txId,
+      senderWallet: public_key,
+      recipientWallet: recipient_address,
+      amount,
+      asset,
+    });
+    if (amlResult?.caseOpened) {
+      return res.status(202).json({
+        code: 'PAYMENT_HELD_FOR_REVIEW',
+        status: 'pending_review',
+        case_id: amlResult.case.id,
+        sla_due_at: amlResult.case.sla_due_at,
+        message: 'Payment is held pending compliance review.',
+      });
+    }
 
     // Use a per-wallet distributed lock to prevent concurrent sends from
     // racing past the daily-limit check (issue #888).
     const lockKey = `daily_limit:${public_key}`;
     let txResult;
     const lockAcquired = await withLock(lockKey, 10, async () => {
-      await checkPaymentPreflight(public_key, amount, asset);
+      await checkPaymentPreflight(public_key, amount, asset, corridor);
 
-      if (await isMemoRequired(recipient_address) && !memo) {
+      if (await isMemoRequired(recipientAccountAddress) && !memo) {
         throw Object.assign(new Error("This address requires a memo to route your payment correctly. Please include a memo."), {
           status: 422, payload: { code: "MEMO_REQUIRED" },
         });
@@ -509,8 +559,10 @@ async function send(req, res, next) {
       const netAmount = fee_breakdown.net_amount_usdc;
 
       // Broadcast to Stellar - send net amount to recipient
-      const { transactionHash, ledger, type, claimableBalanceId, expiresAt, claimableAmount, feeCharged } = await sendPayment({
       const { transactionHash, ledger, type, claimableBalanceId, feeCharged, successful, maxTime } = await sendPayment({
+      const {
+        transactionHash, ledger, type, claimableBalanceId, expiresAt, claimableAmount, feeCharged, successful, maxTime,
+      } = await sendPayment({
         senderPublicKey: public_key,
         encryptedSecretKey: encrypted_secret_key,
         recipientPublicKey: recipient_address,
@@ -527,37 +579,70 @@ async function send(req, res, next) {
       const updated_fee_breakdown = withStellarFee(fee_breakdown, feeCharged);
 
       // Save to DB
-      const txStatus = type === "claimable_balance" ? "pending_claim" : "confirming";
-      const transactionParams = [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time, JSON.stringify(updated_fee_breakdown)];
-      if (type === "claimable_balance") {
-        await db.query(
-          `WITH inserted_transaction AS (
-             INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-             RETURNING id
-           )
-           INSERT INTO claimable_balances (balance_id, user_id, asset, amount, claimant_wallet, expires_at)
-           SELECT $16, $17, $5, $18, $3, $19
-           FROM inserted_transaction
-           ON CONFLICT (balance_id) DO NOTHING`,
-          [...transactionParams, claimableBalanceId, req.user.userId, claimableAmount, expiresAt],
-        );
-      } else {
-        await db.query(
-          `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-          transactionParams,
-        );
-      }
       const txStatus = type === "claimable_balance"
         ? "pending_claim"
         : successful === false ? "failed" : "completed";
       const confirmationExpiresAt = maxTime ? new Date(Number(maxTime) * 1000) : null;
-      await db.query(
-        `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown, fee_amount, confirmed_at, confirmation_expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-        [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time, JSON.stringify(updated_fee_breakdown), updated_fee_breakdown.platform_fee_amount, txStatus === "completed" || txStatus === "failed" ? new Date() : null, confirmationExpiresAt],
-      );
+      const transactionParams = [
+        txId,
+        public_key,
+        recipient_address,
+        amount,
+        asset,
+        memo || null,
+        memo_type,
+        transactionHash,
+        txStatus,
+        claimableBalanceId || null,
+        req.requestId,
+        is_encrypted,
+        encrypted_memo,
+        ledger_close_time,
+        JSON.stringify(updated_fee_breakdown),
+        updated_fee_breakdown.platform_fee_amount,
+        txStatus === "completed" || txStatus === "failed" ? new Date() : null,
+        confirmationExpiresAt,
+      ];
+      if (type === "claimable_balance") {
+        await db.query(
+          `WITH inserted_transaction AS (
+             INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown, fee_amount, confirmed_at, confirmation_expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+      // Save to DB. A known Horizon result is final; otherwise the row stays
+      // 'confirming' until transactionConfirmationJob reconciles it.
+      let txStatus;
+      if (type === "claimable_balance") txStatus = "pending_claim";
+      else if (successful === true) txStatus = "completed";
+      else if (successful === false) txStatus = "failed";
+      else txStatus = "confirming";
+      const confirmationExpiresAt = maxTime ? new Date(Number(maxTime) * 1000) : null;
+      const confirmedAt = txStatus === "completed" || txStatus === "failed" ? new Date() : null;
+      const transactionParams = [txId, public_key, recipient_address, amount, asset, memo || null, memo_type, transactionHash, txStatus, claimableBalanceId || null, req.requestId, is_encrypted, encrypted_memo, ledger_close_time, JSON.stringify(updated_fee_breakdown), updated_fee_breakdown.platform_fee_amount, confirmedAt, confirmationExpiresAt];
+      const insertTransactionSql = `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown, fee_amount, confirmed_at, confirmation_expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`;
+      if (type === "claimable_balance") {
+        await db.query(
+          `WITH inserted_transaction AS (
+             ${insertTransactionSql}
+             RETURNING id
+           )
+           INSERT INTO claimable_balances (balance_id, user_id, asset, amount, claimant_wallet, expires_at)
+           SELECT $19, $20, $5, $21, $3, $22
+           FROM inserted_transaction
+           ON CONFLICT (balance_id) DO NOTHING`,
+          [...transactionParams, claimableBalanceId, req.user.userId, amount, confirmationExpiresAt],
+        );
+      } else {
+        await db.query(
+          `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id, request_id, is_encrypted, encrypted_memo, ledger_close_time, fee_breakdown, fee_amount, confirmed_at, confirmation_expires_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+          transactionParams,
+        );
+      }
+        await db.query(insertTransactionSql, transactionParams);
+      }
+
+      await persistSnapshots(txId, asset, updated_fee_breakdown);
 
       txResult = { transactionHash, ledger, type, claimableBalanceId, expiresAt, fee_breakdown: updated_fee_breakdown, txStatus };
     });
@@ -599,7 +684,7 @@ async function send(req, res, next) {
       .catch(() => {});
     db.query(
       "SELECT u.email FROM users u JOIN wallets w ON w.user_id = u.id WHERE w.public_key = $1 LIMIT 1",
-      [recipient_address],
+      [recipientAccountAddress],
     )
       .then(({ rows }) => rows[0] && sendTransactionEmail(rows[0].email, "received", emailTxData))
       .catch(() => {});
@@ -612,7 +697,7 @@ async function send(req, res, next) {
 
     db.query(
       "SELECT u.id AS user_id FROM users u JOIN wallets w ON w.user_id = u.id WHERE w.public_key = $1 LIMIT 1",
-      [recipient_address],
+      [recipientAccountAddress],
     ).then(({ rows }) => {
       if (rows[0]) {
         persistAndBroadcast(rows[0].user_id, 'payment_received', 'Payment Received',
@@ -638,11 +723,20 @@ async function send(req, res, next) {
       },
     });
   } catch (err) {
+    if (err.tmAlert && public_key) {
+      return openPaymentReviewCase(req, res, {
+        paymentId: txId,
+        senderWallet: public_key,
+        recipientWallet: recipient_address,
+        amount,
+        asset,
+      }, err.tmAlert);
+    }
     // Do not persist a failed transaction here; let caller decide and avoid
     // creating records when Stellar submission fails during business logic.
     if (err.status === 400 || err.status === 500) {
       webhook.deliver('payment.failed', req.user.userId, { error: err.message }).catch(() => {});
-      return res.status(err.status).json({ error: err.message });
+      return res.status(err.status).json({ error: err.message, ...(err.payload || {}) });
     }
     // Issue #243: Insert a failed transaction record when sendPayment throws
     // and the sender wallet is known, to maintain a full audit trail.
@@ -871,10 +965,6 @@ async function history(req, res, next) {
       return res.status(400).json({ error: `Invalid status value. Must be one of: ${HISTORY_STATUSES.join(", ")}` });
     }
 
-    const walletResult = await db.query(
-      "SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1",
-      [req.user.userId],
-    );
     const walletResult = walletId
       ? await db.query("SELECT public_key FROM wallets WHERE user_id = $1 AND id = $2", [req.user.userId, walletId])
       : await db.query(
@@ -920,7 +1010,7 @@ async function history(req, res, next) {
     }
     const whereClause = conditions.join(" AND ");
 
-      const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at, created_at::text AS cursor_created_at, ledger_close_time, fee_breakdown
+      const listSql = `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, created_at, created_at::text AS cursor_created_at, ledger_close_time, fee_breakdown, fx_snapshot, fee_snapshot
          FROM transactions
          WHERE ${whereClause}
          ORDER BY created_at DESC, id DESC LIMIT $${baseParams.length + 1}`;
@@ -929,9 +1019,13 @@ async function history(req, res, next) {
 
     const rows = result.rows;
     const hasMore = rows.length > limit;
+    const displayFiat = String(req.query.fiat || "USD").toUpperCase();
     const transactions = rows.slice(0, limit).map(({ cursor_created_at, ...tx }) => ({
       ...tx,
       direction: tx.sender_wallet === public_key ? "sent" : "received",
+      // BE-227: fiat value at send time; null => "rate unavailable"
+      fiat_value_at_send: fiatValueAtSend(tx, displayFiat),
+      fiat_currency: displayFiat,
     }));
 
     const lastRow = rows[limit - 1];
@@ -973,11 +1067,12 @@ async function sendPath(req, res, next) {
     let memoStr = typeof memo === "string" ? memo.trim() : "";
     let is_encrypted = false;
     let encrypted_memo = null;
+    const recipientAccountAddress = baseAccountAddress(recipient_address);
 
     if (encrypt_memo && memoStr) {
       // Issue #1163: Validate encrypted memo length
       const { encryptMemo } = require("../utils/encryption");
-      encrypted_memo = encryptMemo(memoStr, recipient_address);
+      encrypted_memo = encryptMemo(memoStr, recipientAccountAddress);
       const encryptedBytes = Buffer.byteLength(encrypted_memo, 'utf8');
       if (encryptedBytes > 28) {
         return res.status(400).json({
@@ -987,23 +1082,6 @@ async function sendPath(req, res, next) {
       }
       memoStr = encrypted_memo;
       is_encrypted = true;
-    }
-
-    const estimatedUSD = estimateUSDValue(source_amount, source_asset);
-    if (estimatedUSD >= PHONE_VERIFICATION_THRESHOLD_USD) {
-      const userResult = await db.query("SELECT kyc_status, phone_verified FROM users WHERE id = $1", [req.user.userId]);
-      const { kyc_status: kycStatus, phone_verified: phoneVerified } = userResult.rows[0] || {};
-      if (!phoneVerified) {
-        return res.status(403).json({ error: `Phone verification required for transactions above $${PHONE_VERIFICATION_THRESHOLD_USD} USD equivalent.`, phone_verified: false, code: "PHONE_VERIFICATION_REQUIRED" });
-      }
-      if (estimatedUSD >= KYC_THRESHOLD_USD) {
-        if (kycStatus === "expired") {
-          return res.status(403).json({ error: "Your identity document has expired. Please re-verify to continue.", kyc_status: kycStatus, code: "KYC_EXPIRED" });
-        }
-        if (kycStatus !== "verified") {
-          return res.status(403).json({ error: `KYC verification required for transactions above $${KYC_THRESHOLD_USD} USD equivalent.`, kyc_status: kycStatus, code: "KYC_REQUIRED" });
-        }
-      }
     }
 
     const { wallet_id: sendWalletId } = req.body;
@@ -1016,16 +1094,60 @@ async function sendPath(req, res, next) {
     ({ public_key } = walletResult.rows[0]);
     const { encrypted_secret_key } = walletResult.rows[0];
 
-    if (recipient_address === public_key) return res.status(400).json({ error: "Cannot send payment to your own wallet" });
+    if (recipientAccountAddress === public_key) return res.status(400).json({ error: "Cannot send payment to your own wallet" });
 
-    // AML re-screen for high-value payments — fail closed when screening is unavailable
-    await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD);
-
-    const fraudCheck = await checkFraud(public_key, source_amount, source_asset);
-    if (fraudCheck.blocked) {
-      await logFraudBlock(public_key, fraudCheck.reason, source_amount, source_asset);
-      return res.status(429).json({ error: fraudCheck.reason });
+    const estimatedUSD = estimateUSDValue(source_amount, source_asset);
+    const corridor = await loadCorridorForPayment(req.user.userId, recipient_address, source_amount, source_asset);
+    if (corridor && !corridor.allowed_assets.includes(String(destination_asset).toUpperCase())) {
+      return res.status(403).json({
+        error: `Asset ${destination_asset} is not allowed for this payment corridor.`,
+        code: 'CORRIDOR_ASSET_NOT_ALLOWED',
+        allowed_assets: corridor.allowed_assets,
+      });
     }
+    await ensureKycIfNeeded(req.user.userId, source_amount, source_asset, corridor);
+    const phoneThreshold = corridor && corridor.phone_verification_threshold_usd != null
+      ? Number(corridor.phone_verification_threshold_usd)
+      : PHONE_VERIFICATION_THRESHOLD_USD;
+    const kycThreshold = corridor && corridor.kyc_threshold_usd != null
+      ? Number(corridor.kyc_threshold_usd)
+      : KYC_THRESHOLD_USD;
+    if (estimatedUSD >= phoneThreshold) {
+      const userResult = await db.query("SELECT kyc_status, phone_verified FROM users WHERE id = $1", [req.user.userId]);
+      const { kyc_status: kycStatus, phone_verified: phoneVerified } = userResult.rows[0] || {};
+      if (!phoneVerified) {
+        return res.status(403).json({ error: `Phone verification required for transactions above $${phoneThreshold} USD equivalent.`, phone_verified: false, code: "PHONE_VERIFICATION_REQUIRED" });
+      }
+      if (estimatedUSD >= kycThreshold && kycStatus !== "verified") {
+        const code = kycStatus === "expired" ? "KYC_EXPIRED" : "KYC_REQUIRED";
+        const message = kycStatus === "expired"
+          ? "Your identity document has expired. Please re-verify to continue."
+          : `KYC verification required for transactions above $${kycThreshold} USD equivalent.`;
+        return res.status(403).json({ error: message, kyc_status: kycStatus || "unverified", code });
+      }
+    }
+
+    const amlResult = await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD, {
+      paymentId: txId,
+      senderWallet: public_key,
+      recipientWallet: recipient_address,
+      amount: source_amount,
+      asset: source_asset,
+    });
+    if (amlResult?.caseOpened) {
+      return res.status(202).json({
+        code: 'PAYMENT_HELD_FOR_REVIEW',
+        status: 'pending_review',
+        case_id: amlResult.case.id,
+        sla_due_at: amlResult.case.sla_due_at,
+        message: 'Payment is held pending compliance review.',
+      });
+    }
+
+    if (await isMemoRequired(recipientAccountAddress) && !memoStr) {
+      return res.status(422).json({ error: 'This address requires a memo to route your payment correctly.', code: 'MEMO_REQUIRED' });
+    }
+    await checkPaymentPreflight(public_key, source_amount, source_asset, corridor);
 
     // Balance check — fail fast with a clear message before hitting Stellar
     await checkSufficientBalance(public_key, source_amount, source_asset);
@@ -1044,6 +1166,7 @@ async function sendPath(req, res, next) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [txId, public_key, recipient_address, source_amount, source_asset, memoStr || null, transactionHash, txStatus, req.requestId, is_encrypted, encrypted_memo, new Date(), confirmationExpiresAt, fee_breakdown.platform_fee_amount, JSON.stringify(fee_breakdown)],
     );
+    await persistSnapshots(txId, source_asset);
     collectPlatformFee(fee_breakdown, public_key);
 
     // Invalidate sender's cached balance after successful path payment
@@ -1058,6 +1181,15 @@ async function sendPath(req, res, next) {
       transaction: { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, recipient: recipient_address, status: txStatus },
     });
   } catch (err) {
+    if (err.tmAlert && public_key) {
+      return openPaymentReviewCase(req, res, {
+        paymentId: txId,
+        senderWallet: public_key,
+        recipientWallet: recipient_address,
+        amount: source_amount,
+        asset: source_asset,
+      }, err.tmAlert);
+    }
     if (public_key) {
       await db.query(
         `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
@@ -1094,11 +1226,12 @@ async function sendStrictReceivePath(req, res, next) {
     let memoStr = typeof memo === "string" ? memo.trim() : "";
     let is_encrypted = false;
     let encrypted_memo = null;
+    const recipientAccountAddress = baseAccountAddress(recipient_address);
 
     if (encrypt_memo && memoStr) {
       // Issue #1163: Validate encrypted memo length
       const { encryptMemo } = require("../utils/encryption");
-      encrypted_memo = encryptMemo(memoStr, recipient_address);
+      encrypted_memo = encryptMemo(memoStr, recipientAccountAddress);
       const encryptedBytes = Buffer.byteLength(encrypted_memo, 'utf8');
       if (encryptedBytes > 28) {
         return res.status(400).json({
@@ -1108,23 +1241,6 @@ async function sendStrictReceivePath(req, res, next) {
       }
       memoStr = encrypted_memo;
       is_encrypted = true;
-    }
-
-    const estimatedUSD = estimateUSDValue(source_max_amount, source_asset);
-    if (estimatedUSD >= PHONE_VERIFICATION_THRESHOLD_USD) {
-      const userResult = await db.query("SELECT kyc_status, phone_verified FROM users WHERE id = $1", [req.user.userId]);
-      const { kyc_status: kycStatus, phone_verified: phoneVerified } = userResult.rows[0] || {};
-      if (!phoneVerified) {
-        return res.status(403).json({ error: `Phone verification required for transactions above $${PHONE_VERIFICATION_THRESHOLD_USD} USD equivalent.`, phone_verified: false, code: "PHONE_VERIFICATION_REQUIRED" });
-      }
-      if (estimatedUSD >= KYC_THRESHOLD_USD) {
-        if (kycStatus === "expired") {
-          return res.status(403).json({ error: "Your identity document has expired. Please re-verify to continue.", kyc_status: kycStatus, code: "KYC_EXPIRED" });
-        }
-        if (kycStatus !== "verified") {
-          return res.status(403).json({ error: `KYC verification required for transactions above ${KYC_THRESHOLD_USD} USD equivalent.`, kyc_status: kycStatus, code: "KYC_REQUIRED" });
-        }
-      }
     }
 
     const { wallet_id: sendWalletId } = req.body;
@@ -1137,16 +1253,32 @@ async function sendStrictReceivePath(req, res, next) {
     ({ public_key } = walletResult.rows[0]);
     const { encrypted_secret_key } = walletResult.rows[0];
 
-    if (recipient_address === public_key) return res.status(400).json({ error: "Cannot send payment to your own wallet" });
+    if (recipientAccountAddress === public_key) return res.status(400).json({ error: "Cannot send payment to your own wallet" });
 
-    // AML re-screen for high-value payments — fail closed when screening is unavailable
-    await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD);
-
-    const fraudCheck = await checkFraud(public_key, source_max_amount, source_asset);
-    if (fraudCheck.blocked) {
-      await logFraudBlock(public_key, fraudCheck.reason, source_max_amount, source_asset);
-      return res.status(429).json({ error: fraudCheck.reason });
+    const estimatedUSD = estimateUSDValue(source_max_amount, source_asset);
+    const corridor = await loadCorridorForPayment(req.user.userId, recipient_address, source_max_amount, source_asset);
+    await ensureKycIfNeeded(req.user.userId, source_max_amount, source_asset, corridor);
+    const phoneThreshold = corridor && corridor.phone_verification_threshold_usd != null
+      ? Number(corridor.phone_verification_threshold_usd)
+      : PHONE_VERIFICATION_THRESHOLD_USD;
+    if (estimatedUSD >= phoneThreshold) {
+      const { rows } = await db.query("SELECT kyc_status, phone_verified FROM users WHERE id = $1", [req.user.userId]);
+      if (!rows[0]?.phone_verified) {
+        return res.status(403).json({ error: `Phone verification required for transactions above $${phoneThreshold} USD equivalent.`, code: 'PHONE_VERIFICATION_REQUIRED' });
+      }
     }
+
+    const amlResult = await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD, {
+      paymentId: txId, senderWallet: public_key, recipientWallet: recipient_address,
+      amount: source_max_amount, asset: source_asset,
+    });
+    if (amlResult?.caseOpened) {
+      return res.status(202).json({ code: 'PAYMENT_HELD_FOR_REVIEW', status: 'pending_review', case_id: amlResult.case.id, sla_due_at: amlResult.case.sla_due_at });
+    }
+    if (!corridor?.allowed_assets?.includes(String(destination_asset).toUpperCase()) && corridor) {
+      return res.status(403).json({ error: `Asset ${destination_asset} is not allowed for this payment corridor.`, code: 'CORRIDOR_ASSET_NOT_ALLOWED' });
+    }
+    await checkPaymentPreflight(public_key, source_max_amount, source_asset, corridor);
 
     const fee_breakdown = await buildFeeBreakdown(destination_amount, destination_asset);
     const { transactionHash, ledger, successful, maxTime } = await sendStrictReceivePathPayment({
@@ -1162,6 +1294,7 @@ async function sendStrictReceivePath(req, res, next) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [txId, public_key, recipient_address, destination_amount, destination_asset, memoStr || null, transactionHash, txStatus, req.requestId, is_encrypted, encrypted_memo, new Date(), confirmationExpiresAt, fee_breakdown.platform_fee_amount, JSON.stringify(fee_breakdown)],
     );
+    await persistSnapshots(txId, destination_asset);
     collectPlatformFee(fee_breakdown, public_key);
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, sender: public_key, recipient: recipient_address };
@@ -1173,6 +1306,12 @@ async function sendStrictReceivePath(req, res, next) {
       transaction: { id: txId, tx_hash: transactionHash, ledger, destination_amount, destination_asset, recipient: recipient_address, status: txStatus },
     });
   } catch (err) {
+    if (err.tmAlert && public_key) {
+      return openPaymentReviewCase(req, res, {
+        paymentId: txId, senderWallet: public_key, recipientWallet: recipient_address,
+        amount: source_max_amount, asset: source_asset,
+      }, err.tmAlert);
+    }
     if (public_key) {
       await db.query(
         `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, request_id, is_encrypted, encrypted_memo)
@@ -1239,6 +1378,7 @@ async function exportCSV(req, res, next) {
     const stringifier = stringifyStream({
       header: true,
       columns: ["date", "direction", "amount", "asset", "recipient_or_sender", "memo", "tx_hash", "status", "fiat_currency", "fiat_value_at_send_time", "fx_rate_at_send_time"],
+      columns: ["date", "direction", "amount", "asset", "recipient_or_sender", "memo", "tx_hash", "status", "usd_value_at_send", "fx_rate_usd", "platform_fee", "network_fee_xlm"],
     });
     stringifier.pipe(res);
 
@@ -1257,6 +1397,7 @@ async function exportCSV(req, res, next) {
     await client.query(
       `DECLARE ${cursorName} CURSOR FOR
        SELECT created_at, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fx_snapshot
+       SELECT created_at, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fx_snapshot, fee_snapshot
        FROM transactions
        WHERE (sender_wallet = $1 OR recipient_wallet = $1)${filters}
        ORDER BY created_at DESC
@@ -1278,6 +1419,10 @@ async function exportCSV(req, res, next) {
           tx_hash: tx.tx_hash || "",
           status: tx.status,
           ...snapshotFiatColumns(tx, fiatCurrency),
+          usd_value_at_send: fiatValueAtSend(tx, "USD") ?? "rate unavailable",
+          fx_rate_usd: tx.fx_snapshot?.rates?.USD ?? "",
+          platform_fee: tx.fee_snapshot?.platform_fee_usdc ?? "",
+          network_fee_xlm: tx.fee_snapshot?.stellar_base_fee_xlm ?? "",
         });
         if (!ok) await new Promise((resolve) => stringifier.once("drain", resolve));
       }
@@ -1319,6 +1464,7 @@ async function getPaymentById(req, res, next) {
     const result = await db.query(
       `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type,
               tx_hash, status, created_at, ledger_close_time, fee_breakdown, fx_snapshot
+              tx_hash, status, created_at, ledger_close_time, fee_breakdown, fx_snapshot, fee_snapshot
        FROM transactions
        WHERE id = $1 AND (sender_wallet = ANY($2) OR recipient_wallet = ANY($2))`,
       [req.params.id, publicKeys],
@@ -1471,4 +1617,54 @@ async function cancelPendingEscrow(req, res, next) {
   return require("./agentEscrowController").cancel(req, res, next);
 }
 
-module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee, estimateFees, getFeeStats, getFeeRate, findReceivePathHandler, sendStrictReceivePath, getPaymentById, cancelPendingEscrow, checkSufficientBalance };
+/**
+ * GET /api/payments/:id/receipt?format=pdf|png|json  (BE-226)
+ * Sender or recipient only; everyone else gets 404.
+ */
+async function getReceipt(req, res, next) {
+  try {
+    const walletResult = await db.query("SELECT public_key FROM wallets WHERE user_id = $1", [req.user.userId]);
+    const publicKeys = walletResult.rows.map((r) => r.public_key);
+    if (publicKeys.length === 0) return res.status(404).json({ error: "Payment not found" });
+
+    const result = await db.query(
+      `SELECT t.id, t.sender_wallet, t.recipient_wallet, t.amount, t.asset, t.memo, t.tx_hash, t.status,
+              t.created_at, t.ledger_close_time, t.fee_breakdown, t.fx_snapshot, t.fee_snapshot,
+              su.full_name AS sender_name, ru.full_name AS recipient_name
+       FROM transactions t
+       LEFT JOIN wallets sw ON sw.public_key = t.sender_wallet
+       LEFT JOIN users su ON su.id = sw.user_id
+       LEFT JOIN wallets rw ON rw.public_key = t.recipient_wallet
+       LEFT JOIN users ru ON ru.id = rw.user_id
+       WHERE t.id = $1 AND (t.sender_wallet = ANY($2) OR t.recipient_wallet = ANY($2))
+       LIMIT 1`,
+      [req.params.id, publicKeys],
+    );
+    const tx = result.rows[0];
+    if (!tx) return res.status(404).json({ error: "Payment not found" });
+
+    const { toDisplayName } = require("./paymentRequestController");
+    const receiptSvc = require("../services/receipt");
+    const receipt = receiptSvc.buildReceipt(tx, {
+      fiat: req.query.fiat || "USD",
+      senderName: tx.sender_name ? toDisplayName(tx.sender_name) : null,
+      recipientName: tx.recipient_name ? toDisplayName(tx.recipient_name) : null,
+    });
+
+    const format = req.query.format || "pdf";
+    if (format === "json") return res.json(receipt);
+
+    const filename = `afripay-receipt-${receipt.reference}.${format}`;
+    const body = format === "png"
+      ? await receiptSvc.renderPng(receipt)
+      : await receiptSvc.renderPdf(receipt, receiptSvc.pickLocale(req.headers["accept-language"]));
+    res.setHeader("Content-Type", format === "png" ? "image/png" : "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.send(body);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { send, sendBatch, history, findPath, sendPath, exportCSV, estimateFee, estimateFees, getFeeStats, getFeeRate, findReceivePathHandler, sendStrictReceivePath, getPaymentById, cancelPendingEscrow, checkSufficientBalance, getReceipt };

@@ -18,6 +18,12 @@ export default function NotificationBell() {
     if (!n.read_at) markRead(n.id);
     // FE-205: payment notifications open the transaction detail page.
     const txId = n.data?.transaction_id || n.data?.transactionId || n.data?.payment_id || n.data?.paymentId;
+    const ticketId = n.data?.ticketId || n.data?.ticket_id;
+    if (ticketId) {
+      setOpen(false);
+      navigate(`/support/${encodeURIComponent(ticketId)}`);
+      return;
+    }
     const hash = n.data?.txHash || n.data?.tx_hash;
     if (txId) {
       setOpen(false);

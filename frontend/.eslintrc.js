@@ -20,6 +20,13 @@ module.exports = {
   },
   plugins: ['react', 'react-hooks', 'jsx-a11y'],
   rules: {
+    'no-restricted-syntax': [
+      'error',
+      {
+        selector: "LogicalExpression[operator='||'] > CallExpression.left[callee.name='t']",
+        message: "t() returns the key when missing, so || never falls back. Use t('key', 'Default').",
+      },
+    ],
     'react/jsx-filename-extension': [1, { extensions: ['.jsx', '.js'] }],
     'react/react-in-jsx-scope': 'off',
     'react/prop-types': 'off',

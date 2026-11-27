@@ -45,7 +45,7 @@ CREATE TABLE contacts (
   id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name           VARCHAR(100) NOT NULL,
-  wallet_address VARCHAR(56) NOT NULL,
+  wallet_address VARCHAR(69) NOT NULL,
   created_at     TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(user_id, wallet_address)
 );

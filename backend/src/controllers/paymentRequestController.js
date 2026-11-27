@@ -50,28 +50,54 @@ async function create(req, res, next) {
   }
 }
 
+/**
+ * Public display name: first name + last initial, never the full legal name
+ * or email (BE-224).
+ */
+function toDisplayName(fullName) {
+  const parts = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'AfriPay user';
+  return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.` : parts[0];
+}
+
 async function getById(req, res, next) {
   try {
     const { id } = req.params;
 
     const result = await db.query(
-      `SELECT id, requester_wallet, amount, asset, memo, expires_at, claimed, claimed_tx_hash, status
-       FROM payment_requests
-       WHERE id = $1`,
+      `SELECT pr.id, pr.requester_wallet, pr.amount, pr.asset, pr.memo, pr.expires_at,
+              pr.claimed, pr.claimed_tx_hash, pr.status,
+              u.full_name, u.avatar_url, u.kyc_status, u.created_at AS member_since,
+              COALESCE(u.show_profile_on_requests, TRUE) AS show_profile
+       FROM payment_requests pr
+       LEFT JOIN users u ON u.id = pr.requester_id
+       WHERE pr.id = $1`,
       [id]
     );
 
-    if (!result.rows[0]) {
+    const row = result.rows[0];
+    if (!row) {
       return res.status(404).json({ error: 'Payment request not found' });
     }
-    if (result.rows[0].status === 'cancelled') {
-      return res.status(410).json({ error: 'Payment request was cancelled' });
-    }
-    if (new Date(result.rows[0].expires_at) <= new Date()) {
-      return res.status(410).json({ error: 'Payment request has expired' });
+    const unavailable = row.status === 'cancelled' || new Date(row.expires_at) <= new Date();
+    if (unavailable) {
+      // BE-224: signed-out viewers get the same 404 for unknown, expired and
+      // cancelled requests (no enumeration); authenticated payers keep 410.
+      if (!req.user) return res.status(404).json({ error: 'Payment request not found' });
+      return res.status(410).json({
+        error: row.status === 'cancelled' ? 'Payment request was cancelled' : 'Payment request has expired',
+      });
     }
 
-    res.json(result.rows[0]);
+    const { full_name, avatar_url, kyc_status, member_since, show_profile, ...request } = row;
+    request.requester = {
+      display_name: show_profile ? toDisplayName(full_name) : 'AfriPay user',
+      avatar_url: show_profile ? avatar_url || null : null,
+      kyc_verified: kyc_status === 'verified',
+      member_since: member_since ? new Date(member_since).toISOString().slice(0, 7) : null,
+    };
+
+    res.json(request);
   } catch (err) {
     next(err);
   }
@@ -185,4 +211,4 @@ async function cancel(req, res, next) {
   }
 }
 
-module.exports = { create, getById, markClaimed, listMine, cancel };
+module.exports = { create, getById, markClaimed, listMine, cancel, toDisplayName };

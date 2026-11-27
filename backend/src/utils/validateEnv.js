@@ -34,6 +34,13 @@ const CLAWBACK_REQUIRED_VARS_PRODUCTION = [
 // and /metrics must never be public in production.
 const SECURITY_REQUIRED_VARS_PRODUCTION = ['REDIS_URL', 'METRICS_TOKEN'];
 
+// BE-196: production must use a real SMS provider — the mock would drop every
+// OTP. Each provider's credentials are required alongside it.
+const SMS_PROVIDER_REQUIRED_VARS = {
+  twilio: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER'],
+  africastalking: ['AT_API_KEY', 'AT_USERNAME'],
+};
+
 /**
  * Validates required configuration before the server listens.
  * Never logs secret values — only variable names.
@@ -121,6 +128,26 @@ function validateEnv() {
       console.error(
         '\x1b[31m[CONFIG ERROR] Missing required production environment variables:\x1b[0m',
         missingSecurity.join(', ')
+      );
+      process.exit(1);
+      return;
+    }
+
+    const smsProvider = (process.env.SMS_PROVIDER || '').trim();
+    const smsRequired = SMS_PROVIDER_REQUIRED_VARS[smsProvider];
+    if (!smsRequired) {
+      console.error(
+        `\x1b[31m[CONFIG ERROR] SMS_PROVIDER must be one of ${Object.keys(SMS_PROVIDER_REQUIRED_VARS).join(', ')} in production ` +
+        `(got "${smsProvider || 'unset'}"). The mock SMS provider is not allowed in production.\x1b[0m`
+      );
+      process.exit(1);
+      return;
+    }
+    const missingSms = smsRequired.filter((name) => !isSet(process.env[name]));
+    if (missingSms.length > 0) {
+      console.error(
+        `\x1b[31m[CONFIG ERROR] Missing required environment variables for SMS_PROVIDER=${smsProvider}:\x1b[0m`,
+        missingSms.join(', ')
       );
       process.exit(1);
       return;

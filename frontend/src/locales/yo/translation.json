@@ -1,4 +1,52 @@
 {
+  "paymentRequest": {
+    "requestedBy": "Ẹni tó béèrè",
+    "unknown": "A kò mọ ẹni tó béèrè",
+    "verified": "A ti jẹ́rìísí",
+    "memberSince": "Ọmọ ẹgbẹ́ láti {{date}}",
+    "expiresIn": "Yóò parí ní {{time}}",
+    "notContact": "O kò tíì san owó fún ẹni yìí rí. San owó fún àwọn tí o mọ̀ nìkan.",
+    "cancelled": "A ti fagi lé ìbéèrè owó yìí.",
+    "unavailable": "Ìbéèrè owó kò sí"
+  },
+  "pinPolicy": {
+    "repeated": "PIN tó ní nọ́mbà àtúnṣe rọrùn láti mọ̀",
+    "sequential": "Yẹra fún ìtòlẹ́sẹẹsẹ bíi 1234",
+    "common": "PIN yìí wọ́pọ̀ jù",
+    "personal": "Yẹra fún ọdún tàbí ọjọ́ ìbí rẹ",
+    "sixDigits": "PIN oní nọ́mbà 6 ṣòro láti mọ̀ jù"
+  },
+  "contractStatus": {
+    "names": {
+      "escrow": "escrow",
+      "agentEscrow": "escrow aṣojú",
+      "savingsVault": "àpò ìfowópamọ́",
+      "recurringPayments": "ìsanwó àtúnṣe"
+    },
+    "paused": {
+      "escrow": "A ti dá ṣíṣẹ̀dá escrow dúró fún ìgbà díẹ̀ fún àtúnṣe. O ṣì lè fagi lé tàbí tú àwọn tó wà sílẹ̀.",
+      "agentEscrow": "A ti dá ṣíṣẹ̀dá escrow aṣojú dúró fún ìgbà díẹ̀ fún àtúnṣe. O ṣì lè fagi lé tàbí tú àwọn tó wà sílẹ̀.",
+      "savingsVault": "A ti dá ìfowópamọ́ dúró fún ìgbà díẹ̀ fún àtúnṣe. O ṣì lè yọ owó tó ti ṣí.",
+      "recurringPayments": "A ti dá ṣíṣètò ìsanwó dúró fún ìgbà díẹ̀ fún àtúnṣe. O ṣì lè fagi lé àwọn tó wà."
+    },
+    "upgrade": "A ti ṣètò ìmúdójúìwọ̀n àdéhùn {{contract}} fún {{eta}}.",
+    "upgradeNoEta": "Ìmúdójúìwọ̀n àdéhùn {{contract}} ń dúró.",
+    "releaseNotes": "Àkọsílẹ̀ ẹ̀yà",
+    "exit": "Yọ owó tàbí fagi lé",
+    "dismiss": "Pa á rẹ́"
+  },
+  "webhookVerify": {
+    "title": "Jẹ́rìísí ìbuwọ́lù",
+    "eventId": "ID ìṣẹ̀lẹ̀ tí kì í yípadà; a tún ń lò ó.",
+    "deliveryId": "ID ọ̀tọ̀ fún ìgbìyànjú kọ̀ọ̀kan.",
+    "timestamp": "Àkókò Unix, ní ìṣẹ́jú-àáyá, tí a buwọ́ lù ú.",
+    "signature": "HMAC-SHA256 ti \"timestamp.body\", ní ọ̀nà t=<timestamp>,v1=<signature>. v1 lè ju ọ̀kan lọ nígbà ìyípadà àṣírí.",
+    "tolerance": "Kọ ìfiránṣẹ́ tí àkókò rẹ̀ yàtọ̀ sí aago rẹ ju ìṣẹ́jú 5 lọ.",
+    "dedupe": "Tọ́jú X-AfriPay-Event-Id kọ̀ọ̀kan, kí o sì fojú fo àwọn tí o ti ṣe.",
+    "copy": "Ṣe àdàkọ",
+    "requestHeaders": "Headers ìbéèrè",
+    "headersUnavailable": "A kò gba headers sílẹ̀ fún ìgbìyànjú yìí."
+  },
   "common": {
     "offline_cached": "O wa ni aisinipo — n fi data ti a fipamọ han",
     "back": "Padà",
@@ -41,7 +89,13 @@
     "have_account": "O ti ni akáonu?",
     "sign_in": "Wọ inú",
     "success": "Akáonu ti ṣẹ̀dá! Àpò owó rẹ ti ṣetán.",
-    "error": "Ìforìkọsílẹ̀ kò ṣẹ"
+    "error": "Ìforìkọsílẹ̀ kò ṣẹ",
+    "phone_verified": "Nọ́ńbà foonu ti jẹ́rìísí ní àṣeyọrí!",
+    "phone_verify_failed": "Kùnà láti jẹ́rìí nọ́ńbà foonu",
+    "phone_invalid": "Jọ̀wọ́ tẹ nọ́ńbà foonu tó tọ́",
+    "otp_sent": "A ti fi kóòdù ìjẹ́rìí ránṣẹ́ sí foonu rẹ",
+    "otp_invalid": "Kóòdù ìjẹ́rìí kò tọ́ tàbí ó ti gbà á",
+    "otp_verify_failed": "Kùnà láti jẹ́rìí kóòdù náà"
   },
   "login": {
     "title": "Kaabọ̀ sílẹ̀",
@@ -143,6 +197,11 @@
     "confirm_send": "Ìdúkòṛò & Ránṣẹ́",
     "success": "Owó ti ránṣẹ́ nítòótọ!",
     "error": "Owó kò ṣẹ",
+    "invalid_amount": "Tẹ iye tó tọ́ pẹ̀lú àwọn ìpín 7 títí dé",
+    "invalid_address": "Tẹ àdírẹ́sì Stellar tó tọ́",
+    "insufficient_balance": "Ìdájú kò tó fún ìsanwó yìí",
+    "memo_too_long": "Ìrántí náà gùn jù",
+    "send_failed": "Kùnà láti fi owó ránṣẹ́. Jọ̀wọ́ tún gbìyànjú.",
     "qr_unsupported_uri": "Koodu QR yìí jẹ́ ìbéèrè ìdúnàádúrà, kì í ṣe ìbéèrè ìsanwó. Koodu QR ìsanwó nìkan ni a ṣe àtìlẹ́yìn fún.",
     "qr_prefilled": "A ti kún àwọn àlàyé ìsanwó láti inú koodu QR — jọ̀wọ́ ṣàyẹ̀wò kí o tó fi ránṣẹ́."
   },
@@ -173,7 +232,11 @@
     "subtitle": "Pín àpò owó rẹ tàbí koodu QR láti gbàwọ owó",
     "address_label": "Ìpilẹ̀ Àpò Owó Stellar Rẹ",
     "warning": "Ránṣẹ́ XLM tàbí àwọn ohun Stellar nìkan sí ìpilẹ̀ yìí",
-    "address_copied": "Ìpilẹ̀ ti pada!"
+    "address_copied": "Ìpilẹ̀ ti pada!",
+    "amount_copied": "Iye ti pada!",
+    "invalid_amount": "Tẹ iye tó tọ́ pẹ̀lú àwọn ìpín 7 títí dé",
+    "qr_generated": "Koodu QR ti ṣẹ̀dá",
+    "qr_generation_failed": "Kùnà láti ṣẹ̀dá koodu QR"
   },
   "history": {
     "title": "Ìtàn",
@@ -190,7 +253,9 @@
     "asset_all": "Gbogbo ohun ìjọba",
     "load_error": "Kò ṣẹ láti lọ àwọn owó",
     "load_more": "Lọ diẹ sii",
-    "loading_more": "Ń ìpò..."
+    "loading_more": "Ń ìpò...",
+    "export_success": "A ti gbé ìtàn jáde ní àṣeyọrí",
+    "export_failed": "Kùnà láti gbé ìtàn jáde"
   },
   "profile": {
     "title": "Àbájáde",
@@ -202,7 +267,12 @@
     "contact_added": "Àpejọ ti tún ọ̀",
     "contact_error": "Kò ṣẹ láti tún àpejọ ọ̀",
     "address_copied": "Ìpilẹ̀ ti pada!",
-    "language": "Èdè"
+    "language": "Èdè",
+    "profile_updated": "Àkọọ́lẹ̀ ti ṣe àtúnṣe ní àṣeyọrí",
+    "profile_update_failed": "Kùnà láti ṣe àtúnṣe àkọọ́lẹ̀",
+    "avatar_updated": "Àwòrán àkọọ́lẹ̀ ti ṣe àtúnṣe",
+    "avatar_update_failed": "Kùnà láti ṣe àtúnṣe àwòrán àkọọ́lẹ̀",
+    "language_updated": "Èdè ti ṣe àtúnṣe"
   },
   "contacts_import": {
     "open": "Kó CSV wọlé",
@@ -510,5 +580,111 @@
     "submit": "Fi Ránṣẹ́ fún Ìfẹ̀rílàdí",
     "submitted": "A ti fi KYC ránṣẹ́ ní àṣeyọrí. A ó ṣàyẹ̀wò ìbéèrè rẹ láìpẹ́.",
     "submitFailed": "Ìfiránṣẹ́ kùnà. Jọ̀wọ́ tún gbìyànjú."
+  },
+  "request": {
+    "invalid_amount": "Jọ̀wọ́ tẹ iye tó tọ́",
+    "success": "A ti ṣẹ̀dá ìbéèrè ìsanwó!",
+    "create_another": "Ṣẹ̀dá òmíràn"
+  },
+  "scheduled": {
+    "error": "Àṣìṣe ṣẹlẹ̀ pẹ̀lú ìsanwó tí a ṣètò",
+    "invalid": "Jọ̀wọ́ tẹ iye tó tọ́",
+    "list_view": "Ìwò àkójọ",
+    "calendar_view": "Ìwò kàlẹ́ńdà"
+  },
+  "support": {
+    "title": "Tíkẹ́ẹ̀tì Ìrànlọ́wọ́",
+    "new": "Tíkẹ́ẹ̀tì Tuntun",
+    "select_type": "Yan irú ìṣòro",
+    "transaction": "Ìdúnàádúrà",
+    "no_transaction": "Kò sí ìdúnàádúrà (kò pọndandan)",
+    "selected_transaction": "Ìdúnàádúrà tí a yàn",
+    "describe": "Ṣàlàyé ìṣòro rẹ...",
+    "attachments_hint": "Àsomọ́ (fáìlì 3 PNG, JPEG tàbí PDF, MB 5 ọ̀kọ̀ọ̀kan)",
+    "remove_file": "Yọ {{name}} kúrò",
+    "too_many_files": "Fáìlì 3 péré ni o lè so mọ́",
+    "invalid_file_type": "PNG, JPEG àti PDF nìkan ni a gbà",
+    "file_too_large": "Fáìlì kọ̀ọ̀kan kò gbọdọ̀ ju MB 5 lọ",
+    "created": "A ti ṣẹ̀dá tíkẹ́ẹ̀tì",
+    "create_error": "A kò lè ṣẹ̀dá tíkẹ́ẹ̀tì",
+    "submit": "Fi ránṣẹ́",
+    "submitting": "Ó ń fi ránṣẹ́…",
+    "none": "Kò sí tíkẹ́ẹ̀tì síbẹ̀.",
+    "unread": "Ìdáhùn {{count}} tí a kò tíì kà",
+    "report_problem": "Jábọ̀ ìṣòro",
+    "load_error": "A kò lè gbé tíkẹ́ẹ̀tì yìí jáde.",
+    "retry": "Gbìyànjú lẹ́ẹ̀kansi",
+    "view_transaction": "Wo ìdúnàádúrà",
+    "attachment_error": "A kò lè ṣí àsomọ́",
+    "no_messages": "Kò sí ìdáhùn síbẹ̀",
+    "team": "Ìrànlọ́wọ́",
+    "you": "Ìwọ",
+    "reply_placeholder": "Kọ ìdáhùn…",
+    "send_reply": "Fi ìdáhùn ránṣẹ́",
+    "reply_error": "A kò lè fi ìdáhùn ránṣẹ́",
+    "types": {
+      "wrong_address": "Àdírẹ́sì tí kò tọ́",
+      "wrong_amount": "Iye tí kò tọ́",
+      "failed_deducted": "Ó kùnà ṣùgbọ́n a yọ owó",
+      "other": "Òmíràn"
+    },
+    "statuses": {
+      "open": "Ṣíṣí",
+      "in_progress": "Ń lọ lọ́wọ́",
+      "waiting_on_user": "Ń dúró dè ọ́",
+      "resolved": "Ti yanjú",
+      "closed": "Ti pa"
+    }
+  "escrow": {
+    "created": "A ti ṣẹ̀dá escrow ní àṣeyọrí",
+    "create_failed": "Kùnà láti ṣẹ̀dá escrow",
+    "released": "A ti tú owó escrow sílẹ̀ ní àṣeyọrí",
+    "release_failed": "Kùnà láti tú owó escrow sílẹ̀",
+    "cancelled": "A ti fagilé escrow",
+    "cancel_failed": "Kùnà láti fagilé escrow",
+    "invalid_amount": "Tẹ iye tó tọ́ pẹ̀lú àwọn ìpín 7 títí dé",
+    "invalid_recipient": "Tẹ àdírẹ́sì olùgbà tó tọ́",
+    "load_failed": "Kùnà láti gbé àwọn escrow wọlé"
+  },
+  "admin": {
+    "user_approved": "A ti fọwọ́ sí olùlò",
+    "user_approve_failed": "Kùnà láti fọwọ́ sí olùlò",
+    "user_suspended": "A ti dá olùlò dúró",
+    "user_suspend_failed": "Kùnà láti dá olùlò dúró",
+    "kyc_approved": "A ti fọwọ́ sí KYC",
+    "kyc_rejected": "A ti kọ̀ KYC",
+    "kyc_update_failed": "Kùnà láti ṣe àtúnṣe ipò KYC",
+    "load_failed": "Kùnà láti gbé dátà alábòójútó wọlé"
+  },
+  "analytics": {
+    "load_failed": "Kùnà láti gbé ìtúpalẹ̀ wọlé",
+    "export_success": "A ti gbé ìtúpalẹ̀ jáde ní àṣeyọrí",
+    "export_failed": "Kùnà láti gbé ìtúpalẹ̀ jáde",
+    "date_range_invalid": "Ọjọ́ ìbẹ̀rẹ̀ gbọ́dọ̀ wà kí ọjọ́ ìparí tó"
+  },
+  "swap": {
+    "success": "Ìpààrọ̀ ti parí ní àṣeyọrí",
+    "failed": "Kùnà láti parí ìpààrọ̀",
+    "invalid_amount": "Tẹ iye tó tọ́ pẹ̀lú àwọn ìpín 7 títí dé"
+  },
+  "save": {
+    "success": "Owó ti fi pamọ́ ní àṣeyọrí",
+    "failed": "Kùnà láti fi owó pamọ́"
+  },
+  "request": {
+    "success": "A ti fi ìbéèrè owó ránṣẹ́",
+    "failed": "Kùnà láti fi ìbéèrè owó ránṣẹ́",
+    "invalid_amount": "Tẹ iye tó tọ́ pẹ̀lú àwọn ìpín 7 títí dé",
+    "invalid_address": "Tẹ àdírẹ́sì Stellar tó tọ́"
+  },
+  "business": {
+    "settings_saved": "Àwọn ètò ti fi pamọ́ ní àṣeyọrí",
+    "settings_save_failed": "Kùnà láti fi àwọn ètò pamọ́",
+    "member_added": "A ti fi ọmọ-ẹgbẹ́ kún",
+    "member_add_failed": "Kùnà láti fi ọmọ-ẹgbẹ́ kún",
+    "member_removed": "A ti yọ ọmọ-ẹgbẹ́ kúrò",
+    "member_remove_failed": "Kùnà láti yọ ọmọ-ẹgbẹ́ kúrò",
+    "invalid_email": "Tẹ àdírẹ́sì ìmẹ̀li tó tọ́",
+    "load_failed": "Kùnà láti gbé àwọn ètò wọlé"
   }
 }

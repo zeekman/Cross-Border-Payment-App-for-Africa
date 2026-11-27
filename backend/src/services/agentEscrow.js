@@ -17,6 +17,7 @@
  */
 
 const StellarSdk = require("@stellar/stellar-sdk");
+const { toApiError } = require("../utils/sorobanErrors");
 
 const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
@@ -157,13 +158,13 @@ async function createEscrow({ encryptedSecretKey, recipient, agent, amount, feeB
 
   const result = await rpc.sendTransaction(prepared);
   if (result.status === "ERROR") {
-    throw Object.assign(new Error(`create_escrow failed: ${result.errorResult}`), { status: 400 });
+    throw toApiError(result, 'agentEscrow');
   }
 
   const response = await waitForSorobanTx(rpc, result, { timeoutMs: CONFIRMATION_TIMEOUT_MS });
 
   if (response.status !== "SUCCESS") {
-    throw Object.assign(new Error(`Transaction failed: ${response.status}`), { status: 400 });
+    throw toApiError(response, 'agentEscrow');
   }
 
   const escrowId = StellarSdk.scValToNative(response.returnValue).toString();
@@ -202,13 +203,13 @@ async function confirmPayout({ encryptedSecretKey, escrowId }) {
 
   const result = await rpc.sendTransaction(prepared);
   if (result.status === "ERROR") {
-    throw Object.assign(new Error(`confirm_payout failed: ${result.errorResult}`), { status: 400 });
+    throw toApiError(result, 'agentEscrow');
   }
 
   const response = await waitForSorobanTx(rpc, result, { timeoutMs: CONFIRMATION_TIMEOUT_MS });
 
   if (response.status !== "SUCCESS") {
-    throw Object.assign(new Error(`Transaction failed: ${response.status}`), { status: 400 });
+    throw toApiError(response, 'agentEscrow');
   }
 
   return { txHash: result.hash };
@@ -246,13 +247,13 @@ async function cancelEscrow({ encryptedSecretKey, escrowId }) {
 
   const result = await rpc.sendTransaction(prepared);
   if (result.status === "ERROR") {
-    throw Object.assign(new Error(`cancel_escrow failed: ${result.errorResult}`), { status: 400 });
+    throw toApiError(result, 'agentEscrow');
   }
 
   const response = await waitForSorobanTx(rpc, result, { timeoutMs: CONFIRMATION_TIMEOUT_MS });
 
   if (response.status !== "SUCCESS") {
-    throw Object.assign(new Error(`Transaction failed: ${response.status}`), { status: 400 });
+    throw toApiError(response, 'agentEscrow');
   }
 
   return { txHash: result.hash };

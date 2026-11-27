@@ -107,16 +107,16 @@ export default function ReceiveMoney() {
       await navigator.clipboard.writeText(addr);
       toast.success(t('receive.address_copied'));
     } catch {
-      toast.error('Failed to copy address');
+      toast.error(t('receive.address_copy_failed'));
     }
   };
 
   const copyUri = async () => {
     try {
       await navigator.clipboard.writeText(paymentUri);
-      toast.success('Payment link copied');
+      toast.success(t('receive.payment_link_copied'));
     } catch {
-      toast.error('Failed to copy payment link');
+      toast.error(t('receive.payment_link_copy_failed'));
     }
   };
 
@@ -124,15 +124,15 @@ export default function ReceiveMoney() {
     const svg = qrRef.current?.querySelector('svg');
     if (!svg) return;
     downloadPng(svg, `afripay-qr-${user?.display_name || 'wallet'}.png`);
-    toast.success('QR code downloaded as PNG');
-  }, [user]);
+    toast.success(t('receive.qr_downloaded_png'));
+  }, [user, t]);
 
   const handleDownloadSvg = useCallback(() => {
     const svg = qrRef.current?.querySelector('svg');
     if (!svg) return;
     downloadSvg(svg, `afripay-qr-${user?.display_name || 'wallet'}.svg`);
-    toast.success('QR code downloaded as SVG');
-  }, [user]);
+    toast.success(t('receive.qr_downloaded_svg'));
+  }, [user, t]);
 
   // FE-132: Replaced document.write (HTML injection risk) with safe DOM APIs.
   // User-controlled strings (name, address) are set via textContent so they are
@@ -312,7 +312,7 @@ export default function ReceiveMoney() {
         {federationAddress && (
           <div className="bg-primary-500/10 border border-primary-500/30 rounded-xl p-4">
             <p className="text-xs text-gray-400 mb-2">
-              {t('receive.federation_label') || 'Federation Address'}
+              {t('receive.federation_label', 'Federation Address')}
             </p>
             <p className="text-white font-mono text-sm break-all leading-relaxed">
               {federationAddress}

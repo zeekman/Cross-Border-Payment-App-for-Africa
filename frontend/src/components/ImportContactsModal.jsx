@@ -119,7 +119,6 @@ export default function ImportContactsModal({ isOpen, onClose, onImported }) {
 
   return createPortal(
     // Keyboard handling sits on the backdrop so it covers the whole dialog (same as ConfirmModal).
-    // eslint-disable-next-line jsx-a11y/no-static-element-interactions
     <div
       className="fixed inset-0 bg-black bg-opacity-75 z-50 flex items-center justify-center p-4"
       onMouseDown={(e) => e.target === e.currentTarget && close()}

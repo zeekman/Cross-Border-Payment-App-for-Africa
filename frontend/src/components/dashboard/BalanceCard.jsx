@@ -1,15 +1,18 @@
+import { useTranslation } from 'react-i18next';
 import { Copy, CheckCheck, WifiOff, Eye, EyeOff } from 'lucide-react';
 import { BalanceCardSkeleton } from '../../components/Skeleton';
-import { truncateAddress } from '../../utils/currency';
+import { formatAmount, truncateAddress } from '../../utils/currency';
+import LimitsWidget from '../LimitsWidget';
 import { useCountUp } from '../../hooks/useCountUp';
 
-function BalanceDisplay({ balance }) {
+function BalanceDisplay({ balance, currency }) {
+  const { i18n } = useTranslation();
   const numericBalance = Number.isFinite(balance) ? balance : 0;
   const animated = useCountUp(numericBalance);
 
   return (
     <span className="text-4xl font-bold text-white">
-      {animated.toLocaleString()}
+      {formatAmount(animated, currency, i18n?.language).replace(/ (XLM|USDC)$/, '')}
     </span>
   );
 }
@@ -38,7 +41,11 @@ export default function BalanceCard({ t, wallet, loading, copied, selectedCurren
 
           {/* Primary display: selected asset balance */}
           <div className="flex items-end gap-2 mb-2">
-            <BalanceDisplay balance={parseFloat(displayBalance)} />
+            {displayBalance == null ? (
+              <span className="text-4xl font-bold text-white">—</span>
+            ) : (
+              <BalanceDisplay balance={parseFloat(displayBalance)} currency={selectedCurrency} />
+            )}
             <span className="text-primary-200 mb-1">{selectedCurrency}</span>
           </div>
           {xlmAvailable !== null && selectedCurrency === 'XLM' && (
@@ -108,9 +115,11 @@ export default function BalanceCard({ t, wallet, loading, copied, selectedCurren
           </div>
           {usingApproximateRates && (
             <p className="text-primary-200/90 text-xs mb-3 leading-snug">
-              {t('common.rates_disclaimer')}
+              {t('common.rates_unavailable', 'Rates unavailable')}
             </p>
           )}
+
+          <LimitsWidget />
 
           {/* Wallet address */}
           <div className="flex items-center gap-2 bg-primary-800/40 rounded-lg px-3 py-2">

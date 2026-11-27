@@ -12,7 +12,6 @@ import { fiatValueForTx, fiatTooltip } from '../utils/fxSnapshot';
 import { useCurrency } from '../context/CurrencyContext';
 import { useExchangeRates } from '../hooks/useExchangeRates';
 import { TransactionCardSkeleton } from '../components/Skeleton';
-import ConfirmModal from '../components/ConfirmModal';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { setCacheEntry, getCacheEntry } from '../utils/offlineDB';
 
@@ -147,18 +146,13 @@ export default function TransactionHistory() {
     selectedStatuses.length > 0,
   ].filter(Boolean).length;
 
-  const [reportTx, setReportTx] = useState(null); // tx being reported
-  const [reportType, setReportType] = useState('other');
-  const [reportDesc, setReportDesc] = useState('');
-  const [reportLoading, setReportLoading] = useState(false);
-  const [confirmReport, setConfirmReport] = useState(false); // ConfirmModal open state for report submission
   const [selectedTx, setSelectedTx] = useState(null); // tx detail modal
   const [copiedHash, setCopiedHash] = useState(false);
   const sentinelRef = useRef(null);
   const txParam = searchParams.get('tx');
   useEffect(() => {
     if (!txParam) return;
-    const match = transactions.find((t) => t.tx_hash === txParam);
+    const match = transactions.find((tx) => tx.tx_hash === txParam || String(tx.id) === txParam);
     if (match) setSelectedTx(match);
   }, [txParam, transactions]);
   const SCROLL_KEY = 'txhistory_scroll';
@@ -308,7 +302,7 @@ export default function TransactionHistory() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      let msg = 'Export failed. Please try again.';
+      let msg = t('history.export_failed');
       try {
         const data = err.response?.data;
         const text = data instanceof Blob ? await data.text() : null;
@@ -337,9 +331,9 @@ export default function TransactionHistory() {
       setReportTx(null);
       setReportDesc('');
       setReportType('other');
-      toast.success('Issue reported. Our team will review it shortly.');
+      toast.success(t('history.report_success'));
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to submit report');
+      toast.error(err.response?.data?.error || t('history.report_failed'));
     } finally {
       setReportLoading(false);
     }
@@ -727,11 +721,11 @@ export default function TransactionHistory() {
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setReportTx(tx);
+                                navigate(`/profile?support=new&tx=${encodeURIComponent(tx.id)}&type=${tx.status === 'failed' ? 'failed_deducted' : 'other'}`);
                               }}
                               className="text-gray-500 hover:text-yellow-400 transition-colors"
-                              aria-label="Report issue with this transaction"
-                              title="Report Issue"
+                              aria-label={t('support.report_problem')}
+                              title={t('support.report_problem')}
                             >
                               <Flag size={12} />
                             </button>
@@ -827,7 +821,7 @@ export default function TransactionHistory() {
                         navigator.clipboard.writeText(selectedTx.tx_hash);
                         setCopiedHash(true);
                         setTimeout(() => setCopiedHash(false), 2000);
-                        toast.success('Hash copied');
+                        toast.success(t('history.hash_copied'));
                       }}
                       className="text-gray-400 hover:text-white transition-colors shrink-0"
                       title="Copy hash"
@@ -854,69 +848,6 @@ export default function TransactionHistory() {
           </div>
         </div>
       )}
-
-      {/* Report Issue Modal */}
-      {reportTx && (
-        <div className="fixed inset-0 bg-black/70 flex items-end justify-center z-50 p-4">
-          <div className="bg-gray-900 rounded-2xl w-full max-w-lg p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-white">Report Issue</h3>
-              <button onClick={() => setReportTx(null)} className="text-gray-400 hover:text-white">
-                <X size={18} />
-              </button>
-            </div>
-            <p className="text-xs text-gray-500">
-              Transaction: {truncateAddress(reportTx.tx_hash || String(reportTx.id))} &mdash; {reportTx.amount} {reportTx.asset}
-            </p>
-            <form onSubmit={handleSubmitReport} className="space-y-3">
-              <div>
-                <label className="text-xs text-gray-400 block mb-1">Issue type</label>
-                <select
-                  value={reportType}
-                  onChange={e => setReportType(e.target.value)}
-                  className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-primary-500"
-                >
-                  <option value="wrong_address">Wrong address</option>
-                  <option value="wrong_amount">Wrong amount</option>
-                  <option value="failed_deducted">Failed but funds deducted</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-xs text-gray-400 block mb-1">Description</label>
-                <textarea
-                  required
-                  rows={3}
-                  maxLength={2000}
-                  value={reportDesc}
-                  onChange={e => setReportDesc(e.target.value)}
-                  placeholder="Describe the issue..."
-                  className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 resize-none"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={reportLoading}
-                className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors"
-              >
-                {reportLoading ? 'Submitting…' : 'Submit Report'}
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Confirm Report Submission Modal */}
-      <ConfirmModal
-        isOpen={confirmReport}
-        onClose={() => setConfirmReport(false)}
-        onConfirm={doSubmitReport}
-        title="Submit Report"
-        message={`Submit a report for this transaction? Our team will review the issue and follow up with you.`}
-        confirmLabel="Submit Report"
-        confirmVariant="primary"
-        loading={reportLoading}
-      />
     </div>
   );
 }

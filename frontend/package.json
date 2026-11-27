@@ -41,11 +41,14 @@
     "start": "react-scripts start",
     "build": "npm run lint:build && DISABLE_ESLINT_PLUGIN=true react-scripts build",
     "lint:build": "eslint src --ext .js,.jsx --no-eslintrc -c .eslintrc.build.js --max-warnings=0",
+    "check:i18n": "node scripts/check-i18n-keys.js",
     "test": "react-scripts test",
     "lint": "eslint src/**/*.{js,jsx}",
     "lint:fix": "eslint src/**/*.{js,jsx} --fix",
     "format": "prettier --write \"**/*.{js,jsx,json,md,html,css}\"",
-    "format:check": "prettier --check \"**/*.{js,jsx,json,md,html,css}\""
+    "format:check": "prettier --check \"**/*.{js,jsx,json,md,html,css}\"",
+    "i18n:check": "node scripts/check-translation-parity.js",
+    "i18n:stub": "node scripts/generate-translation-stub.js"
   },
   "jest": {
     "transformIgnorePatterns": [
@@ -55,6 +58,19 @@
       "^@sentry/react$": "<rootDir>/src/__mocks__/@sentry/react.js",
       "^@ledgerhq/hw-transport-webusb$": "<rootDir>/src/__mocks__/@ledgerhq/hw-transport-webusb.js",
       "^@ledgerhq/hw-app-str$": "<rootDir>/src/__mocks__/@ledgerhq/hw-app-str.js"
+    },
+    "collectCoverageFrom": [
+      "src/pages/**/*.{js,jsx}",
+      "!src/pages/**/*.test.{js,jsx}",
+      "!src/pages/**/__tests__/**"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "lines": 60
+      },
+      "./src/pages/": {
+        "lines": 60
+      }
     }
   },
   "browserslist": {

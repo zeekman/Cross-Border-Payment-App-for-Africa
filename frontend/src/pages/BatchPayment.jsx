@@ -74,7 +74,7 @@ function validateAmount(amount) {
 function validateRecipient(recipient, rowNumber) {
   const errors = [];
   
-  const addressError = validateStellarAddress(recipient.recipient_address);
+  const addressError = validateStellarAddress(recipient.recipient_address, { allowMuxed: false });
   if (addressError) {
     errors.push(addressError);
   }
@@ -181,6 +181,7 @@ export default function BatchPayment() {
   const batchId = results?.batch_id ?? null;
   const stoppedRef = useRef(false);
   const idemRef = useRef(createIdempotencyKey());
+  const retryIdemRefs = useRef(new Map());
 
   // Poll for per-row statuses after batch submission
   const pollOnce = useCallback(async () => {
@@ -235,20 +236,28 @@ export default function BatchPayment() {
       const stepUpToken = await requestStepUp();
       if (!stepUpToken) return;
       setRowStatuses((prev) => ({ ...prev, [rowIndex]: { ...prev[rowIndex], status: 'pending' } }));
-      const { data } = await api.post(
+      let retryIdem = retryIdemRefs.current.get(rowIndex);
+      if (!retryIdem) {
+        retryIdem = createIdempotencyKey();
+        retryIdemRefs.current.set(rowIndex, retryIdem);
+      }
+      const { data } = await postWithIdempotency(
         '/payments/batch',
         {
           asset,
           recipients: [{ recipient_address: row.recipient_address, amount: parseFloat(row.amount) }],
         },
-        { headers: { 'X-Step-Up-Token': stepUpToken, 'Idempotency-Key': crypto.randomUUID() } }
+        retryIdem.get(),
+        { headers: { 'X-Step-Up-Token': stepUpToken } },
       );
+      retryIdem.reset();
       const r = data.results?.[0] || {};
       setRowStatuses((prev) => ({
         ...prev,
         [rowIndex]: { status: r.status || 'failed', error: r.error, txHash: r.tx_hash || data.transaction?.tx_hash },
       }));
     } catch (err) {
+      retryIdemRefs.current.get(rowIndex)?.resetUnlessLost(err);
       const r = err.response?.data?.results?.[0];
       setRowStatuses((prev) => ({
         ...prev,
@@ -376,6 +385,7 @@ export default function BatchPayment() {
       const stepUpToken = await requestStepUp();
       if (!stepUpToken) return;
       setSubmitting(true);
+      retryIdemRefs.current.clear();
 
       const payload = {
         asset,
@@ -446,7 +456,13 @@ export default function BatchPayment() {
             <label className="inline-flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white px-4 py-3 rounded-2xl cursor-pointer transition-colors">
               <Upload size={18} />
               <span>{t('batch.importCsv')}</span>
-              <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleCsvUpload} />
+              <input
+                type="file"
+                accept=".csv,text/csv"
+                className="hidden"
+                onChange={handleCsvUpload}
+                data-testid="batch-csv-upload"
+              />
             </label>
           </div>
         </div>
@@ -659,6 +675,7 @@ export default function BatchPayment() {
             disabled={submitting || !validRecipients.length || hasInvalidRows}
             className="w-full md:w-auto inline-flex items-center justify-center gap-2 bg-primary-500 hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-2xl font-semibold"
             title={hasInvalidRows ? t('batch.fixToSubmit') : ''}
+            data-testid="batch-submit"
           >
             {submitting ? <FileUp size={18} className="animate-pulse" /> : <Send size={18} />}
             {hasInvalidRows ? t('batch.fixErrors') : t('batch.submit')}
@@ -667,7 +684,7 @@ export default function BatchPayment() {
       </div>
 
       {results && (
-        <div className="bg-gray-900 border border-gray-800 rounded-3xl p-6 space-y-5">
+        <div className="bg-gray-900 border border-gray-800 rounded-3xl p-6 space-y-5" data-testid="batch-results">
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 className="text-2xl font-bold text-white">{t('batch.results')}</h2>
