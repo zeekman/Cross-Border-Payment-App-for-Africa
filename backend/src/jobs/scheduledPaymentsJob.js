@@ -155,6 +155,11 @@ async function processOne(payment) {
     }
   }
 
+  // The platform fee is taken from the gross amount; the recipient receives
+  // the net amount and the full breakdown is persisted with the transaction.
+  const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
+
+  let sentThisRun = false;
   let sentNow = false;
   if (!transactionHash) {
     const result = await sendPayment({
@@ -167,6 +172,7 @@ async function processOne(payment) {
     });
     transactionHash = result.transactionHash;
     ledger = result.ledger;
+    sentThisRun = true;
     sentNow = true;
   }
 
@@ -189,8 +195,7 @@ async function processOne(payment) {
     );
 
     // Advance the schedule for recurring payments instead of marking them
-    // completed after the first execution. This keeps the job in sync with
-    // the `execute_at`/frequency` schema exposed to the frontend.
+    // completed after the first execution, and release the BE-150 lease.
     if (isRecurring) {
       const interval = freq === 'daily' ? '1 day' : freq === 'weekly' ? '7 days' : '1 month';
       await client.query(
@@ -225,6 +230,9 @@ async function processOne(payment) {
     client.release();
   }
 
+  // Only collect the fee for a payment sent in this run; a reconciled payment
+  // was sent (and its fee handled) by the run that crashed.
+  if (sentThisRun) collectPlatformFee(feeBreakdown, payment.sender_wallet);
   // Only collect the platform fee for a payment sent in this run; a reconciled
   // payment had its fee collected by the run that sent it.
   if (sentNow) collectPlatformFee(feeBreakdown, payment.sender_wallet);

@@ -261,6 +261,37 @@ const exportKeyLimiter = rateLimit({
   },
 });
 
+// Phone OTP verification: 5 attempts/15min per user. A 6-digit OTP is live for
+// 10 minutes, so without this it could be brute-forced (BE-197).
+const phoneOtpLimiter = rateLimit({
+  windowMs: WINDOW_15MIN,
+  max: 5,
+  keyGenerator: makeKeyByUser,
+  store: new RedisStore(WINDOW_15MIN, 'phone-otp'),
+  standardHeaders: false,
+  legacyHeaders: false,
+  handler(req, res, next, options) {
+    onLimitReached(req, res, options);
+    makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
+    res.status(429).json({ error: 'Too many verification attempts. Please try again later.' });
+  },
+});
+
+// Data-subject requests (export / account deletion): 3 req/hour per user
+// (BE-232). Each export builds a full archive of the user's data.
+const WINDOW_1HOUR = 60 * 60 * 1000;
+const dsarLimiter = rateLimit({
+  windowMs: WINDOW_1HOUR,
+  max: 3,
+  keyGenerator: makeKeyByUser,
+  store: new RedisStore(WINDOW_1HOUR, 'dsar'),
+  standardHeaders: false,
+  legacyHeaders: false,
+  handler(req, res, next, options) {
+    onLimitReached(req, res, options);
+    makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
+    res.status(429).json({ error: 'Too many data requests. Please try again later.' });
+  },
 // ── Named per-route auth limiters (BE-194) ─────────────────────────────────
 // Mounted next to each route in routes/auth.js so a new auth route can't be
 // added without an explicit limiter. Per-user limiters must be mounted after
@@ -466,6 +497,8 @@ module.exports = {
   paymentLimiter,
   readLimiter,
   exportKeyLimiter,
+  phoneOtpLimiter,
+  dsarLimiter,
   emailSendLimiter,
   createEmailSendLimiter,
   tokenVerifyLimiter,

@@ -50,6 +50,18 @@ async function isJtiBlacklisted(jti) {
   return val !== null;
 }
 
+/**
+ * Revoke the refresh-token families linked to the given sessions so a revoked
+ * device cannot mint new access tokens via POST /auth/refresh (BE-182).
+ */
+async function revokeFamilies(rows) {
+  const familyIds = rows.map((r) => r.family_id).filter(Boolean);
+  if (familyIds.length === 0) return;
+  await db.query(`DELETE FROM refresh_tokens WHERE family_id = ANY($1::uuid[])`, [familyIds]);
+}
+
+// Record a new session; enforce SESSION_CAP by invalidating the oldest if needed.
+// familyId links the session to its refresh-token family (BE-182).
 // Record a new session; enforce SESSION_CAP by invalidating the oldest if needed.
 // `familyId` links the session to its refresh-token family (BE-182) so that
 // revoking the session also revokes that device's refresh tokens.
@@ -74,7 +86,7 @@ async function recordSession(userId, token, req, familyId = null) {
 
     // Count active sessions
     const { rows: activeSessions } = await client.query(
-      `SELECT id, token_jti, last_active_at
+      `SELECT id, token_jti, family_id, last_active_at
        FROM sessions
        WHERE user_id = $1 AND is_active = TRUE
        ORDER BY last_active_at ASC`,
@@ -92,6 +104,9 @@ async function recordSession(userId, token, req, familyId = null) {
       if (oldest.token_jti) {
         await blacklistJti(oldest.token_jti, 24 * 3600);
       }
+      if (oldest.family_id) {
+        await client.query(`DELETE FROM refresh_tokens WHERE family_id = $1`, [oldest.family_id]);
+      }
       logger.info('Session cap reached; oldest session invalidated', {
         userId, invalidatedSessionId: oldest.id,
       });
@@ -106,6 +121,8 @@ async function recordSession(userId, token, req, familyId = null) {
         userId, tokenHash, jti,
         userAgent, deviceType, ipAddress,
         location ? JSON.stringify(location) : null,
+        userAgent,
+        familyId,
         userAgent, familyId,
       ]
     );
@@ -157,9 +174,10 @@ async function invalidateOtherSessions(userId, currentTokenHash) {
     `UPDATE sessions
      SET is_active = FALSE
      WHERE user_id = $1 AND is_active = TRUE AND token_hash != $2
-     RETURNING token_jti`,
+     RETURNING token_jti, family_id`,
     [userId, currentTokenHash]
   );
+  await revokeFamilies(rows);
   for (const row of rows) {
     if (row.token_jti) {
       await blacklistJti(row.token_jti, 24 * 3600);
@@ -262,8 +280,12 @@ async function revokeAllSessions(req, res, next) {
          RETURNING token_jti, family_id`,
         [userId]
       ));
+      // Revoking every session also kills refresh tokens whose session row
+      // predates family tracking.
       await db.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [userId]);
     }
+
+    await revokeFamilies(rows);
 
     for (const row of rows) {
       if (row.token_jti) await blacklistJti(row.token_jti, 24 * 3600);
@@ -296,4 +318,5 @@ module.exports = {
   revokeSession,
   revokeAllSessions,
   revokeFamilies,
+  blacklistJti,
 };

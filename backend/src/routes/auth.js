@@ -39,6 +39,8 @@ const {
   FORGOT_PASSWORD_MESSAGE,
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
+const phoneVerificationAuth = require('../middleware/phoneVerificationAuth');
+const { phoneOtpLimiter } = require('../middleware/rateLimiter');
 const geoRestriction = require('../middleware/geoRestriction');
 const { verifyCsrf } = require('../middleware/csrf');
 const {
@@ -141,8 +143,12 @@ router.post(
   validate,
   resendVerification
 );
+// BE-197: accepts the phone_verification_token from /register (no session
+// exists yet at that point) or a normal access token.
 router.post(
   '/verify-phone',
+  phoneVerificationAuth,
+  phoneOtpLimiter,
   authMiddleware,
   secondFactorLimiter,
   phoneOtpVerifyLimiter,

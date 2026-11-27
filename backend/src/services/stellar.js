@@ -116,6 +116,13 @@ function getFallbackDurationMs() {
 }
 
 /**
+ * Configured Horizon endpoints, in the order withFallback() tries them (BE-199).
+ */
+function getHorizonEndpoints() {
+  return { primary: primaryUrl, fallbacks: fallbackUrl ? [fallbackUrl] : [] };
+}
+
+/**
  * Returns the current Horizon endpoint status for health checks / dashboards.
  */
 function getHorizonEndpointStatus() {
@@ -1727,6 +1734,7 @@ module.exports = {
   feeForPriority,
   checkHorizonHealth,
   getHorizonEndpointStatus,
+  getHorizonEndpoints,
   checkFallbackDuration,
   startFallbackDurationMonitor,
   stopFallbackDurationMonitor,
