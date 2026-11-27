@@ -131,6 +131,10 @@ async function processOne(payment) {
 
   const { encrypted_secret_key } = walletResult.rows[0];
 
+  // Platform fee is deducted from the scheduled amount: the recipient gets the
+  // net amount and the fee breakdown is persisted with the transaction.
+  const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
+
   // BE-150: if this row was reclaimed (already in `processing` before this
   // claim), check whether the payment already landed on-chain before
   // re-sending, to avoid a double payment.
@@ -148,6 +152,12 @@ async function processOne(payment) {
   }
 
   const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
+  // The platform fee is taken from the gross amount; the recipient receives
+  // the net amount and the full breakdown is persisted with the transaction.
+  const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
+
+  let sentThisRun = false;
+  let sentNow = false;
   if (!transactionHash) {
     const result = await sendPayment({
       senderPublicKey: payment.sender_wallet,
@@ -159,6 +169,8 @@ async function processOne(payment) {
     });
     transactionHash = result.transactionHash;
     ledger = result.ledger;
+    sentThisRun = true;
+    sentNow = true;
   }
 
   // BE-149: The on-chain send already succeeded at this point. Any DB failure
@@ -169,7 +181,7 @@ async function processOne(payment) {
   const freq = (payment.frequency || '').toLowerCase();
   const isRecurring = freq === 'daily' || freq === 'weekly' || freq === 'monthly';
 
-  const client = await db.connect();
+  const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
 
@@ -186,24 +198,28 @@ async function processOne(payment) {
         feeBreakdown.platform_fee_amount,
         JSON.stringify(feeBreakdown),
       ]
+      [payment.sender_wallet, payment.recipient_wallet, payment.amount, payment.asset, payment.memo, transactionHash, feeBreakdown.platform_fee_amount, JSON.stringify(feeBreakdown)]
     );
 
     // Advance the schedule for recurring payments instead of marking them
-    // completed after the first execution. This keeps the job in sync with
-    // the `execute_at`/frequency` schema exposed to the frontend.
+    // completed after the first execution, and release the BE-150 lease.
     if (isRecurring) {
       const interval = freq === 'daily' ? '1 day' : freq === 'weekly' ? '7 days' : '1 month';
       await client.query(
         `UPDATE scheduled_payments
          SET status = 'pending',
              run_at = run_at + $2::interval,
+             claimed_at = NULL,
+             claimed_by = NULL,
              updated_at = NOW()
          WHERE id = $1`,
         [payment.id, interval]
       );
     } else {
       await client.query(
-        `UPDATE scheduled_payments SET status = 'completed', updated_at = NOW() WHERE id = $1`,
+        `UPDATE scheduled_payments
+         SET status = 'completed', claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
+         WHERE id = $1`,
         [payment.id]
       );
     }
@@ -221,6 +237,13 @@ async function processOne(payment) {
   } finally {
     client.release();
   }
+
+  // Only collect the fee for a payment sent in this run; a reconciled payment
+  // was sent (and its fee handled) by the run that crashed.
+  if (sentThisRun) collectPlatformFee(feeBreakdown, payment.sender_wallet);
+  // Only collect the platform fee for a payment sent in this run; a reconciled
+  // payment had its fee collected by the run that sent it.
+  if (sentNow) collectPlatformFee(feeBreakdown, payment.sender_wallet);
 
   logger.info('Scheduled payment executed', { id: payment.id, tx_hash: transactionHash, ledger });
 }
@@ -262,4 +285,4 @@ async function processScheduledPayments(ctx) {
   return doProcess(ctx);
 }
 
-module.exports = { processScheduledPayments, claimDuePayments, idempotencyMemo };
+module.exports = { processScheduledPayments, processOne, claimDuePayments, idempotencyMemo };

@@ -35,6 +35,13 @@ const wsConnections = new client.Gauge({
   registers: [registry],
 });
 
+const priceOracleFetchTotal = new client.Counter({
+  name: 'price_oracle_fetch_total',
+  help: 'Upstream price oracle fetches',
+  labelNames: ['source', 'status'],
+  registers: [registry],
+});
+
 const anchorPollDuration = new client.Histogram({
   name: 'anchor_poll_duration_seconds',
   help: 'Anchor transaction-status poll duration in seconds, per anchor',
@@ -110,6 +117,13 @@ const webhookDeliveriesTotal = new client.Counter({
 const webhookEndpointsDisabledTotal = new client.Counter({
   name: 'afripay_webhook_endpoints_disabled_total',
   help: 'Webhook endpoints automatically disabled after consecutive failed events',
+  registers: [registry],
+});
+
+const smsSendTotal = new client.Counter({
+  name: 'sms_send_total',
+  help: 'SMS send attempts by provider (twilio, africastalking, mock) and status (success, failure)',
+  labelNames: ['provider', 'status'],
   registers: [registry],
 });
 
@@ -252,7 +266,15 @@ const fraudRuleErrorsTotal = new client.Counter({
   registers: [registry],
 });
 
+// BE-172: shared Redis connection readiness (dropped by a bad merge).
+const redisUp = new client.Gauge({
+  name: 'redis_up',
+  help: 'Whether the shared Redis connection is ready (1) or unavailable (0)',
+  registers: [registry],
+});
+
 module.exports = {
+  priceOracleFetchTotal,
   registry,
   redisUp,
   httpRequestDuration,
@@ -272,6 +294,7 @@ module.exports = {
   webhookEndpointsDisabledTotal,
   amlScreeningsTotal,
   amlScreeningCoverageGauge,
+  smsSendTotal,
   rateLimiterDegraded,
   rateLimiterRedisFailuresTotal,
   distributedLockRenewalFailuresTotal,

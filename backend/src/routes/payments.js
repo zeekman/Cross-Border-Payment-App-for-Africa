@@ -24,10 +24,12 @@ const {
   sendStrictReceivePath,
   getPaymentById,
   cancelPendingEscrow,
+  getReceipt,
 } = require("../controllers/paymentController");
 const { buildTransaction, submitSigned } = require("../controllers/ledgerController");
 const { resolveFederationAddress } = require("../services/stellar");
 const { isMemoRequired } = require("../services/memoRequired");
+const logger = require("../utils/logger");
 const { ALLOWED_HISTORY_ASSETS } = require("../utils/historyQuery");
 
 const VALID_ASSETS = ["XLM", "USDC", "NGN", "GHS", "KES"];
@@ -118,12 +120,15 @@ router.get(
   "/resolve-federation",
   [query("address").notEmpty().withMessage("Address is required")],
   validate,
-  async (req, res) => {
+  async (req, res, next) => {
     try {
       const publicKey = await resolveFederationAddress(req.query.address);
       res.json({ public_key: publicKey });
     } catch (err) {
-      res.status(err.status || 400).json({ error: err.message });
+      if (err.code && [400, 404, 502].includes(err.status)) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
+      next(err);
     }
   },
 );
@@ -136,9 +141,12 @@ router.get(
   async (req, res) => {
     try {
       const required = await isMemoRequired(req.query.address);
-      res.json({ memo_required: required });
+      res.json({ memo_required: required, checked: true });
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      // Fail open for UX, but tell the client the check did not run.
+      // Never leak upstream/DB error text to the client.
+      logger.warn('memo-required check failed', { error: err.message });
+      res.json({ memo_required: false, checked: false });
     }
   },
 );
@@ -249,6 +257,7 @@ router.post(
 /**
  * POST /api/payments/send-path
  * @protected @idempotent
+ * Idempotency-Key header preven
  * Idempotency-Key header prevents duplicate path payments on client retry
  * (e.g. network timeout causing the client to resend the same request).
  * Closes #493
@@ -361,6 +370,17 @@ router.post(
 );
 
 /**
+ * GET /api/payments/:id/receipt?format=pdf|png|json  (BE-226)
+ * Shareable single-transaction receipt; sender or recipient only.
+ */
+router.get("/:id/receipt", [
+  require("express-validator").param("id").isUUID().withMessage("id must be a valid UUID"),
+  query("format").optional().isIn(["pdf", "png", "json"]).withMessage("format must be pdf, png or json"),
+  query("fiat").optional().isIn(["USD", "NGN", "GHS", "KES"]),
+  validate,
+], getReceipt);
+
+/**
  * GET /api/payments/:id
  * Returns a single payment with fee_breakdown.
  * Must be after all named GET routes.
@@ -370,4 +390,4 @@ router.get("/:id", [
   validate,
 ], getPaymentById);
 
-module.exports = router;
+/* … truncated 3719 chars — edit only what you need near the top … */

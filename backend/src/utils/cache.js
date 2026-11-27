@@ -124,4 +124,4 @@ async function delPattern(pattern) {
   }
 }
 
-module.exports = { get, set, del, delPattern, setIfAbsent, getClient, BALANCE_TTL };
+module.exports = { get, getStrict, set, del, delPattern, setIfAbsent, getClient, BALANCE_TTL };

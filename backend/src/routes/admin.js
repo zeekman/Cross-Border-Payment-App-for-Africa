@@ -14,6 +14,7 @@ const {
   getStellarNetworkStats,
   clawback,
   approveKYC,
+  getKYCDocument,
   revokeKYC,
   setWalletFlags,
   announceContractUpgrade,
@@ -37,6 +38,13 @@ const {
   getAmlOverrides,
 } = require('../controllers/adminController');
 const { getDeadLetterNotifications } = require('../controllers/notificationController');
+const {
+  VALID_STATUSES: SUPPORT_STATUSES,
+  adminListTickets,
+  adminGetTicket,
+  adminUpdateTicket,
+  adminAddMessage,
+} = require('../controllers/supportController');
 const {
   listConfigs,
   createFeeConfig,
@@ -108,6 +116,7 @@ router.post('/clawback',
   clawback
 );
 
+router.get('/kyc/:userId/document', param('userId').isUUID(), (req, res, next) => (validationResult(req).isEmpty() ? next() : res.status(400).json({ error: 'Invalid userId' })), getKYCDocument);
 router.post('/kyc/:userId/approve', approveKYC);
 router.post('/kyc/:userId/revoke', revokeKYC);
 
@@ -539,6 +548,107 @@ router.patch(
   ],
   validate,
   updateFeeConfig
+);
+
+/**
+ * @swagger
+ * /api/admin/support/tickets:
+ *   get:
+ *     summary: List/filter support tickets (admin only)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: status, schema: { type: string, enum: [open, in_progress, resolved, closed] } }
+ *       - { in: query, name: type, schema: { type: string } }
+ *       - { in: query, name: q, schema: { type: string }, description: Search description or user email }
+ *       - { in: query, name: assigned_to, schema: { type: string, format: uuid } }
+ *       - { in: query, name: limit, schema: { type: integer, default: 50, maximum: 200 } }
+ *       - { in: query, name: offset, schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: Tickets
+ * /api/admin/support/tickets/{id}:
+ *   get:
+ *     summary: Get a support ticket with attachments and messages (admin only)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: integer } }
+ *     responses:
+ *       200: { description: Ticket detail }
+ *       404: { description: Ticket not found }
+ *   patch:
+ *     summary: Change a ticket's status and/or assignee (admin only, audit-logged)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: integer } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               status: { type: string, enum: [open, in_progress, resolved, closed] }
+ *               assigned_to: { type: string, format: uuid, nullable: true }
+ *     responses:
+ *       200: { description: Ticket updated }
+ *       404: { description: Ticket not found }
+ *       409: { description: Invalid status transition }
+ * /api/admin/support/tickets/{id}/messages:
+ *   post:
+ *     summary: Reply to a support ticket (admin only, audit-logged, notifies the user)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: integer } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [body]
+ *             properties:
+ *               body: { type: string, maxLength: 5000 }
+ *     responses:
+ *       201: { description: Message added }
+ *       404: { description: Ticket not found }
+ */
+const supportTicketId = param('id').isInt({ min: 1 }).withMessage('id must be a positive integer');
+router.get(
+  '/support/tickets',
+  [
+    require('express-validator').query('status').optional().isIn(SUPPORT_STATUSES),
+    require('express-validator').query('assigned_to').optional().isUUID(),
+    require('express-validator').query('q').optional().isLength({ max: 200 }),
+  ],
+  validate,
+  adminListTickets
+);
+router.get('/support/tickets/:id', [supportTicketId], validate, adminGetTicket);
+router.patch(
+  '/support/tickets/:id',
+  adminLimiter,
+  [
+    supportTicketId,
+    body('status').optional().isIn(SUPPORT_STATUSES),
+    body('assigned_to').optional({ nullable: true }).isUUID(),
+  ],
+  validate,
+  adminUpdateTicket
+);
+router.post(
+  '/support/tickets/:id/messages',
+  adminLimiter,
+  [supportTicketId, body('body').trim().notEmpty().isLength({ max: 5000 })],
+  validate,
+  adminAddMessage
 );
 
 module.exports = router;

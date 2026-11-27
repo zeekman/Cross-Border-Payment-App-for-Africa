@@ -7,8 +7,6 @@ const logger = require('../utils/logger');
 const { getRateLimiterStatus } = require('../middleware/rateLimiter');
 const ledgerState = require('./ledgerListenerState');
 
-const horizonUrl = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
-
 // Ledger listener liveness (BE-198). ledgerListener.js records proof of life through
 // setLastLedgerEvent: on every stream message, and on every poll that finds the stream
 // fully caught up with Horizon, so a quiet network does not read as stale.
@@ -25,31 +23,109 @@ function setLastLedgerEvent(ts, info) {
   ledgerState.setLastLedgerEvent(ts, info);
 }
 
+const DB_TIMEOUT_MS = 2000;
+const HORIZON_TIMEOUT_MS = 3000;
+const REDIS_TIMEOUT_MS = 1000;
+
+// BE-199: withTimeout clears its timer as soon as the check settles, so
+// frequent probes (liveness every 10 s, /health/deep from Grafana) no longer
+// pile up pending timers the way the old bare Promise.race did.
 async function checkDatabase() {
   const start = Date.now();
   try {
-    await Promise.race([
-      db.query('SELECT 1'),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000)),
-    ]);
+    await withTimeout(db.query('SELECT 1'), DB_TIMEOUT_MS);
     return { status: 'healthy', response_time_ms: Date.now() - start };
   } catch (err) {
     return { status: 'unhealthy', response_time_ms: Date.now() - start, error: err.message };
   }
 }
 
-async function checkHorizon() {
-  const start = Date.now();
+/**
+ * Report an endpoint by origin only: paid Horizon providers often put the API
+ * key in the path or query, and /health/deep is not behind auth.
+ */
+function horizonLabel(url) {
   try {
-    const res = await Promise.race([
-      fetch(horizonUrl),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
-    ]);
-    const ok = res.ok || res.status < 500;
-    return { status: ok ? 'healthy' : 'unhealthy', response_time_ms: Date.now() - start };
-  } catch (err) {
-    return { status: 'unhealthy', response_time_ms: Date.now() - start, error: err.message };
+    return new URL(url).origin;
+  } catch {
+    return 'invalid-url';
   }
+}
+
+/**
+ * Probe one Horizon endpoint (BE-199).
+ *  - 2xx          → healthy
+ *  - 429          → degraded, rate_limited: true (calls are being throttled)
+ *  - anything else → unhealthy; a 401/403 means the provider key was revoked,
+ *    so every real Horizon call is failing even though the server answered.
+ * The fetch itself is aborted on timeout so slow sockets are not left open.
+ */
+async function checkHorizonEndpoint(url) {
+  const start = Date.now();
+  const base = { url: horizonLabel(url) };
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(HORIZON_TIMEOUT_MS) });
+    const response_time_ms = Date.now() - start;
+    if (res.ok) return { ...base, status: 'healthy', http_status: res.status, response_time_ms };
+    if (res.status === 429) {
+      return { ...base, status: 'degraded', rate_limited: true, http_status: res.status, response_time_ms };
+    }
+    return { ...base, status: 'unhealthy', http_status: res.status, response_time_ms };
+  } catch (err) {
+    const timedOut = err.name === 'TimeoutError' || err.name === 'AbortError';
+    return {
+      ...base,
+      status: 'unhealthy',
+      response_time_ms: Date.now() - start,
+      error: timedOut ? 'timeout' : err.message,
+    };
+  }
+}
+
+function configuredHorizonEndpoints() {
+  if (typeof stellar.getHorizonEndpoints === 'function') return stellar.getHorizonEndpoints();
+  return {
+    primary: process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org',
+    fallbacks: process.env.STELLAR_HORIZON_FALLBACK_URL ? [process.env.STELLAR_HORIZON_FALLBACK_URL] : [],
+  };
+}
+
+/**
+ * Check every configured Horizon endpoint and report which one the app is
+ * actually using (BE-036 / BE-199):
+ *   { status, primary, fallbacks: [...], active, endpoint }
+ * Overall status is that of the active endpoint, downgraded to 'degraded' if
+ * any other configured endpoint is unhealthy, so running entirely on the
+ * fallback is visible.
+ */
+async function checkHorizon() {
+  const { primary: primaryUrl, fallbacks: fallbackUrls } = configuredHorizonEndpoints();
+  const [primary, ...fallbacks] = await Promise.all(
+    [primaryUrl, ...fallbackUrls].map((url) => checkHorizonEndpoint(url))
+  );
+
+  const endpoint = typeof stellar.getHorizonEndpointStatus === 'function'
+    ? stellar.getHorizonEndpointStatus()
+    : { node: 'primary' };
+  const onFallback = endpoint.node === 'fallback' && fallbacks.length > 0;
+  const activeCheck = onFallback ? fallbacks[0] : primary;
+
+  let status = activeCheck.status;
+  if (status === 'healthy' && [primary, ...fallbacks].some((c) => c.status !== 'healthy')) {
+    status = 'degraded';
+  }
+
+  const result = {
+    status,
+    primary,
+    fallbacks,
+    active: activeCheck.url,
+    active_node: onFallback ? 'fallback' : 'primary',
+    endpoint,
+    response_time_ms: activeCheck.response_time_ms,
+  };
+  if ([primary, ...fallbacks].some((c) => c.rate_limited)) result.rate_limited = true;
+  return result;
 }
 
 async function checkRedis() {
@@ -59,10 +135,7 @@ async function checkRedis() {
     return { status: 'unhealthy', response_time_ms: 0, error: 'Redis not configured' };
   }
   try {
-    const result = await Promise.race([
-      redis.ping(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1000)),
-    ]);
+    const result = await withTimeout(redis.ping(), REDIS_TIMEOUT_MS);
     const ok = result === 'PONG';
     return { status: ok ? 'healthy' : 'unhealthy', response_time_ms: Date.now() - start };
   } catch (err) {
@@ -172,10 +245,13 @@ async function runDeepHealthChecks() {
   // operators can see it directly in the deep health check output.
   const horizonEndpoint = stellar.getHorizonEndpointStatus();
   horizon.endpoint = horizonEndpoint;
+  // BE-036: checkHorizon() includes which Horizon endpoint (primary/fallback)
+  // is active and how long the current fallback activation has lasted.
+  const horizonEndpoint = horizon.endpoint || {};
 
   const criticalFailed = database.status === 'unhealthy' || redis.status === 'unhealthy';
   const nonCriticalFailed =
-    horizon.status === 'unhealthy' ||
+    horizon.status !== 'healthy' ||
     ledger_listener.status === 'degraded' ||
     rate_limiter.status === 'degraded' ||
     horizonEndpoint.alertExceeded ||
@@ -201,4 +277,13 @@ async function runDeepHealthChecks() {
   };
 }
 
-module.exports = { runHealthChecks, runDeepHealthChecks, setLastLedgerEvent, checkLedgerListener };
+module.exports = {
+  runHealthChecks,
+  runDeepHealthChecks,
+  setLastLedgerEvent,
+  checkLedgerListener,
+  checkDatabase,
+  checkHorizon,
+  checkHorizonEndpoint,
+  checkRedis,
+};

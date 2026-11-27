@@ -36,6 +36,29 @@ function buildKycHash(userId, walletAddress, idType) {
     .digest();
 }
 
+// Mirrors `KycTier` in contracts/kyc-attestation (C-like enum → encoded as u32).
+const KYC_TIERS = { basic: 0, enhanced: 1, business: 2 };
+
+function normalizeTierValue(tier = "basic") {
+  const value = typeof tier === "number" ? tier : KYC_TIERS[String(tier).toLowerCase()];
+  if (![0, 1, 2].includes(value)) {
+    throw Object.assign(new Error(`Invalid KYC tier: ${tier}`), { status: 400 });
+  }
+  return value;
+}
+
+function tierToScVal(tier = "basic") {
+  return StellarSdk.nativeToScVal(normalizeTierValue(tier), { type: "u32" });
+}
+
+function getAdminPublicKey() {
+  const encryptedKey = process.env.ADMIN_ENCRYPTED_SECRET_KEY;
+  if (!encryptedKey) {
+    throw Object.assign(new Error("ADMIN_ENCRYPTED_SECRET_KEY is not configured"), { status: 500 });
+  }
+  return StellarSdk.Keypair.fromSecret(decryptSecret(encryptedKey)).publicKey();
+}
+
 async function invokeAdmin(method, args) {
   if (!CONTRACT_ID) {
     throw Object.assign(new Error("KYC_ATTESTATION_CONTRACT_ID is not configured"), { status: 500 });
@@ -78,16 +101,44 @@ async function invokeAdmin(method, args) {
   return result.hash;
 }
 
-// Mirrors `KycTier` in contracts/kyc-attestation (C-like enum → encoded as u32).
-const KYC_TIERS = { basic: 0, enhanced: 1, business: 2 };
-const DEFAULT_TTL_DAYS = parseInt(process.env.KYC_ATTESTATION_TTL_DAYS || "365", 10);
-
-function tierToScVal(tier = "basic") {
-  const value = typeof tier === "number" ? tier : KYC_TIERS[String(tier).toLowerCase()];
-  if (![0, 1, 2].includes(value)) {
-    throw Object.assign(new Error(`Invalid KYC tier: ${tier}`), { status: 400 });
+/**
+ * Read the on-chain max validity (seconds) for a KYC tier.
+ * Returns 0 when the tier is configured as unlimited/unset.
+ */
+async function getMaxValidity(tier = "basic") {
+  if (!CONTRACT_ID) {
+    throw Object.assign(new Error("KYC_ATTESTATION_CONTRACT_ID is not configured"), { status: 500 });
   }
-  return StellarSdk.nativeToScVal(value, { type: "u32" });
+
+  const rpc = getRpc();
+  const contract = new StellarSdk.Contract(CONTRACT_ID);
+  const adminPublicKey = getAdminPublicKey();
+  const account = await rpc.getAccount(adminPublicKey);
+
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase,
+  })
+    .addOperation(contract.call("get_max_validity", tierToScVal(tier)))
+    .setTimeout(30)
+    .build();
+
+  const simResult = await rpc.simulateTransaction(tx);
+  if (StellarSdk.SorobanRpc.Api.isSimulationError(simResult)) {
+    throw Object.assign(
+      new Error(`Failed to read max validity: ${JSON.stringify(simResult.error)}`),
+      { status: 502 }
+    );
+  }
+
+  const val = simResult.result?.retval;
+  return val ? Number(StellarSdk.scValToNative(val)) : 0;
+}
+
+async function computeExpiresAt(tier = "basic") {
+  const maxValidity = await getMaxValidity(tier);
+  if (!maxValidity) return 0;
+  return Math.floor(Date.now() / 1000) + maxValidity;
 }
 
 /**
@@ -99,19 +150,27 @@ function tierToScVal(tier = "basic") {
  * @param {string} idType - KYC document type
  * @param {object} [opts]
  * @param {string|number} [opts.tier="basic"] - basic | enhanced | business
- * @param {Date|number} [opts.expiresAt] - expiry (Date or unix seconds); defaults to now + KYC_ATTESTATION_TTL_DAYS
+ * @param {Date|number} [opts.expiresAt] - expiry (Date or unix seconds); when omitted,
+ *   computed from the contract's get_max_validity(tier) policy
  * @returns {Promise<string>} transaction hash
  */
 async function attestKyc(adminPublicKey, userWalletAddress, userId, idType, opts = {}) {
+  const tier = opts.tier ?? "basic";
   const kycHashBytes = buildKycHash(userId, userWalletAddress, idType);
   let expiresAt = opts.expiresAt;
-  if (expiresAt instanceof Date) expiresAt = Math.floor(expiresAt.getTime() / 1000);
-  if (expiresAt == null) expiresAt = Math.floor(Date.now() / 1000) + DEFAULT_TTL_DAYS * 86400;
+
+  if (expiresAt instanceof Date) {
+    expiresAt = Math.floor(expiresAt.getTime() / 1000);
+  }
+
+  if (expiresAt == null) {
+    expiresAt = await computeExpiresAt(tier);
+  }
 
   const args = [
     StellarSdk.nativeToScVal(adminPublicKey, { type: "address" }),
     StellarSdk.nativeToScVal(userWalletAddress, { type: "address" }),
-    tierToScVal(opts.tier),
+    tierToScVal(tier),
     StellarSdk.xdr.ScVal.scvBytes(kycHashBytes),
     StellarSdk.nativeToScVal(BigInt(expiresAt), { type: "u64" }),
   ];
@@ -142,12 +201,11 @@ async function revokeKyc(adminPublicKey, userWalletAddress, tier = "basic") {
  * Used by system jobs (e.g. kycExpiryJob) that need to call attest/revoke
  * without an authenticated admin request in context.
  */
-function getAdminPublicKey() {
-  const encryptedKey = process.env.ADMIN_ENCRYPTED_SECRET_KEY;
-  if (!encryptedKey) {
-    throw Object.assign(new Error("ADMIN_ENCRYPTED_SECRET_KEY is not configured"), { status: 500 });
-  }
-  return StellarSdk.Keypair.fromSecret(decryptSecret(encryptedKey)).publicKey();
-}
-
-module.exports = { attestKyc, revokeKyc, getAdminPublicKey, KYC_TIERS };
+module.exports = {
+  attestKyc,
+  revokeKyc,
+  getAdminPublicKey,
+  getMaxValidity,
+  computeExpiresAt,
+  KYC_TIERS,
+};

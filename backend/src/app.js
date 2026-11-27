@@ -11,7 +11,6 @@ const metricsMiddleware = require('./middleware/metricsMiddleware');
 const errorHandler = require('./middleware/errorHandler');
 const { registry } = require('./utils/metrics');
 const rateLimit = require('express-rate-limit');
-const rateLimiters = require('./middleware/rateLimiter');
 
 const { getHealth: getLedgerHealth } = require('./services/ledgerListener');
 
@@ -122,10 +121,8 @@ app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avat
   },
 }));
 
-// Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set)
-app.use('/api/auth/login', rateLimiters.authLimiter);
-app.use('/api/auth/register', rateLimiters.authLimiter);
-
+// Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set).
+// Auth limiters are mounted per route in routes/auth.js (BE-194).
 app.use('/api/auth', authRoutes);
 // Authenticated wallet/payment data must never be cached (FE-162)
 app.use(['/api/wallet', '/api/payments'], (req, res, next) => {
@@ -133,14 +130,18 @@ app.use(['/api/wallet', '/api/payments'], (req, res, next) => {
   next();
 });
 // Deprecated alias for /api/contacts (BE-188) — same router and middleware stack.
+// It lives under /api/wallet, so it gets the same geo-restriction (BE-192).
 const CONTACTS_SUNSET = 'Wed, 31 Mar 2027 00:00:00 GMT';
-app.use('/api/wallet/contacts', (req, res, next) => {
+app.use('/api/wallet/contacts', geoRestriction, (req, res, next) => {
   res.set('Deprecation', 'true');
   res.set('Sunset', CONTACTS_SUNSET);
   res.set('Link', '</api/contacts>; rel="successor-version"');
   next();
 }, contactsRoutes);
-app.use('/api/wallet', walletRoutes);
+// Single geo-gated mount: an earlier ungated mount of the same router ran
+// first and silently bypassed the OFAC geo-restriction for wallet routes.
+// BE-192: mount the wallet router exactly once. An earlier unguarded mount
+// above this line handled every request and bypassed geoRestriction.
 app.use('/api/wallet', geoRestriction, walletRoutes);
 app.use('/api/payments', geoRestriction, paymentRoutes);
 app.use('/api/payment-requests', geoRestriction, paymentRequestRoutes);
@@ -180,10 +181,6 @@ if (process.env.NODE_ENV !== 'production') {
   app.use('/api/dev', devRoutes);
 }
 app.use('/', stellarTomlRoutes);
-
-// Sentry v8: register the Express error handler after all routes so thrown
-// route errors are reported. No-op when Sentry was not initialized (no DSN).
-Sentry.setupExpressErrorHandler(app);
 
 // Swagger API Documentation
 const swaggerOptions = {
@@ -238,6 +235,7 @@ const swaggerOptions = {
       }
     }
   },
+  apis: [path.join(__dirname, 'routes/*.js'), path.join(__dirname, 'app.js')]
   apis: ['./src/routes/*.js']
 };
 
@@ -254,6 +252,7 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs));
  * /health:
  *   get:
  *     summary: Public liveness probe
+ *     description: Returns the overall status and pool utilization. Use /health/deep for full diagnostics.
  *     description: Returns the overall status and pool utilization. Use /api/admin/health for full diagnostics.
  *     tags: [Health]
  *     responses:
@@ -302,12 +301,42 @@ app.get('/health/deep', deepHealthLimiter, async (req, res) => {
     if (!token || req.headers.authorization !== `Bearer ${token}`) {
       if (health.components?.jobs) delete health.components.jobs.details;
     }
+/**
+ * @openapi
+ * /health/deep:
+ *   get:
+ *     summary: Deep readiness check
+ *     description: >
+ *       Checks the database, Redis, every configured Horizon endpoint, the
+ *       ledger listener and the rate limiter. `components.horizon` lists the
+ *       primary and fallback endpoints and which one is active (BE-199).
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Healthy or degraded
+ *       503:
+ *         description: A critical dependency (database or Redis) is unhealthy
+ */
+app.get('/health/deep', deepHealthLimiter, async (req, res) => {
+  try {
+    const health = await runDeepHealthChecks();
     const httpStatus = health.status === 'unhealthy' ? 503 : 200;
     res.status(httpStatus).json(health);
   } catch {
     res.status(503).json({ status: 'unhealthy' });
   }
 });
+
+/**
+ * @openapi
+ * /api/health/ledger-listener:
+ *   get:
+ *     summary: Ledger listener status
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Ledger listener health snapshot
+ */
 app.get('/api/health/ledger-listener', (req, res) => {
   res.json(getLedgerHealth());
 });
@@ -317,6 +346,26 @@ app.get('/metrics', async (req, res) => {
   if (token) {
     const auth = req.headers.authorization || '';
     if (auth !== `Bearer ${token}`) {
+/**
+ * @openapi
+ * /metrics:
+ *   get:
+ *     summary: Prometheus metrics
+ *     description: "Requires an `Authorization: Bearer <METRICS_TOKEN>` header when METRICS_TOKEN is set (always in production)."
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Prometheus text exposition format
+ *       401:
+ *         description: Missing or invalid metrics token
+ */
+app.get('/metrics', async (req, res) => {
+  // BE-174: METRICS_TOKEN is required in production (enforced by validateEnv),
+  // so /metrics is never public there.
+  const token = process.env.METRICS_TOKEN;
+  if (token || process.env.NODE_ENV === 'production') {
+    const auth = req.headers.authorization || '';
+    if (!token || auth !== `Bearer ${token}`) {
       return res.status(401).end();
     }
   }
@@ -337,5 +386,13 @@ app.use((err, req, res, next) => {
   }
   return errorHandler(err, req, res, next);
 });
+// Sentry v8: register the Express error handler after all routes so thrown
+// route errors are reported. No-op when Sentry was not initialized (no DSN).
+Sentry.setupExpressErrorHandler(app);
+
+app.use(errorHandler);
+
+app.swaggerSpec = specs;
+app.use(errorHandler);
 
 module.exports = app;

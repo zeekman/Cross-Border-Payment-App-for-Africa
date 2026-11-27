@@ -126,7 +126,65 @@ function encryptAesCbc(plaintext, rawKey) {
   return iv.toString('hex') + ':' + encrypted;
 }
 
+// ---------------------------------------------------------------------------
+// BE-225: KYC document envelope encryption (KYC_ENCRYPTION_KEY)
+// Each file gets a random 256-bit data key (AES-256-GCM). The data key is
+// wrapped with the master key (AES-256-GCM) and stored alongside iv/tag.
+// ---------------------------------------------------------------------------
+
+function getKycMasterKey() {
+  const hex = process.env.KYC_ENCRYPTION_KEY;
+  if (!hex || hex.length !== 64) {
+    throw new Error('KYC_ENCRYPTION_KEY must be a 64-character hex string (32 bytes)');
+  }
+  return Buffer.from(hex, 'hex');
+}
+
+function wrapKey(dataKey) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv(GCM_ALGORITHM, getKycMasterKey(), iv);
+  const enc = Buffer.concat([cipher.update(dataKey), cipher.final()]);
+  return [iv, cipher.getAuthTag(), enc].map((b) => b.toString('base64')).join('.');
+}
+
+function unwrapKey(wrapped) {
+  const [iv, tag, enc] = String(wrapped).split('.').map((p) => Buffer.from(p, 'base64'));
+  const decipher = crypto.createDecipheriv(GCM_ALGORITHM, getKycMasterKey(), iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(enc), decipher.final()]);
+}
+
+/** Encrypt a document buffer. Returns { ciphertext, iv, tag, wrapped_key }. */
+function encryptDocument(plaintext) {
+  const dataKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv(GCM_ALGORITHM, dataKey, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  return {
+    ciphertext,
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    wrapped_key: wrapKey(dataKey),
+  };
+}
+
+/** Returns a decipher stream for an encrypted document (auth-tag checked at end). */
+function createDocumentDecipher({ iv, tag, wrapped_key }) {
+  const decipher = crypto.createDecipheriv(GCM_ALGORITHM, unwrapKey(wrapped_key), Buffer.from(iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(tag, 'base64'));
+  return decipher;
+}
+
+function decryptDocument(ciphertext, meta) {
+  const decipher = createDocumentDecipher(meta);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
 module.exports = {
+  // AES-256-GCM envelope (KYC documents)
+  encryptDocument,
+  decryptDocument,
+  createDocumentDecipher,
   // AES-256-GCM (webhook secrets)
   encryptSecret,
   decryptSecret,

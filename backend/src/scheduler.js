@@ -20,6 +20,7 @@ const { remindScheduledFeeConfigs } = require('./jobs/remindScheduledFeeConfigs'
 const { processLoyaltyMintQueue } = require('./jobs/loyaltyMintJob');
 const { cleanupOldNotifications } = require('./jobs/cleanupOldNotifications');
 const { checkKycDocumentExpiry } = require('./jobs/kycExpiryJob');
+const { runKycDocumentRetention } = require('./jobs/kycDocumentRetentionJob');
 const { reconcileTransactionConfirmations } = require('./jobs/transactionConfirmationJob');
 
 // Configurable cron expressions — fall back to sensible defaults
@@ -68,6 +69,24 @@ function cronIntervalSeconds(expr) {
  * fn receives ctx: { isLockLost(), itemsProcessed(n) }.
  */
 function safeJob(name, fn, { lockTtlMs = 5 * 60 * 1000, cronExpr } = {}) {
+const PAYMENTS_CRON       = process.env.CRON_SCHEDULED_PAYMENTS   || '* * * * *';   // every minute
+const INDEXER_CRON        = process.env.CRON_CONTRACT_INDEXER      || '*/2 * * * *'; // every 2 minutes
+const EXPIRY_CRON         = process.env.CRON_CLAIMABLE_EXPIRY      || '*/15 * * * *'; // every 15 minutes
+const OFFER_SYNC_CRON     = process.env.CRON_OFFER_SYNC            || '*/2 * * * *'; // every 2 minutes
+const PUSH_RETRY_CRON     = process.env.CRON_PUSH_RETRY            || '* * * * *';   // every 60 seconds
+
+const KYC_EXPIRY_CRON      = process.env.CRON_KYC_EXPIRY            || '0 0 * * *';   // daily at midnight
+const KYC_RETENTION_CRON   = process.env.CRON_KYC_RETENTION         || '30 2 * * *';  // daily 02:30
+const ANALYTICS_REFRESH_CRON = process.env.CRON_ANALYTICS_REFRESH   || '0 * * * *';   // hourly
+const LOYALTY_MINT_CRON    = process.env.CRON_LOYALTY_MINT          || '* * * * *';   // every minute
+const FEE_CONFIG_ACTIVATE_CRON = process.env.CRON_FEE_CONFIG_ACTIVATE || '* * * * *'; // every minute
+const NOTIFICATION_CLEANUP_CRON = process.env.CRON_NOTIFICATION_CLEANUP || '0 2 * * *'; // daily at 2 AM
+const PAYMENT_REQUEST_CLEANUP_CRON = process.env.PAYMENT_REQUEST_CLEANUP_CRON || '0 * * * *'; // hourly
+const FEE_CONFIG_REMINDER_CRON = process.env.CRON_FEE_CONFIG_REMINDER || '0 * * * *'; // hourly
+const TX_CONFIRMATION_CRON = process.env.CRON_TX_CONFIRMATION_RECONCILIATION || '* * * * *'; // every minute
+
+// Wrap a job so overlapping runs are skipped and errors are always caught
+function safeJob(name, fn) {
   let running = false;
   const intervalSeconds = cronExpr ? cronIntervalSeconds(cronExpr) : null;
   if (intervalSeconds) jobIntervalSeconds.set({ job: name }, intervalSeconds);
@@ -158,6 +177,12 @@ function register(name, expr, fn, opts = {}) {
   cron.schedule(expr, safeJob(name, fn, { ...opts, cronExpr: expr }));
   logger.info(`${name} job registered`, { cron: expr });
 }
+  cron.schedule(PUSH_RETRY_CRON, safeJob('pushRetryQueue', () => processRetryQueue(db)));
+  logger.info('Push notification retry job registered', { cron: PUSH_RETRY_CRON });
+  cron.schedule(KYC_EXPIRY_CRON, safeJob('kycExpiryJob', checkKycDocumentExpiry));
+  logger.info('KYC document expiry job registered', { cron: KYC_EXPIRY_CRON });
+  cron.schedule(KYC_RETENTION_CRON, safeJob('kycDocumentRetentionJob', runKycDocumentRetention));
+  logger.info('KYC document retention job registered', { cron: KYC_RETENTION_CRON });
 
 function startScheduler() {
   startedAt = Date.now();

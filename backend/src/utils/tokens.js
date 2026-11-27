@@ -72,6 +72,41 @@ function verifyDeviceToken(token) {
   return payload;
 }
 
+/**
+ * BE-197: single-purpose token returned by /auth/register so a new user can
+ * submit the SMS OTP before email verification (and therefore before any
+ * session exists). It carries `purpose`, which authMiddleware rejects, so it
+ * is accepted ONLY by POST /auth/verify-phone.
+ */
+const PHONE_VERIFICATION_PURPOSE = 'phone_verify';
+const PHONE_VERIFICATION_TOKEN_TTL_SECONDS = 15 * 60;
+
+function signPhoneVerificationToken(userId) {
+  return jwt.sign(
+    { sub: String(userId), purpose: PHONE_VERIFICATION_PURPOSE, jti: crypto.randomBytes(16).toString('hex') },
+    process.env.JWT_SECRET,
+    { expiresIn: PHONE_VERIFICATION_TOKEN_TTL_SECONDS },
+  );
+}
+
+/** Verify a phone-verification token. Throws if invalid, expired, or wrong purpose. */
+function verifyPhoneVerificationToken(token) {
+  const payload = jwt.verify(token, process.env.JWT_SECRET);
+  if (payload.purpose !== PHONE_VERIFICATION_PURPOSE || !payload.sub) {
+    throw new Error('Not a phone verification token');
+  }
+  return payload;
+}
+
+/**
+ * True when a decoded JWT is a normal access token. Single-purpose tokens
+ * (step-up, device trust, phone verification) carry `purpose` or `type` and
+ * must never authenticate a general API request.
+ */
+function isAccessTokenPayload(payload) {
+  return Boolean(payload && payload.userId && !payload.purpose && !payload.type);
+}
+
 module.exports = {
   COOKIE_NAME,
   COOKIE_OPTIONS,
@@ -82,6 +117,11 @@ module.exports = {
   refreshTokenExpiresAt,
   signDeviceToken,
   verifyDeviceToken,
+  signPhoneVerificationToken,
+  verifyPhoneVerificationToken,
+  isAccessTokenPayload,
+  PHONE_VERIFICATION_PURPOSE,
+  PHONE_VERIFICATION_TOKEN_TTL_SECONDS,
   ACCESS_TOKEN_TTL,
   REFRESH_TOKEN_DAYS,
 };
