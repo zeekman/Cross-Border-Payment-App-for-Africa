@@ -69,9 +69,10 @@ fn kyc_escrow_release_fee_dispute_flow() {
     s.kyc.attest(&s.admin, &sender, &Bytes::from_slice(&s.env, b"kyc-hash"));
     assert!(s.kyc.is_verified(&sender));
 
-    // Escrow create → release with a 2% fee
+    // Escrow create → confirm delivery → release with a 2% fee
     let id = s.escrow.create_escrow(&sender, &recipient, &agent, &10_000, &200);
     assert_eq!(s.usdc.balance(&s.escrow.address), 10_000);
+    s.escrow.confirm_delivery(&agent, &id);
     s.escrow.release_escrow(&agent, &id);
     assert_eq!(s.usdc.balance(&agent), 9_800);
     assert_eq!(s.escrow.get_accumulated_fees(), 200);

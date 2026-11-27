@@ -135,6 +135,10 @@ async function processOne(payment) {
 
   const { encrypted_secret_key } = walletResult.rows[0];
 
+  // Platform fee is deducted from the scheduled amount: the recipient gets the
+  // net amount and the fee breakdown is persisted with the transaction.
+  const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
+
   // BE-150: if this row was reclaimed (already in `processing` before this
   // claim), check whether the payment already landed on-chain before
   // re-sending, to avoid a double payment.
@@ -156,6 +160,7 @@ async function processOne(payment) {
   const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
 
   let sentThisRun = false;
+  let sentNow = false;
   if (!transactionHash) {
     const result = await sendPayment({
       senderPublicKey: payment.sender_wallet,
@@ -168,6 +173,7 @@ async function processOne(payment) {
     transactionHash = result.transactionHash;
     ledger = result.ledger;
     sentThisRun = true;
+    sentNow = true;
   }
 
   // BE-149: The on-chain send already succeeded at this point. Any DB failure
@@ -227,6 +233,9 @@ async function processOne(payment) {
   // Only collect the fee for a payment sent in this run; a reconciled payment
   // was sent (and its fee handled) by the run that crashed.
   if (sentThisRun) collectPlatformFee(feeBreakdown, payment.sender_wallet);
+  // Only collect the platform fee for a payment sent in this run; a reconciled
+  // payment had its fee collected by the run that sent it.
+  if (sentNow) collectPlatformFee(feeBreakdown, payment.sender_wallet);
 
   logger.info('Scheduled payment executed', { id: payment.id, tx_hash: transactionHash, ledger });
 }

@@ -62,6 +62,9 @@ async function revokeFamilies(rows) {
 
 // Record a new session; enforce SESSION_CAP by invalidating the oldest if needed.
 // familyId links the session to its refresh-token family (BE-182).
+// Record a new session; enforce SESSION_CAP by invalidating the oldest if needed.
+// `familyId` links the session to its refresh-token family (BE-182) so that
+// revoking the session also revokes that device's refresh tokens.
 async function recordSession(userId, token, req, familyId = null) {
   const tokenHash = hashToken(token);
   const userAgent = req.headers['user-agent'] || null;
@@ -120,6 +123,7 @@ async function recordSession(userId, token, req, familyId = null) {
         location ? JSON.stringify(location) : null,
         userAgent,
         familyId,
+        userAgent, familyId,
       ]
     );
 
@@ -130,6 +134,16 @@ async function recordSession(userId, token, req, familyId = null) {
   } finally {
     client.release();
   }
+}
+
+/**
+ * Revoke the refresh-token families linked to the given sessions so a revoked
+ * device cannot mint new access tokens via POST /auth/refresh.
+ */
+async function revokeFamilies(rows) {
+  const familyIds = rows.map((r) => r.family_id).filter(Boolean);
+  if (familyIds.length === 0) return;
+  await db.query(`DELETE FROM refresh_tokens WHERE family_id = ANY($1::uuid[])`, [familyIds]);
 }
 
 // Debounced touch: update last_active_at at most once per 5 minutes per token
@@ -258,6 +272,7 @@ async function revokeAllSessions(req, res, next) {
          RETURNING token_jti, family_id`,
         [userId, currentHash]
       ));
+      await revokeFamilies(rows);
     } else {
       ({ rows } = await db.query(
         `UPDATE sessions SET is_active = FALSE

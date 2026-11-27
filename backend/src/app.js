@@ -10,7 +10,6 @@ const metricsMiddleware = require('./middleware/metricsMiddleware');
 const errorHandler = require('./middleware/errorHandler');
 const { registry } = require('./utils/metrics');
 const rateLimit = require('express-rate-limit');
-const rateLimiters = require('./middleware/rateLimiter');
 
 const { getHealth: getLedgerHealth } = require('./services/ledgerListener');
 
@@ -121,10 +120,8 @@ app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avat
   },
 }));
 
-// Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set)
-app.use('/api/auth/login', rateLimiters.authLimiter);
-app.use('/api/auth/register', rateLimiters.authLimiter);
-
+// Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set).
+// Auth limiters are mounted per route in routes/auth.js (BE-194).
 app.use('/api/auth', authRoutes);
 // Authenticated wallet/payment data must never be cached (FE-162)
 app.use(['/api/wallet', '/api/payments'], (req, res, next) => {
@@ -132,8 +129,9 @@ app.use(['/api/wallet', '/api/payments'], (req, res, next) => {
   next();
 });
 // Deprecated alias for /api/contacts (BE-188) — same router and middleware stack.
+// It lives under /api/wallet, so it gets the same geo-restriction (BE-192).
 const CONTACTS_SUNSET = 'Wed, 31 Mar 2027 00:00:00 GMT';
-app.use('/api/wallet/contacts', (req, res, next) => {
+app.use('/api/wallet/contacts', geoRestriction, (req, res, next) => {
   res.set('Deprecation', 'true');
   res.set('Sunset', CONTACTS_SUNSET);
   res.set('Link', '</api/contacts>; rel="successor-version"');
@@ -141,6 +139,8 @@ app.use('/api/wallet/contacts', (req, res, next) => {
 }, contactsRoutes);
 // Single geo-gated mount: an earlier ungated mount of the same router ran
 // first and silently bypassed the OFAC geo-restriction for wallet routes.
+// BE-192: mount the wallet router exactly once. An earlier unguarded mount
+// above this line handled every request and bypassed geoRestriction.
 app.use('/api/wallet', geoRestriction, walletRoutes);
 app.use('/api/payments', geoRestriction, paymentRoutes);
 app.use('/api/payment-requests', geoRestriction, paymentRequestRoutes);
@@ -235,6 +235,7 @@ const swaggerOptions = {
     }
   },
   apis: [path.join(__dirname, 'routes/*.js'), path.join(__dirname, 'app.js')]
+  apis: ['./src/routes/*.js']
 };
 
 const specs = swaggerJsdoc(swaggerOptions);
@@ -251,6 +252,7 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs));
  *   get:
  *     summary: Public liveness probe
  *     description: Returns the overall status and pool utilization. Use /health/deep for full diagnostics.
+ *     description: Returns the overall status and pool utilization. Use /api/admin/health for full diagnostics.
  *     tags: [Health]
  *     responses:
  *       200:
@@ -364,5 +366,6 @@ Sentry.setupExpressErrorHandler(app);
 app.use(errorHandler);
 
 app.swaggerSpec = specs;
+app.use(errorHandler);
 
 module.exports = app;
