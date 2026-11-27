@@ -218,6 +218,7 @@ router.post(
 router.post(
   '/verify-pin',
   authMiddleware,
+  (req, res, next) => secondFactorLimiter(req, res, next),
   secondFactorLimiter,
   [body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')],
   validate,
@@ -277,6 +278,72 @@ router.post(
 );
 
 router.get('/2fa/backup-codes/count', authMiddleware, getBackupCodeCount);
+const rateLimit = require('express-rate-limit');
+const {
+  getPinPolicy,
+  webauthnStepUpOptions,
+  webauthnStepUpVerify,
+} = require('../controllers/securityController');
+
+// Second-factor limiter: protects PIN / WebAuthn step-up endpoints from brute force.
+const secondFactorLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: parseInt(process.env.SECOND_FACTOR_RATE_LIMIT, 10) || 10,
+  keyGenerator: (req) => req.user?.userId || req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+
+/**
+ * @openapi
+ * /api/auth/pin-policy:
+ *   get:
+ *     summary: PIN rules (min length and weak-PIN rules) for client-side validation
+ *     tags: [Auth]
+ *     responses:
+ *       200: { description: Policy with min_length, max_length and rules[] }
+ */
+router.get('/pin-policy', getPinPolicy);
+
+/**
+ * @openapi
+ * /api/auth/webauthn/step-up/options:
+ *   post:
+ *     summary: Start biometric step-up — returns WebAuthn assertion options (challenge valid 2 min, single use)
+ *     tags: [Auth]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               transaction: { type: object, properties: { amount: { type: string }, recipient: { type: string } } }
+ *     responses:
+ *       200: { description: PublicKeyCredentialRequestOptions (userVerification required) }
+ *       404: { description: No credential registered }
+ * /api/auth/webauthn/step-up/verify:
+ *   post:
+ *     summary: Verify a WebAuthn assertion (UV flag required) and receive a step-up token
+ *     description: Send the returned token as X-Step-Up-Token on money-moving routes.
+ *     tags: [Auth]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [assertion]
+ *             properties:
+ *               assertion: { type: object, description: AuthenticationResponseJSON }
+ *               transaction: { type: object, description: Must match the transaction bound in options }
+ *     responses:
+ *       200: { description: "{ step_up_token }" }
+ *       401: { description: Invalid, replayed or non-UV assertion }
+ */
+router.post('/webauthn/step-up/options', authMiddleware, secondFactorLimiter, webauthnStepUpOptions);
+router.post('/webauthn/step-up/verify', authMiddleware, secondFactorLimiter, webauthnStepUpVerify);
 
 // Avatar upload — 5 MB limit, memory storage (magic bytes checked in controller)
 const avatarUpload = multer({

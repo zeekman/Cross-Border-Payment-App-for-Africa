@@ -5,7 +5,7 @@ const db = require('../db');
 const { createWallet, encryptPrivateKey, addTrustline } = require('../services/stellar');
 const audit = require('../services/audit');
 const logger = require('../utils/logger');
-const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
+const { hashPIN, comparePIN, validatePIN, checkPINStrength } = require('../services/pin');
 const { sendVerificationEmail, sendPasswordResetEmail, sendBackupCodeWarningEmail, sendEmailChangeRequestedNotice } = require('../services/email');
 const { generateSecret, verifyToken, getTokenCounter, generateBackupCodes, useBackupCode, hashBackupCode, verifyBackupCode } = require('../services/twofa');
 const {
@@ -946,6 +946,18 @@ async function setPIN(req, res, next) {
       return res.status(400).json({ error: 'PIN must be 4-6 digits' });
     }
 
+    let dateOfBirth = null;
+    try {
+      const kyc = await db.query('SELECT date_of_birth FROM users WHERE id = $1', [userId]);
+      dateOfBirth = kyc.rows[0]?.date_of_birth || null;
+    } catch {
+      // KYC date of birth not available in this schema
+    }
+    const weakReason = checkPINStrength(pin, { dateOfBirth });
+    if (weakReason) {
+      return res.status(400).json({ error: 'PIN is too easy to guess', code: 'WEAK_PIN', reason: weakReason });
+    }
+
     const pinHash = await hashPIN(pin);
     await db.query(
       `UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`,
@@ -1477,26 +1489,18 @@ async function uploadAvatar(req, res, next) {
       return res.status(400).json({ error: 'Invalid file type. Only JPEG, PNG, and WebP are accepted.' });
     }
 
-    const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'png';
-    const filename = `${req.user.userId}_${Date.now()}.${ext}`;
-
-    const path = require('path');
-    const fs = require('fs');
-    const dir = path.join(__dirname, '../../uploads/avatars');
-    fs.mkdirSync(dir, { recursive: true });
-
-    // Delete old avatar file if it exists
-    const old = await db.query('SELECT avatar_url FROM users WHERE id = $1', [req.user.userId]);
-    const oldUrl = old.rows[0]?.avatar_url;
-    if (oldUrl) {
-      const oldFile = path.join(dir, path.basename(oldUrl));
-      fs.unlink(oldFile, () => {});
+    // Re-encode (strips EXIF/GPS, neutralises polyglots) and store under a random name.
+    const { saveAvatar, deleteAvatar } = require('../services/avatarStorage');
+    let avatarUrl;
+    try {
+      avatarUrl = await saveAvatar(req.file.buffer);
+    } catch (_) {
+      return res.status(400).json({ error: 'Invalid or corrupt image file' });
     }
 
-    fs.writeFileSync(path.join(dir, filename), req.file.buffer);
-
-    const avatarUrl = `/uploads/avatars/${filename}`;
+    const old = await db.query('SELECT avatar_url FROM users WHERE id = $1', [req.user.userId]);
     await db.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, req.user.userId]);
+    await deleteAvatar(old.rows[0]?.avatar_url);
 
     res.json({ avatar_url: avatarUrl });
   } catch (err) {
