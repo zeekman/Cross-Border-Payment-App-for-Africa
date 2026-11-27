@@ -1,4 +1,52 @@
 {
+  "paymentRequest": {
+    "requestedBy": "Demandé par",
+    "unknown": "Demandeur inconnu",
+    "verified": "Vérifié",
+    "memberSince": "Membre depuis {{date}}",
+    "expiresIn": "Expire dans {{time}}",
+    "notContact": "Vous n'avez jamais payé cette personne. Ne payez que les demandes de personnes que vous connaissez.",
+    "cancelled": "Cette demande de paiement a été annulée.",
+    "unavailable": "Demande de paiement indisponible"
+  },
+  "pinPolicy": {
+    "repeated": "Les PIN à chiffres répétés sont faciles à deviner",
+    "sequential": "Évitez les suites comme 1234",
+    "common": "Ce PIN est trop courant",
+    "personal": "Évitez votre année ou date de naissance",
+    "sixDigits": "Les PIN à 6 chiffres sont bien plus difficiles à deviner"
+  },
+  "contractStatus": {
+    "names": {
+      "escrow": "séquestre",
+      "agentEscrow": "séquestre par agent",
+      "savingsVault": "coffre d'épargne",
+      "recurringPayments": "paiements récurrents"
+    },
+    "paused": {
+      "escrow": "La création de séquestres est suspendue pour maintenance. Les séquestres existants peuvent toujours être annulés ou libérés.",
+      "agentEscrow": "La création de séquestres par agent est suspendue pour maintenance. Les séquestres existants peuvent toujours être annulés ou libérés.",
+      "savingsVault": "Les dépôts d'épargne sont suspendus pour maintenance. L'épargne existante peut toujours être retirée une fois débloquée.",
+      "recurringPayments": "La création de paiements programmés est suspendue pour maintenance. Les paiements existants peuvent toujours être annulés."
+    },
+    "upgrade": "Une mise à jour du contrat {{contract}} est prévue pour le {{eta}}.",
+    "upgradeNoEta": "Une mise à jour du contrat {{contract}} est en attente.",
+    "releaseNotes": "Notes de version",
+    "exit": "Retirer ou annuler",
+    "dismiss": "Fermer"
+  },
+  "webhookVerify": {
+    "title": "Vérifier les signatures",
+    "eventId": "Identifiant stable de l'événement, réutilisé lors des nouvelles tentatives.",
+    "deliveryId": "Identifiant unique de chaque tentative.",
+    "timestamp": "Heure Unix, en secondes, de la signature.",
+    "signature": "HMAC-SHA256 de « timestamp.body », au format t=<timestamp>,v1=<signature>. Plusieurs v1 sont possibles pendant la rotation du secret.",
+    "tolerance": "Rejetez les livraisons dont l'horodatage diffère de plus de 5 minutes de votre horloge.",
+    "dedupe": "Enregistrez chaque X-AfriPay-Event-Id et ignorez les événements déjà traités.",
+    "copy": "Copier l'extrait",
+    "requestHeaders": "En-têtes de la requête",
+    "headersUnavailable": "Les en-têtes de cette tentative n'ont pas été enregistrés."
+  },
   "common": {
     "offline_cached": "Vous êtes hors ligne — données en cache affichées",
     "back": "Retour",

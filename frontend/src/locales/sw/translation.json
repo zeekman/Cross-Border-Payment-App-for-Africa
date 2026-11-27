@@ -1,4 +1,52 @@
 {
+  "paymentRequest": {
+    "requestedBy": "Imeombwa na",
+    "unknown": "Mwombaji asiyejulikana",
+    "verified": "Amethibitishwa",
+    "memberSince": "Mwanachama tangu {{date}}",
+    "expiresIn": "Inaisha baada ya {{time}}",
+    "notContact": "Hujawahi kumlipa mtu huyu. Lipa maombi ya watu unaowajua tu.",
+    "cancelled": "Ombi hili la malipo limeghairiwa.",
+    "unavailable": "Ombi la malipo halipatikani"
+  },
+  "pinPolicy": {
+    "repeated": "PIN zenye tarakimu zinazojirudia ni rahisi kukisia",
+    "sequential": "Epuka mfuatano kama 1234",
+    "common": "PIN hii inatumika sana",
+    "personal": "Epuka mwaka au tarehe yako ya kuzaliwa",
+    "sixDigits": "PIN za tarakimu 6 ni ngumu zaidi kukisia"
+  },
+  "contractStatus": {
+    "names": {
+      "escrow": "escrow",
+      "agentEscrow": "escrow ya wakala",
+      "savingsVault": "hazina ya akiba",
+      "recurringPayments": "malipo ya kujirudia"
+    },
+    "paused": {
+      "escrow": "Kuunda escrow kumesitishwa kwa muda kwa matengenezo. Escrow zilizopo bado zinaweza kughairiwa au kuachiliwa.",
+      "agentEscrow": "Kuunda escrow ya wakala kumesitishwa kwa muda kwa matengenezo. Escrow zilizopo bado zinaweza kughairiwa au kuachiliwa.",
+      "savingsVault": "Kuweka akiba kumesitishwa kwa muda kwa matengenezo. Akiba iliyopo bado inaweza kutolewa ikifunguliwa.",
+      "recurringPayments": "Kuunda malipo yaliyopangwa kumesitishwa kwa muda kwa matengenezo. Yaliyopo bado yanaweza kughairiwa."
+    },
+    "upgrade": "Sasisho la mkataba wa {{contract}} limepangwa {{eta}}.",
+    "upgradeNoEta": "Sasisho la mkataba wa {{contract}} linasubiri.",
+    "releaseNotes": "Maelezo ya toleo",
+    "exit": "Toa au ghairi",
+    "dismiss": "Ondoa"
+  },
+  "webhookVerify": {
+    "title": "Thibitisha sahihi",
+    "eventId": "Kitambulisho cha kudumu cha tukio; hutumika tena kwenye majaribio.",
+    "deliveryId": "Kitambulisho cha kipekee cha kila jaribio.",
+    "timestamp": "Muda wa Unix, kwa sekunde, wa kutia sahihi.",
+    "signature": "HMAC-SHA256 ya \"timestamp.body\", kwa muundo t=<timestamp>,v1=<signature>. Kunaweza kuwa na v1 zaidi ya moja siri inapobadilishwa.",
+    "tolerance": "Kataa ujumbe ambao muda wake unatofautiana na saa yako kwa zaidi ya dakika 5.",
+    "dedupe": "Hifadhi kila X-AfriPay-Event-Id na upuuze matukio uliyokwisha kuchakata.",
+    "copy": "Nakili msimbo",
+    "requestHeaders": "Vichwa vya ombi",
+    "headersUnavailable": "Vichwa havikurekodiwa kwa jaribio hili."
+  },
   "common": {
     "offline_cached": "Uko nje ya mtandao — inaonyesha data iliyohifadhiwa",
     "back": "Rudi",

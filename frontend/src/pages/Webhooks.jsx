@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Plus, Webhook, Copy, CheckCheck, RefreshCw, ChevronDown, ChevronUp, Clock } from 'lucide-react';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
+import WebhookVerifyPanel from '../components/WebhookVerifyPanel';
 import { useTranslation } from 'react-i18next';
 
 // Fallback used until GET /webhooks/events (the source of truth) responds.
@@ -91,6 +92,16 @@ function DeliveryLog({ webhookId }) {
                     <span>·</span>
                     <span>{d.attempt}/{d.max_attempts}</span>
                   </div>
+                  <details className="mt-1 text-xs text-gray-500">
+                    <summary className="cursor-pointer">{t('webhookVerify.requestHeaders')}</summary>
+                    {d.request_headers ? (
+                      <pre className="mt-1 overflow-x-auto">
+                        {Object.entries(d.request_headers).map(([k, v]) => `${k}: ${v}`).join('\n')}
+                      </pre>
+                    ) : (
+                      <p className="mt-1">{t('webhookVerify.headersUnavailable')}</p>
+                    )}
+                  </details>
                   {d.status === 'failed' && (
                     <div className="flex items-center justify-between gap-2 mt-1">
                       <span className="text-xs text-red-400 truncate" title={d.error_message}>
@@ -271,6 +282,8 @@ export default function Webhooks() {
           </div>
         </form>
       )}
+
+      <WebhookVerifyPanel />
 
       {loading ? (
         <div className="flex justify-center py-10" role="status" aria-label={t('webhooks.loading')}>

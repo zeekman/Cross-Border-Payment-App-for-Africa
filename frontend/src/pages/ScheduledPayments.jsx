@@ -4,13 +4,18 @@ import { ArrowLeft, Plus, Trash2, List, Calendar } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import useContractStates from '../hooks/useContractStates';
+import ContractStatusBanners from '../components/ContractStatusBanners';
 import useStepUp from '../hooks/useStepUp';
 import { useConfirm } from '../context/ConfirmContext';
 import { CURRENCIES } from '../utils/currency';
 import ScheduledPaymentsCalendar from '../components/ScheduledPaymentsCalendar';
 import { validateStellarAddress } from '../utils/validation';
 
+const CONTRACTS = ['recurringPayments'];
+
 export default function ScheduledPayments() {
+  const { states: contractStates, paused: contractPaused } = useContractStates(CONTRACTS);
   const { requestStepUp, stepUpModal } = useStepUp();
   const confirm = useConfirm();
   const navigate = useNavigate();
@@ -44,6 +49,7 @@ export default function ScheduledPayments() {
 
   const handleCreate = async (e) => {
     e.preventDefault();
+    if (contractPaused) return;
 
     // Validate Stellar address format
     const addressError = validateStellarAddress(form.recipient_wallet, { allowMuxed: false });
@@ -125,11 +131,14 @@ export default function ScheduledPayments() {
         <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
+      <ContractStatusBanners states={contractStates} />
+
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-2xl font-bold text-white">{t('scheduled.title') || 'Scheduled Payments'}</h2>
         <button
           onClick={() => setShowForm(!showForm)}
-          className="bg-primary-500 hover:bg-primary-600 text-white p-2 rounded-lg transition-colors"
+          disabled={contractPaused}
+          className="disabled:opacity-50 bg-primary-500 hover:bg-primary-600 text-white p-2 rounded-lg transition-colors"
         >
           <Plus size={18} />
         </button>
@@ -187,6 +196,8 @@ export default function ScheduledPayments() {
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-500 text-sm"
           />
           <div className="flex gap-2">
+            <button type="submit" disabled={contractPaused} className="disabled:opacity-50 flex-1 bg-primary-500 hover:bg-primary-600 text-white py-2 rounded-lg text-sm font-medium">
+              Create
             <button type="submit" data-testid="scheduled-submit" className="flex-1 bg-primary-500 hover:bg-primary-600 text-white py-2 rounded-lg text-sm font-medium">
               {t('scheduled.create', 'Create')}
             </button>

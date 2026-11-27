@@ -3,6 +3,9 @@ import { Lock, X, Fingerprint } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import { getWeakPinReason } from '../utils/pinPolicy';
+
+const WEAK_REASONS = ['repeated', 'sequential', 'common', 'personal'];
 
 async function registerWebAuthn() {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
@@ -49,6 +52,9 @@ export default function PINSetupModal({ isOpen, onClose, onSuccess }) {
   const [error, setError] = useState('');
   const [biometricLoading, setBiometricLoading] = useState(false);
 
+  const weakReason = getWeakPinReason(pin);
+  const pinValid = /^\d{4,6}$/.test(pin) && !weakReason;
+
   const handleCreate = (e) => {
     e.preventDefault();
     setError('');
@@ -57,6 +63,8 @@ export default function PINSetupModal({ isOpen, onClose, onSuccess }) {
       setError(t('auth.pin_format_error'));
       return;
     }
+
+    if (weakReason) return;
 
     setStep('confirm');
     setConfirmPin('');
@@ -82,6 +90,13 @@ export default function PINSetupModal({ isOpen, onClose, onSuccess }) {
         onClose();
       }
     } catch (err) {
+      const data = err.response?.data;
+      if (data?.code === 'WEAK_PIN') {
+        const reason = WEAK_REASONS.includes(data.reason) ? data.reason : 'common';
+        setError(t(`pinPolicy.${reason}`));
+        setStep('create');
+        return;
+      }
       setError(err.response?.data?.error || t('auth.pin_error'));
       toast.error(err.response?.data?.error || t('auth.pin_error'));
     } finally {
@@ -191,11 +206,16 @@ export default function PINSetupModal({ isOpen, onClose, onSuccess }) {
                       onChange={(e) => {
                         const val = e.target.value.replace(/\D/g, '');
                         setPin(val);
+                        setError('');
                       }}
                       className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-center text-2xl tracking-widest text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors"
                       required
                     />
                     <p className="text-xs text-gray-500 mt-2">{t('auth.pin_format_help')}</p>
+                    <p className="text-xs text-gray-500 mt-1">{t('pinPolicy.sixDigits')}</p>
+                    {weakReason && (
+                      <p role="alert" className="text-xs text-red-400 mt-2">{t(`pinPolicy.${weakReason}`)}</p>
+                    )}
                   </div>
                 )}
 
@@ -242,7 +262,7 @@ export default function PINSetupModal({ isOpen, onClose, onSuccess }) {
                   )}
                   <button
                     type="submit"
-                    disabled={loading}
+                    disabled={loading || (step === 'create' && !pinValid)}
                     className={`flex-1 rounded-xl py-3 font-semibold transition-colors flex items-center justify-center gap-2 ${
                       step === 'create'
                         ? 'bg-primary-500 hover:bg-primary-600 text-white'

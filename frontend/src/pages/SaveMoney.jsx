@@ -4,6 +4,8 @@ import { ArrowLeft, PiggyBank, Clock, Unlock } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import useContractStates from '../hooks/useContractStates';
+import ContractStatusBanners from '../components/ContractStatusBanners';
 import useStepUp from '../hooks/useStepUp';
 import { useVisibleInterval } from '../hooks/useVisibleInterval';
 
@@ -85,7 +87,10 @@ function VaultCountdown({ unlockTimestamp, balance }) {
   );
 }
 
+const CONTRACTS = ['savingsVault'];
+
 export default function SaveMoney() {
+  const { states: contractStates, paused: contractPaused } = useContractStates(CONTRACTS);
   const { requestStepUp, stepUpModal } = useStepUp();
   const navigate = useNavigate();
   const { t } = useTranslation();
@@ -113,6 +118,7 @@ export default function SaveMoney() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (contractPaused) return;
     if (!form.amount || parseFloat(form.amount) <= 0) {
       toast.error(t('saveMoney.invalidAmount'));
       return;
@@ -164,6 +170,8 @@ export default function SaveMoney() {
             <p className="text-gray-600 dark:text-gray-400 text-sm">{t('saveMoney.subtitle')}</p>
           </div>
         </div>
+
+        <ContractStatusBanners states={contractStates} />
 
         {/* Balance Card */}
         <div className="bg-gradient-to-br from-green-600 to-green-700 rounded-2xl p-5 shadow-lg shadow-green-500/20">
@@ -263,6 +271,7 @@ export default function SaveMoney() {
 
           <button
             type="submit"
+            disabled={loading || !form.amount || contractPaused}
             data-testid="savings-submit-button"
             disabled={loading || !form.amount}
             className="w-full bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-4 px-6 rounded-xl transition-colors flex items-center justify-center gap-2"

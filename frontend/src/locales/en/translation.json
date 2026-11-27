@@ -1,4 +1,52 @@
 {
+  "paymentRequest": {
+    "requestedBy": "Requested by",
+    "unknown": "Unknown requester",
+    "verified": "Verified",
+    "memberSince": "Member since {{date}}",
+    "expiresIn": "Expires in {{time}}",
+    "notContact": "You haven't paid this person before. Only pay requests from people you know.",
+    "cancelled": "This payment request was cancelled.",
+    "unavailable": "Payment request unavailable"
+  },
+  "pinPolicy": {
+    "repeated": "PINs with repeated digits are easy to guess",
+    "sequential": "Avoid sequences like 1234",
+    "common": "This PIN is too common",
+    "personal": "Avoid your birth year or date of birth",
+    "sixDigits": "6-digit PINs are much harder to guess"
+  },
+  "contractStatus": {
+    "names": {
+      "escrow": "escrow",
+      "agentEscrow": "agent escrow",
+      "savingsVault": "savings vault",
+      "recurringPayments": "recurring payments"
+    },
+    "paused": {
+      "escrow": "Escrow creation is temporarily paused for maintenance. Existing escrows can still be cancelled or released.",
+      "agentEscrow": "Agent escrow creation is temporarily paused for maintenance. Existing escrows can still be cancelled or released.",
+      "savingsVault": "Savings deposits are temporarily paused for maintenance. Existing savings can still be withdrawn once unlocked.",
+      "recurringPayments": "Creating scheduled payments is temporarily paused for maintenance. Existing schedules can still be cancelled."
+    },
+    "upgrade": "An upgrade to the {{contract}} contract is scheduled for {{eta}}.",
+    "upgradeNoEta": "An upgrade to the {{contract}} contract is pending.",
+    "releaseNotes": "Release notes",
+    "exit": "Withdraw or cancel",
+    "dismiss": "Dismiss"
+  },
+  "webhookVerify": {
+    "title": "Verify signatures",
+    "eventId": "Stable ID for the event; retries reuse it.",
+    "deliveryId": "Unique ID for each delivery attempt.",
+    "timestamp": "Unix time, in seconds, when the delivery was signed.",
+    "signature": "HMAC-SHA256 of \"timestamp.body\", in the form t=<timestamp>,v1=<signature>. During secret rotation there may be more than one v1.",
+    "tolerance": "Reject deliveries whose timestamp differs from your clock by more than 5 minutes.",
+    "dedupe": "Store each X-AfriPay-Event-Id and ignore events you have already processed.",
+    "copy": "Copy snippet",
+    "requestHeaders": "Request headers",
+    "headersUnavailable": "Headers were not recorded for this attempt."
+  },
   "common": {
     "offline_cached": "You're offline — showing cached data",
     "back": "Back",

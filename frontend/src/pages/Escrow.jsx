@@ -3,11 +3,14 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 import { createIdempotencyKey, postWithIdempotency } from '../utils/idempotency';
+import useContractStates from '../hooks/useContractStates';
+import ContractStatusBanners from '../components/ContractStatusBanners';
 import useStepUp from '../hooks/useStepUp';
 import { useConfirm } from '../context/ConfirmContext';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 
+const CONTRACTS = ['escrow', 'agentEscrow'];
 const formatCountdown = (ms) => {
   if (!Number.isFinite(ms) || ms <= 0) return '0m';
   const totalMinutes = Math.ceil(ms / 60000);
@@ -24,6 +27,7 @@ const formatDate = (value) => {
 };
 
 export default function Escrow() {
+  const { states: contractStates, paused: contractPaused } = useContractStates(CONTRACTS);
   const createKeyRef = useRef(createIdempotencyKey());
   const { requestStepUp, stepUpModal } = useStepUp();
   const confirm = useConfirm();
@@ -138,6 +142,7 @@ export default function Escrow() {
 
   const handleCreateEscrow = async (e) => {
     e.preventDefault();
+    if (contractPaused) return;
     if (!createForm.agent_wallet || !createForm.recipient_wallet || !createForm.amount) {
       toast.error('Please fill in all fields');
       return;
@@ -288,6 +293,8 @@ export default function Escrow() {
       <div className="max-w-4xl mx-auto">
         <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-6">Agent Escrow</h1>
 
+        <ContractStatusBanners states={contractStates} />
+
         {/* Tabs */}
         <div className="flex gap-4 mb-6 border-b border-gray-200 dark:border-gray-800" role="tablist" aria-label="Escrow views">
           <button
@@ -391,6 +398,7 @@ export default function Escrow() {
 
               <button
                 type="submit"
+                disabled={loading || contractPaused}
                 disabled={loading}
                 data-testid="escrow-create-submit"
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium py-2 rounded-lg transition-colors"
