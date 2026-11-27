@@ -32,6 +32,7 @@ const {
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } = require('../services/webauthn');
+const { scheduleTrustlineRetry } = require('../jobs/trustlineRetry');
 
 const { sendOTP } = require('../services/sms');
 const { recordSession, invalidateOtherSessions } = require('./sessionController');
@@ -233,10 +234,12 @@ async function register(req, res, next) {
       try {
         await addTrustline({ publicKey, encryptedSecretKey, asset: 'USDC' });
         trustline_status = 'active';
+        await db.query(`UPDATE wallets SET usdc_trustline_status = 'active' WHERE public_key = $1`, [publicKey]);
       } catch (e) {
         trustline_status = 'pending';
         logger.warn('Auto USDC trustline failed', { userId, error: e.message });
-        scheduleTrustlineRetry({ publicKey, encryptedSecretKey, userId });
+        // BE-200: persisted retry (survives restarts, no secrets in closures)
+        await scheduleTrustlineRetry(publicKey).catch(() => {});
       }
     }
 

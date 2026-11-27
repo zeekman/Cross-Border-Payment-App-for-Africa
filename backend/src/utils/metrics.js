@@ -35,6 +35,13 @@ const wsConnections = new client.Gauge({
   registers: [registry],
 });
 
+const priceOracleFetchTotal = new client.Counter({
+  name: 'price_oracle_fetch_total',
+  help: 'Upstream price oracle fetches',
+  labelNames: ['source', 'status'],
+  registers: [registry],
+});
+
 const anchorPollDuration = new client.Histogram({
   name: 'anchor_poll_duration_seconds',
   help: 'Anchor transaction-status poll duration in seconds, per anchor',
@@ -230,6 +237,7 @@ const redisUp = new client.Gauge({
 });
 
 module.exports = {
+  priceOracleFetchTotal,
   registry,
   redisUp,
   httpRequestDuration,

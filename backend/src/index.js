@@ -36,6 +36,7 @@ const { detectTestnetReset, startFallbackDurationMonitor, stopFallbackDurationMo
 const { initEmailQueue, drainEmailQueue } = require('./services/email');
 const { initWebhookQueue, drainWebhookQueue } = require('./services/webhookQueue');
 const { startPriceRefreshJob, stopPriceRefreshJob } = require('./services/priceOracle');
+const { startTrustlineRetryJob } = require('./jobs/trustlineRetry');
 const ledgerListener = require('./services/ledgerListener');
 const { Server: SocketIOServer } = require('socket.io');
 const jwt = require('jsonwebtoken');
@@ -74,6 +75,7 @@ const server = app.listen(PORT, () => {
       }
     }).catch(() => {});
   }
+  startTrustlineRetryJob(); // BE-200: persistent USDC trustline retries
 });
 
 // Socket.IO — scoped per authenticated user (JWT-based room)
