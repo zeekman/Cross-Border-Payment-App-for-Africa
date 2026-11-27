@@ -2039,9 +2039,12 @@ fn test_agent_can_win_dispute_after_confirm_delivery() {
     assert!(dispute.is_payout_confirmed(&dispute_id));
 
     // The agent is a party: it can submit evidence.
-    let evidence = soroban_sdk::Bytes::from_slice(&env, b"ipfs://payout-receipt");
-    dispute.submit_evidence(&agent, &dispute_id, &evidence);
-    assert_eq!(dispute.get_agent_evidence(&dispute_id), evidence);
+    let content_hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+    let uri = Some(soroban_sdk::String::from_str(&env, "ipfs://payout-receipt"));
+    dispute.submit_evidence(&agent, &dispute_id, &content_hash, &uri);
+    let entry = dispute.get_evidence(&dispute_id, &0, &1).get(0).unwrap();
+    assert_eq!(entry.submitter, agent);
+    assert_eq!(entry.content_hash, content_hash);
 
     // ...and be awarded the funds.
     dispute.resolve_dispute_for_agent(&arbitrator, &dispute_id);

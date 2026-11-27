@@ -3,7 +3,7 @@
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Bytes, Env, IntoVal,
+    Address, BytesN, Env, IntoVal, String,
 };
 
 use crate::{DisputeResolutionContract, DisputeResolutionContractClient, DisputeStatus};
@@ -286,35 +286,73 @@ fn test_open_dispute_third_party_panics() {
 
 // ── submit_evidence ───────────────────────────────────────────────────────────
 
+fn ev_hash(env: &Env, seed: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[seed; 32])
+}
+
 #[test]
 fn test_submit_evidence_by_sender() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (sender, _, id) = open(&env, &client, &usdc_id, 500_0000000);
-    let evidence = Bytes::from_slice(&env, b"QmSomeCIDHash1234567890");
-    client.submit_evidence(&sender, &id, &evidence);
-    let d = client.get_dispute(&id);
-    assert_eq!(d.sender_evidence, evidence);
+    let uri = Some(String::from_str(&env, "ipfs://QmSomeCIDHash1234567890"));
+    let index = client.submit_evidence(&sender, &id, &ev_hash(&env, 1), &uri);
+    assert_eq!(index, 0);
+    let entries = client.get_evidence(&id, &0, &10);
+    assert_eq!(entries.len(), 1);
+    let e = entries.get(0).unwrap();
+    assert_eq!(e.submitter, sender);
+    assert_eq!(e.content_hash, ev_hash(&env, 1));
+    assert_eq!(e.uri, uri);
 }
 
 #[test]
 fn test_submit_evidence_by_recipient() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (_, recipient, id) = open(&env, &client, &usdc_id, 500_0000000);
-    let evidence = Bytes::from_slice(&env, b"QmRecipientCIDHash");
-    client.submit_evidence(&recipient, &id, &evidence);
-    let d = client.get_dispute(&id);
-    assert_eq!(d.recipient_evidence, evidence);
+    client.submit_evidence(&recipient, &id, &ev_hash(&env, 2), &None);
+    let e = client.get_evidence(&id, &0, &10).get(0).unwrap();
+    assert_eq!(e.submitter, recipient);
+    assert_eq!(e.uri, None);
 }
 
 #[test]
-fn test_submit_evidence_overwrites_previous() {
+fn test_submit_evidence_appends_instead_of_overwriting() {
+    let (env, client, _, _, usdc_id, _) = setup();
+    let (sender, recipient, id) = open(&env, &client, &usdc_id, 500_0000000);
+    client.submit_evidence(&sender, &id, &ev_hash(&env, 1), &None);
+    client.submit_evidence(&recipient, &id, &ev_hash(&env, 2), &None);
+    client.submit_evidence(&sender, &id, &ev_hash(&env, 3), &None);
+    assert_eq!(client.get_evidence_count(&id), 3);
+    let entries = client.get_evidence(&id, &0, &10);
+    assert_eq!(entries.get(0).unwrap().content_hash, ev_hash(&env, 1));
+    assert_eq!(entries.get(1).unwrap().content_hash, ev_hash(&env, 2));
+    assert_eq!(entries.get(2).unwrap().content_hash, ev_hash(&env, 3));
+    // Pagination.
+    let page = client.get_evidence(&id, &1, &1);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().content_hash, ev_hash(&env, 2));
+}
+
+#[test]
+#[should_panic(expected = "evidence limit reached for this party")]
+fn test_submit_evidence_per_party_cap() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (sender, _, id) = open(&env, &client, &usdc_id, 500_0000000);
-    let ev1 = Bytes::from_slice(&env, b"first");
-    let ev2 = Bytes::from_slice(&env, b"second");
-    client.submit_evidence(&sender, &id, &ev1);
-    client.submit_evidence(&sender, &id, &ev2);
-    assert_eq!(client.get_dispute(&id).sender_evidence, ev2);
+    for i in 0..6u8 {
+        client.submit_evidence(&sender, &id, &ev_hash(&env, i), &None);
+    }
+}
+
+#[test]
+fn test_submit_evidence_cap_is_per_party() {
+    let (env, client, _, _, usdc_id, _) = setup();
+    let (sender, recipient, id) = open(&env, &client, &usdc_id, 500_0000000);
+    for i in 0..5u8 {
+        client.submit_evidence(&sender, &id, &ev_hash(&env, i), &None);
+    }
+    // The other party still has its own allowance.
+    client.submit_evidence(&recipient, &id, &ev_hash(&env, 9), &None);
+    assert_eq!(client.get_evidence_count(&id), 6);
 }
 
 #[test]
@@ -323,16 +361,17 @@ fn test_submit_evidence_third_party_panics() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (_, _, id) = open(&env, &client, &usdc_id, 500_0000000);
     let outsider = Address::generate(&env);
-    client.submit_evidence(&outsider, &id, &Bytes::from_slice(&env, b"hack"));
+    client.submit_evidence(&outsider, &id, &ev_hash(&env, 1), &None);
 }
 
 #[test]
 #[should_panic(expected = "evidence exceeds maximum allowed size")]
-fn test_submit_evidence_too_large_panics() {
+fn test_submit_evidence_uri_too_long_panics() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (sender, _, id) = open(&env, &client, &usdc_id, 500_0000000);
-    let big = Bytes::from_slice(&env, &[0u8; 257]);
-    client.submit_evidence(&sender, &id, &big);
+    let long = [b'a'; 257];
+    let uri = Some(String::from_bytes(&env, &long));
+    client.submit_evidence(&sender, &id, &ev_hash(&env, 1), &uri);
 }
 
 #[test]
@@ -341,7 +380,7 @@ fn test_submit_evidence_after_deadline_panics() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (sender, _, id) = open(&env, &client, &usdc_id, 500_0000000);
     env.ledger().with_mut(|li| li.timestamp += 7 * 24 * 60 * 60 + 1);
-    client.submit_evidence(&sender, &id, &Bytes::from_slice(&env, b"late"));
+    client.submit_evidence(&sender, &id, &ev_hash(&env, 1), &None);
 }
 
 // ── resolve_dispute ───────────────────────────────────────────────────────────

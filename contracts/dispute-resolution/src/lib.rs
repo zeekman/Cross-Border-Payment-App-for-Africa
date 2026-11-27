@@ -19,7 +19,9 @@
 //!
 //! ## Flow (single-arbitrator path)
 //! 1. Either party calls [`open_dispute`] — escrowed funds are locked for arbitration.
-//! 2. Sender or recipient calls [`submit_evidence`] with an IPFS CID or text hash.
+//! 2. Sender or recipient calls [`submit_evidence`] with a 32-byte content hash
+//!    and an optional short URI (e.g. an IPFS CID). Evidence is append-only:
+//!    each submission is a new [`EvidenceEntry`], readable via [`get_evidence`].
 //! 3. Arbitrator reviews evidence off-chain, then calls [`resolve_dispute`] to
 //!    transition the dispute to `Appealing` status and start a 24-hour appeal window.
 //! 4. During the appeal window, either party may call [`appeal`] to escalate to the
@@ -40,6 +42,8 @@
 //!    marked `ResolvedForRecipient` or `ResolvedForSender`.
 
 use soroban_sdk::{
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, String, Symbol,
+    Vec,
     contract, contractimpl, contracttype, token, Address, Bytes, Env, Symbol, Vec,
 };
 
@@ -58,6 +62,12 @@ const APPEAL_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 /// Maximum number of arbitrators in the panel.
 const MAX_ARBITRATORS: u32 = 7;
+
+/// Maximum number of evidence entries each party may submit per dispute.
+const MAX_EVIDENCE_PER_PARTY: u32 = 5;
+
+/// Maximum number of evidence entries returned by one [`get_evidence`] call.
+const MAX_EVIDENCE_PAGE: u32 = 20;
 
 /// Default quorum threshold in basis points (6001 = strictly more than 60 %).
 const DEFAULT_QUORUM_BPS: u32 = 6_001;
@@ -121,8 +131,12 @@ pub enum DataKey {
     /// `true` if the agent had confirmed fiat delivery before the escrow
     /// dispute was opened. Unresolved disputes then default to the agent.
     PayoutConfirmed(u64),
-    /// Evidence (IPFS CID / hash) submitted by the agent of an escrow dispute.
-    AgentEvidence(u64),
+    /// Append-only evidence entry `(dispute_id, index)`.
+    Evidence(u64, u32),
+    /// Number of evidence entries recorded for a dispute (next index).
+    EvidenceCount(u64),
+    /// Number of evidence entries a given party has submitted for a dispute.
+    PartyEvidenceCount(u64, Address),
     /// Present while the pending (or final) ruling awards the funds to the agent.
     RulingForAgent(u64),
     /// `(escrow contract, escrow_id)` backing an escrow dispute. Used to report
@@ -169,10 +183,6 @@ pub struct Dispute {
     pub opened_at: u64,
     /// Unix timestamp after which the dispute is considered expired.
     pub deadline: u64,
-    /// Optional IPFS CID / evidence hash submitted by sender (max 256 bytes).
-    pub sender_evidence: Bytes,
-    /// Optional IPFS CID / evidence hash submitted by recipient (max 256 bytes).
-    pub recipient_evidence: Bytes,
     /// Unix timestamp after which the appeal window closes.
     /// Set to `appeal_deadline = env.ledger().timestamp() + 86400` when
     /// the arbitrator calls `resolve_dispute`. Zero when no appeal window is active.
@@ -183,6 +193,19 @@ pub struct Dispute {
     /// `false` → funds earmarked for the sender.
     /// Unused (false) for other statuses.
     pub resolved_for_recipient: bool,
+}
+
+/// A single piece of evidence. Only a content hash and an optional short URI
+/// (e.g. an IPFS CID) are stored on-chain — never the document itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[contracttype]
+pub struct EvidenceEntry {
+    pub submitter: Address,
+    /// SHA-256 (or similar) hash of the off-chain evidence document.
+    pub content_hash: BytesN<32>,
+    /// Optional pointer to the off-chain document (e.g. `ipfs://<cid>`).
+    pub uri: Option<String>,
+    pub submitted_at: u64,
 }
 
 // ── Event payloads ────────────────────────────────────────────────────────────
@@ -223,6 +246,9 @@ pub struct EvtDisputeExpiredToAgent {
 pub struct EvtEvidenceSubmitted {
     pub dispute_id: u64,
     pub submitted_by: Address,
+    /// Index of the new entry in the dispute's evidence list.
+    pub index: u32,
+    pub content_hash: BytesN<32>,
 }
 
 #[derive(Debug, Clone)]
@@ -405,7 +431,7 @@ impl DisputeResolutionContract {
     /// * `admin`              — Address that may update the arbitrator.
     /// * `arbitrator`         — Neutral third party authorised to resolve disputes.
     /// * `usdc_address`       — Stellar asset contract address for USDC.
-    /// * `max_evidence_bytes` — Maximum allowed size in bytes for submitted evidence.
+    /// * `max_evidence_bytes` — Maximum allowed length in bytes of an evidence URI.
     /// * `super_arbitrator`   — Address authorised to adjudicate appeals.
     pub fn initialize(
         env: Env,
@@ -519,8 +545,6 @@ impl DisputeResolutionContract {
             status: DisputeStatus::Open,
             opened_at: now,
             deadline,
-            sender_evidence: Bytes::new(&env),
-            recipient_evidence: Bytes::new(&env),
             appeal_deadline: 0,
             resolved_for_recipient: false,
         };
@@ -669,8 +693,6 @@ impl DisputeResolutionContract {
             status: DisputeStatus::Open,
             opened_at: now,
             deadline,
-            sender_evidence: Bytes::new(&env),
-            recipient_evidence: Bytes::new(&env),
             appeal_deadline: 0,
             resolved_for_recipient: false,
         };
@@ -738,28 +760,43 @@ impl DisputeResolutionContract {
     /// Submit evidence for an open dispute.
     ///
     /// Only the sender or recipient of the dispute — or, for escrow disputes,
-    /// the payout agent — may submit evidence.
-    /// Evidence is an IPFS CID or hash (max 256 bytes). Calling again
-    /// overwrites the previous submission for that party.
+    /// the payout agent — may submit evidence. Evidence is append-only: each
+    /// call records a new [`EvidenceEntry`] instead of replacing earlier ones,
+    /// so arbitrators see the full history. Each party may submit at most
+    /// `MAX_EVIDENCE_PER_PARTY` entries.
+    ///
+    /// Only a content hash and an optional short URI are stored on-chain; the
+    /// document itself stays off-chain.
     ///
     /// # Arguments
-    /// * `submitter`  — Must be the dispute's sender or recipient.
-    /// * `dispute_id` — ID returned by `open_dispute`.
-    /// * `evidence`   — IPFS CID or content hash (max 256 bytes).
-    pub fn submit_evidence(env: Env, submitter: Address, dispute_id: u64, evidence: Bytes) {
+    /// * `submitter`    — Must be the dispute's sender, recipient or agent.
+    /// * `dispute_id`   — ID returned by `open_dispute`.
+    /// * `content_hash` — 32-byte hash of the off-chain evidence document.
+    /// * `uri`          — Optional pointer such as an IPFS CID (max `max_evidence_bytes`).
+    ///
+    /// Returns the index of the new entry.
+    pub fn submit_evidence(
+        env: Env,
+        submitter: Address,
+        dispute_id: u64,
+        content_hash: BytesN<32>,
+        uri: Option<String>,
+    ) -> u32 {
         bump_instance(&env);
-        let max_evidence_bytes: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxEvidenceBytes)
-            .expect("not initialized");
-        if evidence.len() > max_evidence_bytes {
-            panic!("evidence exceeds maximum allowed size");
+        if let Some(ref u) = uri {
+            let max_uri_bytes: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxEvidenceBytes)
+                .expect("not initialized");
+            if u.len() > max_uri_bytes {
+                panic!("evidence exceeds maximum allowed size");
+            }
         }
 
         submitter.require_auth();
 
-        let mut dispute: Dispute = load_dispute(&env, dispute_id);
+        let dispute: Dispute = load_dispute(&env, dispute_id);
 
         if dispute.status != DisputeStatus::Open {
             panic!("dispute is not open");
@@ -768,28 +805,47 @@ impl DisputeResolutionContract {
             panic!("dispute deadline has passed");
         }
 
-        if submitter == dispute.sender {
-            dispute.sender_evidence = evidence;
-        } else if submitter == dispute.recipient {
-            dispute.recipient_evidence = evidence;
-        } else if dispute_agent(&env, dispute_id) == Some(submitter.clone()) {
-            env.storage()
-                .persistent()
-                .set(&DataKey::AgentEvidence(dispute_id), &evidence);
-            bump_persistent(&env, &DataKey::AgentEvidence(dispute_id));
-        } else {
+        if submitter != dispute.sender
+            && submitter != dispute.recipient
+            && dispute_agent(&env, dispute_id) != Some(submitter.clone())
+        {
             panic!("submitter is not a party to this dispute");
         }
 
-        store_dispute(&env, &dispute);
+        let party_key = DataKey::PartyEvidenceCount(dispute_id, submitter.clone());
+        let party_count: u32 = env.storage().persistent().get(&party_key).unwrap_or(0);
+        if party_count >= MAX_EVIDENCE_PER_PARTY {
+            panic!("evidence limit reached for this party");
+        }
+
+        let count_key = DataKey::EvidenceCount(dispute_id);
+        let index: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        let entry = EvidenceEntry {
+            submitter: submitter.clone(),
+            content_hash: content_hash.clone(),
+            uri,
+            submitted_at: env.ledger().timestamp(),
+        };
+        let entry_key = DataKey::Evidence(dispute_id, index);
+        env.storage().persistent().set(&entry_key, &entry);
+        bump_persistent(&env, &entry_key);
+        env.storage().persistent().set(&count_key, &(index + 1));
+        bump_persistent(&env, &count_key);
+        env.storage().persistent().set(&party_key, &(party_count + 1));
+        bump_persistent(&env, &party_key);
 
         env.events().publish(
             (Symbol::new(&env, "EvidenceSubmitted"),),
             EvtEvidenceSubmitted {
                 dispute_id,
                 submitted_by: submitter,
+                index,
+                content_hash,
             },
         );
+
+        index
     }
 
     /// Resolve a dispute, opening a 24-hour appeal window.
@@ -1210,12 +1266,33 @@ impl DisputeResolutionContract {
         payout_confirmed(&env, dispute_id)
     }
 
-    /// Evidence submitted by the agent of an escrow dispute (empty if none).
-    pub fn get_agent_evidence(env: Env, dispute_id: u64) -> Bytes {
+    /// Number of evidence entries recorded for a dispute.
+    pub fn get_evidence_count(env: Env, dispute_id: u64) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::AgentEvidence(dispute_id))
-            .unwrap_or_else(|| Bytes::new(&env))
+            .get(&DataKey::EvidenceCount(dispute_id))
+            .unwrap_or(0)
+    }
+
+    /// Page through a dispute's evidence in submission order, starting at
+    /// index `start`. At most `MAX_EVIDENCE_PAGE` entries are returned.
+    pub fn get_evidence(env: Env, dispute_id: u64, start: u32, limit: u32) -> Vec<EvidenceEntry> {
+        let count = Self::get_evidence_count(env.clone(), dispute_id);
+        let limit = if limit > MAX_EVIDENCE_PAGE { MAX_EVIDENCE_PAGE } else { limit };
+        let end = start.saturating_add(limit).min(count);
+        let mut out: Vec<EvidenceEntry> = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, EvidenceEntry>(&DataKey::Evidence(dispute_id, i))
+            {
+                out.push_back(entry);
+            }
+            i += 1;
+        }
+        out
     }
 
     /// Step 1 of two-step arbitrator handoff. Admin proposes a new arbitrator.
