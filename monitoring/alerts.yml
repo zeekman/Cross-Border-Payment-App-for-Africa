@@ -54,3 +54,22 @@ groups:
           description: >-
             One or more subscriber endpoints reached WEBHOOK_MAX_CONSECUTIVE_FAILURES and
             were disabled. Their owners were notified.
+
+  # BE-222: background job alert rules
+  - name: background-jobs
+    rules:
+      - alert: JobStale
+        # Stale when the last success is older than 3x the job's cron interval
+        expr: (time() - job_last_success_timestamp) > 3 * job_interval_seconds
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Job {{ $labels.job }} has not succeeded in over 3x its cron interval"
+      - alert: JobErrors
+        expr: sum by (job) (increase(job_runs_total{status="error"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Job {{ $labels.job }} has been failing for 15 minutes"

@@ -6,6 +6,7 @@ const cookieParser = require('cookie-parser');
 const Sentry = require('@sentry/node');
 
 const requestId = require('./middleware/requestId');
+const { isSorobanError, toApiError } = require('./utils/sorobanErrors');
 const metricsMiddleware = require('./middleware/metricsMiddleware');
 const errorHandler = require('./middleware/errorHandler');
 const { registry } = require('./utils/metrics');
@@ -292,6 +293,14 @@ const deepHealthLimiter = rateLimit({
   message: { error: 'Too many health check requests.' },
 });
 
+app.get('/health/deep', deepHealthLimiter, async (req, res) => {
+  try {
+    const health = await runDeepHealthChecks();
+    // BE-222: per-job details only for operators holding the metrics token
+    const token = process.env.METRICS_TOKEN;
+    if (!token || req.headers.authorization !== `Bearer ${token}`) {
+      if (health.components?.jobs) delete health.components.jobs.details;
+    }
 /**
  * @openapi
  * /health/deep:
@@ -332,6 +341,11 @@ app.get('/api/health/ledger-listener', (req, res) => {
   res.json(getLedgerHealth());
 });
 
+app.get('/metrics', async (req, res) => {
+  const token = process.env.METRICS_TOKEN;
+  if (token) {
+    const auth = req.headers.authorization || '';
+    if (auth !== `Bearer ${token}`) {
 /**
  * @openapi
  * /metrics:
@@ -359,6 +373,19 @@ app.get('/metrics', async (req, res) => {
   res.end(await registry.metrics());
 });
 
+app.use((err, req, res, next) => {
+  // BE-220: translate Soroban contract failures into stable API codes
+  if (err.contractError || (!err.code && isSorobanError(err))) {
+    const apiErr = err.contractError ? err : toApiError(err);
+    req.logger.warn('Soroban contract call failed', {
+      requestId: req.id,
+      code: apiErr.code,
+      diagnostic: apiErr.rawDiagnostic,
+    });
+    return res.status(apiErr.status).json({ error: apiErr.message, code: apiErr.code });
+  }
+  return errorHandler(err, req, res, next);
+});
 // Sentry v8: register the Express error handler after all routes so thrown
 // route errors are reported. No-op when Sentry was not initialized (no DSN).
 Sentry.setupExpressErrorHandler(app);

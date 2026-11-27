@@ -10,7 +10,7 @@
  * Both were dead code and have been removed. This is the only implementation.
  *
  * Double-execution safety:
- *   1. A distributed lock (utils/distributedLock.withLock) ensures only one
+ *   1. A distributed lock (scheduler safeJob, key job:scheduledPaymentsJob) ensures only one
  *      process instance runs doProcess() at a time across all app instances.
  *   2. Within a single run, claimDuePayments() uses
  *      `FOR UPDATE SKIP LOCKED` so concurrent DB transactions can't claim
@@ -24,11 +24,7 @@ const crypto = require('crypto');
 const db = require('../db');
 const { sendPayment } = require('../services/stellar');
 const logger = require('../utils/logger');
-const { withLock } = require('../utils/distributedLock');
 const { buildFeeBreakdown, collectPlatformFee } = require('../services/fees');
-
-const LOCK_KEY = 'lock:scheduled_payments';
-const LOCK_TTL = parseInt(process.env.SCHEDULED_JOB_LOCK_TTL_SECS || '55', 10);
 
 // BE-150: lease duration for a claimed row. Rows in `processing` whose
 // `claimed_at` is older than this are considered abandoned (crash/deploy)
@@ -155,6 +151,7 @@ async function processOne(payment) {
     }
   }
 
+  const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
   // The platform fee is taken from the gross amount; the recipient receives
   // the net amount and the full breakdown is persisted with the transaction.
   const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
@@ -191,6 +188,16 @@ async function processOne(payment) {
     await client.query(
       `INSERT INTO transactions (sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fee_amount, fee_breakdown)
        VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8)`,
+      [
+        payment.sender_wallet,
+        payment.recipient_wallet,
+        payment.amount,
+        payment.asset,
+        payment.memo,
+        transactionHash,
+        feeBreakdown.platform_fee_amount,
+        JSON.stringify(feeBreakdown),
+      ]
       [payment.sender_wallet, payment.recipient_wallet, payment.amount, payment.asset, payment.memo, transactionHash, feeBreakdown.platform_fee_amount, JSON.stringify(feeBreakdown)]
     );
 
@@ -218,6 +225,7 @@ async function processOne(payment) {
     }
 
     await client.query('COMMIT');
+    collectPlatformFee(feeBreakdown, payment.sender_wallet);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     // The payment was already sent on-chain; do not mark the schedule failed.
@@ -272,11 +280,9 @@ async function doProcess() {
   );
 }
 
-async function processScheduledPayments() {
-  const ran = await withLock(LOCK_KEY, LOCK_TTL, doProcess);
-  if (!ran) {
-    logger.info('Scheduled payments job skipped — lock held by another instance.');
-  }
+// BE-221: cross-instance locking is handled by scheduler safeJob()
+async function processScheduledPayments(ctx) {
+  return doProcess(ctx);
 }
 
 module.exports = { processScheduledPayments, processOne, claimDuePayments, idempotencyMemo };

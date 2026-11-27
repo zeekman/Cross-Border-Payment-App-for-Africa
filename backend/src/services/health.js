@@ -231,6 +231,20 @@ async function runDeepHealthChecks() {
   const ledger_listener = checkLedgerListener();
   const rate_limiter = checkRateLimiter();
 
+  // BE-222: per-job last run/status; any stale job marks the system degraded
+  let jobs = {};
+  try {
+    jobs = require('../scheduler').getJobStatuses();
+  } catch {
+    jobs = {};
+  }
+  const staleJobs = Object.keys(jobs).filter((name) => jobs[name].stale);
+
+  // BE-036: surface which Horizon endpoint (primary/fallback) is currently
+  // active and how long the current fallback activation has lasted, so
+  // operators can see it directly in the deep health check output.
+  const horizonEndpoint = stellar.getHorizonEndpointStatus();
+  horizon.endpoint = horizonEndpoint;
   // BE-036: checkHorizon() includes which Horizon endpoint (primary/fallback)
   // is active and how long the current fallback activation has lasted.
   const horizonEndpoint = horizon.endpoint || {};
@@ -240,7 +254,8 @@ async function runDeepHealthChecks() {
     horizon.status !== 'healthy' ||
     ledger_listener.status === 'degraded' ||
     rate_limiter.status === 'degraded' ||
-    horizonEndpoint.alertExceeded;
+    horizonEndpoint.alertExceeded ||
+    staleJobs.length > 0;
 
   let status;
   if (criticalFailed) status = 'unhealthy';
@@ -249,7 +264,14 @@ async function runDeepHealthChecks() {
 
   return {
     status,
-    components: { database, horizon, redis, ledger_listener, rate_limiter },
+    components: {
+      database,
+      horizon,
+      redis,
+      ledger_listener,
+      rate_limiter,
+      jobs: { status: staleJobs.length ? 'degraded' : 'healthy', stale: staleJobs, details: jobs },
+    },
     timestamp: new Date().toISOString(),
     version: process.env.npm_package_version || '1.0.0',
   };
