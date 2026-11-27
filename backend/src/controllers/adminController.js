@@ -3,6 +3,9 @@ const db = require('../db');
 const { getStellarStats } = require('../services/stellar');
 const { attestKyc, revokeKyc } = require('../services/kycAttestation');
 const audit = require('../services/audit');
+const fs = require('fs');
+const { createDocumentDecipher } = require('../utils/symmetricEncryption');
+const { retentionYears, resolveDocumentPath } = require('../utils/kycStorage');
 const { disconnectUser } = require('../services/socketRegistry');
 
 // Cache for Stellar stats (10 seconds)
@@ -241,8 +244,12 @@ async function approveKYC(req, res, next) {
     }
 
     await db.query(
-      `UPDATE users SET kyc_status = 'verified', updated_at = NOW() WHERE id = $1`,
-      [userId]
+      `UPDATE users
+          SET kyc_status = 'verified',
+              kyc_retain_until = NOW() + make_interval(years => $2),
+              updated_at = NOW()
+        WHERE id = $1`,
+      [userId, retentionYears()]
     );
 
     await audit.auditLog(req, 'kyc_approved', {
@@ -252,6 +259,45 @@ async function approveKYC(req, res, next) {
     });
 
     res.json({ message: "KYC approved", tx_hash: txHash });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/admin/kyc/:userId/document
+ * BE-225: streams the decrypted KYC document to an authorized admin.
+ */
+async function getKYCDocument(req, res, next) {
+  try {
+    const { rows } = await db.query(
+      'SELECT kyc_data, kyc_document_deleted_at FROM users WHERE id = $1',
+      [req.params.userId],
+    );
+    const data = rows[0]?.kyc_data;
+    const filePath = resolveDocumentPath(data?.document_filename);
+    if (!rows[0] || rows[0].kyc_document_deleted_at || !filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'KYC document not found' });
+    }
+
+    await audit.auditLog(req, 'kyc_document_viewed', { type: 'user', id: req.params.userId });
+
+    res.setHeader('Content-Type', data.document_mimetype || 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'inline');
+    res.setHeader('Cache-Control', 'no-store');
+
+    const source = fs.createReadStream(filePath);
+    if (!data.document_encryption) return source.pipe(res); // legacy plaintext upload
+
+    const decipher = createDocumentDecipher(data.document_encryption);
+    const onError = (err) => {
+      source.destroy();
+      if (!res.headersSent) return next(err);
+      res.destroy(err);
+    };
+    source.on('error', onError);
+    decipher.on('error', onError);
+    source.pipe(decipher).pipe(res);
   } catch (err) {
     next(err);
   }
@@ -1251,6 +1297,7 @@ module.exports = {
   clawback,
   approveKYC,
   revokeKYC,
+  getKYCDocument,
   setWalletFlags,
   announceContractUpgrade,
   executeContractUpgrade,

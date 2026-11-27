@@ -25,7 +25,7 @@ async function create(req, res, next) {
 
     await db.query(
       `INSERT INTO scheduled_payments (id, user_id, recipient_wallet, amount, asset, frequency, next_run_at, memo)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8),
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [id, userId, recipient_wallet, amount, asset, frequency, nextRunAt, memo || null]
     );
 

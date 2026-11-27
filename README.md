@@ -196,21 +196,29 @@ npm run dev
 # Server starts on http://localhost:5000
 ```
 
-### 2. Docker Compose (Recommended)
+### 2. Run with Docker (Recommended)
 
-1. Copy `.env.example` to `.env` and customize:
+1. Create the backend env file (compose loads it via `env_file`) and set at least `JWT_SECRET` and `ENCRYPTION_KEY`:
    ```
-   cp .env.example .env
+   cp backend/.env.example backend/.env
    ```
+   `DATABASE_URL`, `REDIS_URL` and `MIGRATIONS_DIR` are overridden by compose to point at the bundled services.
 
-2. Start full stack:
+2. Start the full stack:
    ```
    docker compose up -d --build
    ```
+   The backend builds the `dev` target of `backend/Dockerfile` (full install with `nodemon`), runs migrations from the
+   repo-root `database/migrations` (mounted read-only at `/database`), then starts with hot reload.
+   Use `docker build --target prod ./backend` for deploys.
 
 3. Access:
    - Frontend: http://localhost:3000
-   - Backend API: http://localhost
+   - Backend API: http://localhost:5000 (health: `/health`)
+
+Uploaded files (KYC documents, support attachments, avatars) are stored in the `backend_uploads` named volume and survive
+`docker compose restart backend` and `docker compose down` (only `docker compose down -v` removes them). In production set
+`AVATAR_STORAGE=s3` with `S3_BUCKET` (and optionally `S3_ENDPOINT` / `AVATAR_CDN_URL`) — requires `npm install @aws-sdk/client-s3`.
 
 AfriPay uses [node-pg-migrate](https://github.com/salsita/node-pg-migrate) for schema version control. All schema changes must be made as numbered migration files inside `database/migrations/` — never by editing `schema.sql` directly.
 

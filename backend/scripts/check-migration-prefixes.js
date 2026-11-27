@@ -41,6 +41,16 @@ function main() {
       continue;
     }
     const prefix = match[1];
+    // Legacy 3-digit prefixes (001_..023_) predate the convention; anything
+    // newer must be a 13-digit ms epoch or a 14-digit YYYYMMDDHHMMSS stamp.
+    if (prefix.length > 3 && prefix.length !== 13 && prefix.length !== 14) {
+      console.error(`Migration prefix must be 13 or 14 digits: ${file}`);
+      process.exitCode = 1;
+    }
+    if (/^\s*(BEGIN|COMMIT)\s*;/im.test(fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8'))) {
+      console.error(`Migration must not contain its own BEGIN/COMMIT: ${file}`);
+      process.exitCode = 1;
+    }
     if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
     byPrefix.get(prefix).push(file);
   }
@@ -60,7 +70,7 @@ function main() {
     failed = true;
   }
 
-  if (failed) {
+  if (failed || process.exitCode) {
     console.error('\nEach migration must have a unique numeric prefix. See database/MIGRATIONS.md.');
     process.exit(1);
   }

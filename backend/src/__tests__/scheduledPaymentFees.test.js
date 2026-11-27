@@ -1,4 +1,9 @@
-jest.mock('../db', () => ({ query: jest.fn() }));
+jest.mock('../db', () => {
+  const query = jest.fn();
+  // The job writes the transaction row and advances the schedule on one pooled
+  // client (BE-149); route that client's queries through the same mock.
+  return { query, pool: { connect: jest.fn(async () => ({ query, release: jest.fn() })) } };
+});
 jest.mock('../services/stellar', () => ({ sendPayment: jest.fn() }));
 jest.mock('../services/fees', () => ({
   buildFeeBreakdown: jest.fn(async (gross, asset) => {
@@ -31,6 +36,7 @@ const { processScheduledPayments } = require('../jobs/scheduledPaymentsJob');
 beforeEach(() => {
   jest.clearAllMocks();
   db.query
+    .mockResolvedValueOnce({ rows: [{ stuck: 0 }] }) // BE-150 reportStuckPayments
     .mockResolvedValueOnce({ rows: [{ id: 'scheduled-1', sender_wallet: 'sender', recipient_wallet: 'recipient', amount: '100', asset: 'USDC', memo: null, frequency: 'once' }] })
     .mockResolvedValueOnce({ rows: [{ encrypted_secret_key: 'encrypted' }] })
     .mockResolvedValue({ rows: [] });
