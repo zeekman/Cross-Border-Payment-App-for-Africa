@@ -38,6 +38,11 @@ const { disconnectJti, disconnectUser } = require('../services/socketRegistry');
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — email verification tokens
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const PHONE_OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const PHONE_OTP_MAX_ATTEMPTS = 5;
+const PHONE_OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+const PHONE_OTP_DAILY_LIMIT_PER_USER = 5;
+const PHONE_OTP_DAILY_LIMIT_PER_PHONE = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const WEBAUTHN_CHALLENGE_TTL_SECONDS = 5 * 60; // 5 minutes
 const LOCKOUT_DURATION_MINUTES = 15;
 const MAX_FAILED_ATTEMPTS = 5;
@@ -85,10 +90,35 @@ function generateVerificationToken() {
   return { raw, hashed };
 }
 
-function generatePhoneOTP() {
-  const raw = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
-  const hashed = crypto.createHash('sha256').update(raw).digest('hex');
+// Phone OTPs are keyed HMACs bound to the user, so a DB dump alone can't be
+// reversed with a 10^6-entry lookup table (BE-193).
+function getPhoneOtpSecret() {
+  const secret = process.env.PHONE_OTP_SECRET || process.env.JWT_SECRET;
+  if (!secret) throw new Error('PHONE_OTP_SECRET or JWT_SECRET must be set');
+  return secret;
+}
+
+function hashPhoneOTP(userId, otp) {
+  return crypto.createHmac('sha256', getPhoneOtpSecret()).update(`${userId}:${otp}`).digest('hex');
+}
+
+function phoneOtpMatches(storedHash, userId, otp) {
+  if (typeof storedHash !== 'string' || typeof otp !== 'string') return false;
+  const expected = Buffer.from(hashPhoneOTP(userId, otp), 'hex');
+  const actual = Buffer.from(storedHash, 'hex');
+  if (actual.length !== expected.length) return false;
+  return crypto.timingSafeEqual(actual, expected);
+}
+
+function generatePhoneOTP(userId) {
+  const raw = crypto.randomInt(0, 1_000_000).toString().padStart(6, '0'); // 6 digits, CSPRNG
+  const hashed = hashPhoneOTP(userId, raw);
   return { raw, hashed };
+}
+
+// Send log for the per-phone daily cap across accounts (BE-195).
+function recordPhoneOtpSend(userId, phone) {
+  return db.query('INSERT INTO phone_otp_sends (user_id, phone) VALUES ($1, $2)', [userId, phone]);
 }
 
 const TRUSTLINE_RETRY_DELAYS_MS = [30_000, 120_000, 300_000]; // 30s, 2m, 5m
@@ -168,7 +198,7 @@ async function register(req, res, next) {
       ({ publicKey, encryptedSecretKey } = await createWallet());
     }
 
-    const { raw: otpRaw, hashed: otpHashed } = phone ? generatePhoneOTP() : { raw: null, hashed: null };
+    const { raw: otpRaw, hashed: otpHashed } = phone ? generatePhoneOTP(userId) : { raw: null, hashed: null };
     const otpExpiresAt = phone ? new Date(Date.now() + PHONE_OTP_TTL_MS) : null;
 
     // Acquire a dedicated client so BEGIN/COMMIT are scoped to a single connection.
@@ -177,8 +207,10 @@ async function register(req, res, next) {
     try {
       await client.query('BEGIN');
       await client.query(
-        `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at)
-         VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9)`,
+        `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at,
+                            phone_otp_attempts, phone_otp_sent_at, phone_otp_send_count, phone_otp_send_window_start)
+         VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9,
+                 0, CASE WHEN $8::varchar IS NULL THEN NULL ELSE NOW() END, CASE WHEN $8::varchar IS NULL THEN 0 ELSE 1 END, CASE WHEN $8::varchar IS NULL THEN NULL ELSE NOW() END)`,
         [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, otpHashed, otpExpiresAt]
       );
       await client.query(
@@ -209,6 +241,7 @@ async function register(req, res, next) {
     await sendVerificationEmail(email, raw);
 
     if (phone && otpRaw) {
+      recordPhoneOtpSend(userId, phone).catch(e => logger.warn('Phone OTP send log failed', { error: e.message }));
       sendOTP(phone, otpRaw).catch(e => logger.warn('Registration OTP SMS failed', { error: e.message }));
     }
     res.status(201).json({
@@ -542,29 +575,189 @@ async function verifyPhone(req, res, next) {
 
     if (!otp) return res.status(400).json({ error: 'OTP is required' });
 
-    const hashed = crypto.createHash('sha256').update(otp).digest('hex');
-
     const result = await db.query(
-      `SELECT phone_otp_hash, phone_otp_expires_at, phone FROM users WHERE id = $1`,
+      `SELECT phone_otp_hash, phone_otp_expires_at, phone_otp_attempts, phone FROM users WHERE id = $1`,
       [userId]
     );
 
     const user = result.rows[0];
-    if (!user || user.phone_otp_hash !== hashed) {
-      return res.status(400).json({ error: 'Invalid OTP' });
+    if (!user) return res.status(400).json({ error: 'Invalid OTP' });
+
+    if (!user.phone_otp_hash) {
+      // OTP was invalidated after too many failures (or never issued / already
+      // consumed): the user must request a new code.
+      if ((user.phone_otp_attempts || 0) >= PHONE_OTP_MAX_ATTEMPTS) {
+        return res.status(429).json({
+          error: 'Too many invalid attempts. Please request a new code.',
+          code: 'OTP_LOCKED',
+          attempts_remaining: 0,
+        });
+      }
+      return res.status(400).json({ error: 'No active OTP. Please request a new code.', code: 'OTP_NOT_FOUND' });
     }
 
     if (new Date(user.phone_otp_expires_at) < new Date()) {
-      return res.status(400).json({ error: 'OTP has expired' });
+      return res.status(400).json({ error: 'OTP has expired', code: 'OTP_EXPIRED' });
     }
 
-    await db.query(
-      `UPDATE users SET phone_verified = TRUE, phone_otp_hash = NULL, phone_otp_expires_at = NULL WHERE id = $1`,
-      [userId]
+    if (!phoneOtpMatches(user.phone_otp_hash, userId, otp)) {
+      // Atomic increment; the OTP is nulled on the final allowed failure so
+      // the correct code no longer works until a resend.
+      const failed = await db.query(
+        `UPDATE users
+         SET phone_otp_attempts = phone_otp_attempts + 1,
+             phone_otp_hash = CASE WHEN phone_otp_attempts + 1 >= $2 THEN NULL ELSE phone_otp_hash END,
+             phone_otp_expires_at = CASE WHEN phone_otp_attempts + 1 >= $2 THEN NULL ELSE phone_otp_expires_at END
+         WHERE id = $1 AND phone_otp_hash = $3
+         RETURNING phone_otp_attempts`,
+        [userId, PHONE_OTP_MAX_ATTEMPTS, user.phone_otp_hash]
+      );
+      const attempts = failed.rows[0]?.phone_otp_attempts ?? PHONE_OTP_MAX_ATTEMPTS;
+      const attemptsRemaining = Math.max(0, PHONE_OTP_MAX_ATTEMPTS - attempts);
+      audit.log(userId, 'phone_verify_failed', req.ip, req.headers['user-agent'], {
+        attempts_remaining: attemptsRemaining,
+      });
+      if (attemptsRemaining === 0) {
+        return res.status(429).json({
+          error: 'Too many invalid attempts. Please request a new code.',
+          code: 'OTP_LOCKED',
+          attempts_remaining: 0,
+        });
+      }
+      return res.status(400).json({ error: 'Invalid OTP', code: 'OTP_INVALID', attempts_remaining: attemptsRemaining });
+    }
+
+    const updated = await db.query(
+      `UPDATE users SET phone_verified = TRUE, phone_otp_hash = NULL, phone_otp_expires_at = NULL, phone_otp_attempts = 0
+       WHERE id = $1 AND phone_otp_hash = $2`,
+      [userId, user.phone_otp_hash]
     );
+    if (updated.rowCount === 0) {
+      // OTP was replaced or invalidated concurrently.
+      return res.status(400).json({ error: 'Invalid OTP', code: 'OTP_INVALID' });
+    }
 
     audit.log(userId, 'phone_verified', req.ip, req.headers['user-agent']);
     res.json({ message: 'Phone number verified successfully.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/auth/phone/resend-otp (BE-195): issue a fresh phone OTP.
+// Enforces a 60 s cooldown, 5 sends/day per user and 10 sends/day per phone
+// number across accounts. The previous code stops working immediately.
+async function resendPhoneOTP(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const result = await db.query(
+      `SELECT phone, phone_verified, phone_otp_sent_at, phone_otp_send_count, phone_otp_send_window_start
+       FROM users WHERE id = $1`,
+      [userId]
+    );
+    const user = result.rows[0];
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.phone) {
+      return res.status(400).json({ error: 'No phone number on file', code: 'PHONE_NOT_SET' });
+    }
+    if (user.phone_verified) {
+      return res.status(400).json({ error: 'Phone number is already verified', code: 'PHONE_ALREADY_VERIFIED' });
+    }
+
+    const now = Date.now();
+
+    // Per-send cooldown
+    if (user.phone_otp_sent_at) {
+      const nextAllowed = new Date(user.phone_otp_sent_at).getTime() + PHONE_OTP_RESEND_COOLDOWN_MS;
+      if (nextAllowed > now) {
+        return res.status(429).json({
+          error: 'Please wait before requesting another code.',
+          code: 'OTP_RESEND_COOLDOWN',
+          resend_available_at: new Date(nextAllowed).toISOString(),
+        });
+      }
+    }
+
+    // Per-user daily cap
+    const windowStart = user.phone_otp_send_window_start
+      ? new Date(user.phone_otp_send_window_start).getTime()
+      : null;
+    const windowActive = windowStart !== null && windowStart + DAY_MS > now;
+    if (windowActive && (user.phone_otp_send_count || 0) >= PHONE_OTP_DAILY_LIMIT_PER_USER) {
+      return res.status(429).json({
+        error: 'Daily verification code limit reached. Please try again later.',
+        code: 'OTP_RESEND_LIMIT',
+        resend_available_at: new Date(windowStart + DAY_MS).toISOString(),
+      });
+    }
+
+    // Per-phone daily cap across accounts
+    const phoneSends = await db.query(
+      `SELECT COUNT(*)::int AS count, MIN(sent_at) AS oldest
+       FROM phone_otp_sends WHERE phone = $1 AND sent_at > NOW() - INTERVAL '24 hours'`,
+      [user.phone]
+    );
+    const { count: phoneCount, oldest } = phoneSends.rows[0] || { count: 0, oldest: null };
+    if (phoneCount >= PHONE_OTP_DAILY_LIMIT_PER_PHONE) {
+      const availableAt = oldest ? new Date(new Date(oldest).getTime() + DAY_MS) : new Date(now + DAY_MS);
+      return res.status(429).json({
+        error: 'Daily verification code limit reached for this number. Please try again later.',
+        code: 'OTP_RESEND_LIMIT',
+        resend_available_at: availableAt.toISOString(),
+      });
+    }
+
+    const { raw: otpRaw, hashed: otpHashed } = generatePhoneOTP(userId);
+    const otpExpiresAt = new Date(now + PHONE_OTP_TTL_MS);
+
+    // Conditional on the cooldown so concurrent requests can't both send.
+    const updated = await db.query(
+      `UPDATE users SET
+         phone_otp_hash = $2,
+         phone_otp_expires_at = $3,
+         phone_otp_attempts = 0,
+         phone_otp_sent_at = NOW(),
+         phone_otp_send_count = CASE
+           WHEN phone_otp_send_window_start IS NULL OR phone_otp_send_window_start <= NOW() - INTERVAL '24 hours'
+           THEN 1 ELSE phone_otp_send_count + 1 END,
+         phone_otp_send_window_start = CASE
+           WHEN phone_otp_send_window_start IS NULL OR phone_otp_send_window_start <= NOW() - INTERVAL '24 hours'
+           THEN NOW() ELSE phone_otp_send_window_start END
+       WHERE id = $1
+         AND (phone_otp_sent_at IS NULL OR phone_otp_sent_at <= NOW() - ($4 * INTERVAL '1 millisecond'))
+       RETURNING phone_otp_sent_at`,
+      [userId, otpHashed, otpExpiresAt, PHONE_OTP_RESEND_COOLDOWN_MS]
+    );
+    if (updated.rowCount === 0) {
+      return res.status(429).json({
+        error: 'Please wait before requesting another code.',
+        code: 'OTP_RESEND_COOLDOWN',
+        resend_available_at: new Date(now + PHONE_OTP_RESEND_COOLDOWN_MS).toISOString(),
+      });
+    }
+
+    await recordPhoneOtpSend(userId, user.phone);
+
+    const sentAt = new Date(updated.rows[0].phone_otp_sent_at).getTime();
+    const resendAvailableAt = new Date(sentAt + PHONE_OTP_RESEND_COOLDOWN_MS).toISOString();
+
+    try {
+      await sendOTP(user.phone, otpRaw);
+    } catch (smsErr) {
+      logger.warn('Phone OTP resend SMS failed', { userId, error: smsErr.message });
+      return res.status(502).json({
+        error: 'We could not deliver the SMS. Please try again shortly.',
+        code: 'SMS_DELIVERY_FAILED',
+        resend_available_at: resendAvailableAt,
+      });
+    }
+
+    audit.log(userId, 'phone_otp_resent', req.ip, req.headers['user-agent']);
+    res.json({
+      message: 'A new verification code has been sent.',
+      resend_available_at: resendAvailableAt,
+      expires_at: otpExpiresAt.toISOString(),
+    });
   } catch (err) {
     next(err);
   }
@@ -1081,7 +1274,7 @@ async function updateProfile(req, res, next) {
     let otpRaw = undefined;
 
     if (phone && phone !== oldPhone) {
-      ({ raw: otpRaw, hashed: otpHashed } = generatePhoneOTP());
+      ({ raw: otpRaw, hashed: otpHashed } = generatePhoneOTP(userId));
       otpExpiresAt = new Date(Date.now() + PHONE_OTP_TTL_MS);
       phoneVerified = false;
     }
@@ -1100,12 +1293,23 @@ async function updateProfile(req, res, next) {
         phone_verified = COALESCE($3, phone_verified),
         phone_otp_hash = COALESCE($4, phone_otp_hash),
         phone_otp_expires_at = COALESCE($5, phone_otp_expires_at),
-        preferred_language = COALESCE($6, preferred_language)
+        preferred_language = COALESCE($6, preferred_language),
+        phone_otp_attempts = CASE WHEN $8 THEN 0 ELSE phone_otp_attempts END,
+        phone_otp_sent_at = CASE WHEN $8 THEN NOW() ELSE phone_otp_sent_at END,
+        phone_otp_send_count = CASE WHEN $8 THEN
+          (CASE WHEN phone_otp_send_window_start IS NULL OR phone_otp_send_window_start <= NOW() - INTERVAL '24 hours'
+                THEN 1 ELSE phone_otp_send_count + 1 END)
+          ELSE phone_otp_send_count END,
+        phone_otp_send_window_start = CASE WHEN $8 THEN
+          (CASE WHEN phone_otp_send_window_start IS NULL OR phone_otp_send_window_start <= NOW() - INTERVAL '24 hours'
+                THEN NOW() ELSE phone_otp_send_window_start END)
+          ELSE phone_otp_send_window_start END
       WHERE id = $7`,
-      [full_name || null, phone || null, phoneVerified, otpHashed, otpExpiresAt, sanitizedLocale, userId]
+      [full_name || null, phone || null, phoneVerified, otpHashed, otpExpiresAt, sanitizedLocale, userId, !!otpRaw]
     );
 
     if (otpRaw && phone) {
+      recordPhoneOtpSend(userId, phone).catch(e => logger.warn('Phone OTP send log failed', { error: e.message }));
       sendOTP(phone, otpRaw).catch(e => logger.warn('Profile update OTP SMS failed', { error: e.message }));
     }
 
@@ -1557,4 +1761,6 @@ module.exports = {
   webauthnLoginOptions,
   webauthnVerify,
   completeOnboarding,
+  resendPhoneOTP,
+  FORGOT_PASSWORD_MESSAGE,
 };
