@@ -3,6 +3,8 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Sym
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -716,7 +718,7 @@ impl RecurringPaymentsContract {
                         &fee_amount,
                     );
                     let distributor_client =
-                        fee_distributor::Client::new(&env, &distributor);
+                        afripay_types::FeeDistributorClient::new(&env, &distributor);
                     distributor_client.deposit_fee(
                         &env.current_contract_address(),
                         &token_address,
@@ -1211,21 +1213,3 @@ impl RecurringPaymentsContract {
     /// Return the pending admin proposal, if any, as `(new_admin, eta)`.
     pub fn get_pending_admin(env: Env) -> Option<(Address, u64)> {
         governance::get_pending_admin(&env)
-/// Minimal client interface for the fee-distributor contract.
-mod fee_distributor {
-    use soroban_sdk::{contractclient, Address, Env};
-
-    #[contractclient(name = "Client")]
-    pub trait FeeDistributor {
-        /// Deposit `amount` of `token` as a platform fee, attributed to
-        /// `source`. The caller must have transferred the tokens to itself and
-        /// authorize this call.
-        fn deposit_fee(
-            env: Env,
-            contract: Address,
-            token: Address,
-            amount: i128,
-            source: Option<Address>,
-        );
-    }
-}

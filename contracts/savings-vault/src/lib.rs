@@ -3,6 +3,14 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Sym
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
+#[cfg(test)]
+mod test_events;
+
+mod errors;
+pub use errors::Error;
+use soroban_sdk::panic_with_error;
 
 #[derive(Debug, Clone)]
 #[contracttype]
@@ -114,7 +122,7 @@ pub struct LockBoundsUpdated {
 #[derive(Debug, Clone)]
 /// One independent savings position. A user may hold several, each with its
 /// own unlock time (mirrors the backend's `savings_vaults` rows).
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub struct Vault {
     pub balance: i128,
@@ -187,7 +195,7 @@ impl SavingsVaultContract {
     pub fn initialize(env: Env, admin: Address, token_address: Address, penalty_bps: u32) {
         admin.require_auth();
         if env.storage().instance().has(&DataKey::TokenAddress) {
-            panic!("Contract already initialized");
+            panic_with_error!(env, Error::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::TokenAddress, &token_address);
@@ -256,12 +264,12 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
         if rate_bps > MAX_INTEREST_BPS {
-            panic!("interest rate cannot exceed 2000 bps");
+            panic_with_error!(env, Error::InterestRateTooHigh);
         }
         let old_rate: u32 = env
             .storage()
@@ -288,9 +296,9 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
         env.storage().instance().set(&DataKey::YieldDistributor, &distributor);
     }
@@ -303,9 +311,9 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
         env.storage().instance().set(&DataKey::FeeDistributor, &distributor);
     }
@@ -318,19 +326,19 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::FeeDistributor)
-            .expect("fee distributor not set");
+            .unwrap_or_else(|| panic_with_error!(env, Error::FeeDistributorNotSet));
         if distributor != stored_distributor {
-            panic!("unauthorized: caller is not fee distributor");
+            panic_with_error!(env, Error::Unauthorized);
         }
         if amount <= 0 {
-            panic!("amount must be positive");
+            panic_with_error!(env, Error::InvalidAmount);
         }
 
         let token_address: Address = env
             .storage()
             .instance()
             .get(&DataKey::TokenAddress)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
 
         token::Client::new(&env, &token_address).transfer(
             &distributor,
@@ -364,7 +372,7 @@ impl SavingsVaultContract {
             .storage()
             .persistent()
             .get(&key)
-            .expect("No vault found for user");
+            .unwrap_or_else(|| panic_with_error!(env, Error::VaultNotFound));
         Self::bump_persistent(env, &key);
         vault
     }
@@ -450,17 +458,17 @@ impl SavingsVaultContract {
             .get(&DataKey::EmergencyActivated)
             .unwrap_or(false);
         if announced != 0 || active {
-            panic!("deposits disabled: emergency in progress");
+            panic_with_error!(env, Error::DepositsDisabled);
         }
     }
 
     /// Emergency wind-down: close every vault `user` holds and pay out
     /// principal, interest accrued up to now (from the interest reserve) and
     /// any unclaimed distributed yield. Returns (principal, interest, yield).
-    fn close_all_vaults(env: &Env, user: &Address, empty_msg: &str) -> (i128, i128, i128) {
+    fn close_all_vaults(env: &Env, user: &Address, empty_err: Error) -> (i128, i128, i128) {
         let ids = Self::user_vault_ids(env, user);
         if ids.is_empty() {
-            panic!("No vault found for user");
+            panic_with_error!(env, Error::VaultNotFound);
         }
 
         let mut principal: i128 = 0;
@@ -485,7 +493,7 @@ impl SavingsVaultContract {
         }
 
         if principal <= 0 && interest_due <= 0 && yield_amount <= 0 {
-            panic!("{}", empty_msg);
+            panic_with_error!(env, empty_err);
         }
 
         // Interest is paid from the reserve, capped at what it holds.
@@ -516,6 +524,16 @@ impl SavingsVaultContract {
             .checked_add(interest_paid)
             .and_then(|v| v.checked_add(yield_amount))
             .expect("payout overflow");
+        let token_address: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAddress)
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+        token::Client::new(env, &token_address).transfer(
+            &env.current_contract_address(),
+            user,
+            &total,
+        );
 
         // SC-209: Checks-Effects-Interactions: close the vaults and update
         // `TotalLocked` (the reserve was debited above) BEFORE the token
@@ -575,7 +593,7 @@ impl SavingsVaultContract {
         let now = env.ledger().timestamp();
         if rate_bps == 0 {
             if require_rate {
-                panic!("interest rate not set");
+                panic_with_error!(env, Error::InterestRateNotSet);
             }
             vault.last_accrue_time = now;
             return 0;
@@ -644,6 +662,16 @@ impl SavingsVaultContract {
             reserve
         };
         if paid > 0 {
+            let token_address: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::TokenAddress)
+                .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+            token::Client::new(&env, &token_address).transfer(
+                &env.current_contract_address(),
+                user,
+                &paid,
+            );
             let rem_reserve = reserve.checked_sub(paid).expect("reserve underflow");
             env.storage()
                 .instance()
@@ -680,9 +708,9 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
 
         let existing: u64 = env
@@ -691,7 +719,7 @@ impl SavingsVaultContract {
             .get(&DataKey::EmergencyWithdrawalAnnounced)
             .unwrap_or(0u64);
         if existing != 0 {
-            panic!("emergency already announced");
+            panic_with_error!(env, Error::EmergencyAlreadyAnnounced);
         }
 
         let now = env.ledger().timestamp();
@@ -714,9 +742,9 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
 
         let announced_at: u64 = env
@@ -725,16 +753,16 @@ impl SavingsVaultContract {
             .get(&DataKey::EmergencyWithdrawalAnnounced)
             .unwrap_or(0u64);
         if announced_at == 0 {
-            panic!("no emergency announced");
+            panic_with_error!(env, Error::NoEmergencyAnnounced);
         }
 
         let now = env.ledger().timestamp();
         if now < announced_at.saturating_add(172_800) {
-            panic!("emergency withdrawal not yet allowed");
+            panic_with_error!(env, Error::EmergencyDelayActive);
         }
 
         let (principal, interest, yield_amount) =
-            Self::close_all_vaults(&env, &user, "No balance to withdraw");
+            Self::close_all_vaults(&env, &user, Error::NoBalanceToWithdraw);
 
         env.events().publish(
             (Symbol::new(&env, "EmergencyWithdrawn"),),
@@ -759,9 +787,9 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
 
         let announced_at: u64 = env
@@ -770,12 +798,12 @@ impl SavingsVaultContract {
             .get(&DataKey::EmergencyWithdrawalAnnounced)
             .unwrap_or(0u64);
         if announced_at == 0 {
-            panic!("no emergency announced");
+            panic_with_error!(env, Error::NoEmergencyAnnounced);
         }
 
         let now = env.ledger().timestamp();
         if now >= announced_at.saturating_add(172_800) {
-            panic!("cannot cancel after emergency delay has elapsed");
+            panic_with_error!(env, Error::EmergencyDelayElapsed);
         }
 
         env.storage()
@@ -798,12 +826,12 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
         if env.storage().instance().get(&DataKey::EmergencyActivated).unwrap_or(false) {
-            panic!("emergency already active");
+            panic_with_error!(env, Error::EmergencyAlreadyActive);
         }
         let now = env.ledger().timestamp();
         env.storage().instance().set(&DataKey::EmergencyActivated, &true);
@@ -823,12 +851,12 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
         if !env.storage().instance().get(&DataKey::EmergencyActivated).unwrap_or(false) {
-            panic!("no emergency active");
+            panic_with_error!(env, Error::NoEmergencyActive);
         }
         env.storage().instance().set(&DataKey::EmergencyActivated, &false);
         env.storage().instance().set(&DataKey::EmergencyActivatedAt, &0u64);
@@ -850,12 +878,12 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
         if !env.storage().instance().get(&DataKey::EmergencyActivated).unwrap_or(false) {
-            panic!("no emergency active");
+            panic_with_error!(env, Error::NoEmergencyActive);
         }
         let activated_at: u64 = env
             .storage()
@@ -864,10 +892,10 @@ impl SavingsVaultContract {
             .unwrap_or(0);
         let now = env.ledger().timestamp();
         if now < activated_at.saturating_add(172_800) {
-            panic!("emergency return not yet allowed: 48h not elapsed");
+            panic_with_error!(env, Error::EmergencyReturnTooEarly);
         }
         let (principal, interest, yield_amount) =
-            Self::close_all_vaults(&env, &user, "No balance to return");
+            Self::close_all_vaults(&env, &user, Error::NoBalanceToReturn);
         env.events().publish(
             (Symbol::new(&env, "EmergencyFundsReturned"),),
             EmergencyWithdrawnEvent {
@@ -942,13 +970,13 @@ impl SavingsVaultContract {
         governance::require_not_paused(&env);
         Self::assert_accepting_deposits(&env);
         if amount <= 0 {
-            panic!("Amount must be positive");
+            panic_with_error!(env, Error::InvalidAmount);
         }
         if amount > MAX_DEPOSIT_AMOUNT {
-            panic!("Amount exceeds maximum deposit bound");
+            panic_with_error!(env, Error::AmountAboveMaximum);
         }
         if unlock_time <= env.ledger().timestamp() {
-            panic!("Unlock time must be in the future");
+            panic_with_error!(env, Error::UnlockTimeInPast);
         }
 
         let min_lock_secs: u64 = env.storage().instance().get(&DataKey::MinLockSecs).unwrap_or(86400);
@@ -958,7 +986,7 @@ impl SavingsVaultContract {
         let max_unlock = now + max_lock_secs;
 
         if unlock_time < min_unlock || unlock_time > max_unlock {
-            panic!("Lock period out of allowed range (min {}s, max {}s)", min_lock_secs, max_lock_secs);
+            panic_with_error!(env, Error::LockPeriodOutOfRange);
         }
 
         // SC-208: bound the per-user vault list.
@@ -974,7 +1002,7 @@ impl SavingsVaultContract {
             .storage()
             .instance()
             .get(&DataKey::TokenAddress)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
 
         // `user.require_auth()` above already authorises this transfer within the
         // same invocation, so no separate `approve` transaction is needed.
@@ -1060,13 +1088,13 @@ impl SavingsVaultContract {
 
         // ── Checks ──────────────────────────────────────────────────────────
         if amount <= 0 {
-            panic!("Amount must be positive");
+            panic_with_error!(env, Error::InvalidAmount);
         }
 
         let mut vault = Self::load_vault(&env, &user, vault_id);
 
         if vault.balance < amount {
-            panic!("Insufficient balance");
+            panic_with_error!(env, Error::InsufficientBalance);
         }
 
         let token_address: Address = env
@@ -1191,25 +1219,23 @@ impl SavingsVaultContract {
         Self::user_vault_ids(&env, &user)
     }
 
-    pub fn get_unlock_time(env: Env, user: Address, vault_id: u32) -> u64 {
+    /// Unlock time of one vault, or `None` if the vault does not exist (never
+    /// created, fully withdrawn, or archived). SC-213: a missing vault must not
+    /// look like one that unlocked at epoch 0.
+    pub fn get_unlock_time(env: Env, user: Address, vault_id: u32) -> Option<u64> {
         env.storage()
             .persistent()
             .get(&DataKey::Vault(user, vault_id))
             .map(|v: Vault| v.unlock_time)
-            .unwrap_or(0)
     }
 
-    /// Returns the full state of one vault, or a zero-valued Vault if it doesn't exist.
-    pub fn get_vault(env: Env, user: Address, vault_id: u32) -> Vault {
+    /// Full state of one vault, or `None` if the vault does not exist (never
+    /// created, fully withdrawn, or archived). SC-213: callers must handle the
+    /// not-found case explicitly instead of receiving a zeroed `Vault`.
+    pub fn get_vault(env: Env, user: Address, vault_id: u32) -> Option<Vault> {
         env.storage()
             .persistent()
             .get(&DataKey::Vault(user, vault_id))
-            .unwrap_or(Vault {
-                balance: 0,
-                unlock_time: 0,
-                last_accrue_time: 0,
-                accrued_interest: 0,
-            })
     }
 
     /// Distribute yield from platform fees proportionally to all vault holders.
@@ -1219,23 +1245,23 @@ impl SavingsVaultContract {
         distributor.require_auth();
 
         if amount <= 0 {
-            panic!("Amount must be positive");
+            panic_with_error!(env, Error::InvalidAmount);
         }
 
         let stored_distributor: Address = env
             .storage()
             .persistent()
             .get(&DataKey::YieldDistributor)
-            .expect("Yield distributor not set");
+            .unwrap_or_else(|| panic_with_error!(env, Error::YieldDistributorNotSet));
         if distributor != stored_distributor {
-            panic!("unauthorized: caller is not yield distributor");
+            panic_with_error!(env, Error::Unauthorized);
         }
 
         let token_address: Address = env
             .storage()
             .persistent()
             .get(&DataKey::TokenAddress)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
 
         // Authorised by `distributor.require_auth()` above; no allowance required.
         token::Client::new(&env, &token_address).transfer(
@@ -1256,7 +1282,7 @@ impl SavingsVaultContract {
                 .storage()
                 .persistent()
                 .get(&DataKey::Admin)
-                .expect("Contract not initialized");
+                .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
             token::Client::new(&env, &token_address).transfer(
                 &env.current_contract_address(),
                 &admin,
@@ -1285,14 +1311,14 @@ impl SavingsVaultContract {
             .unwrap_or(0);
 
         if yield_amount <= 0 {
-            panic!("No yield to claim");
+            panic_with_error!(env, Error::NoYieldToClaim);
         }
 
         let token_address: Address = env
             .storage()
             .instance()
             .get(&DataKey::TokenAddress)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
 
         // SC-209: Checks-Effects-Interactions: zero the claimable yield BEFORE
         // the token transfer, so nothing observing this contract during the
@@ -1344,12 +1370,12 @@ impl SavingsVaultContract {
             .storage()
             .persistent()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: caller is not admin");
+            panic_with_error!(env, Error::Unauthorized);
         }
         if min_secs >= max_secs {
-            panic!("min_secs must be less than max_secs");
+            panic_with_error!(env, Error::InvalidLockBounds);
         }
 
         let old_min: u64 = env.storage().persistent().get(&DataKey::MinLockSecs).unwrap_or(86400);

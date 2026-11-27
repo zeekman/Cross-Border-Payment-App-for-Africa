@@ -63,37 +63,6 @@ function encodeHistoryCursor(createdAt, id) {
   return Buffer.from(JSON.stringify({ created_at: timestamp, id }), "utf8").toString("base64url");
 }
 
-/**
- * Build the structured fee breakdown for a payment.
- * @param {string|number} grossAmount  - Amount the sender sent
- * @param {string}        asset        - e.g. "USDC" or "XLM"
- * @param {string|null}   feeCharged   - Stellar fee_charged in stroops (from Horizon result)
- */
-async function buildFeeBreakdown(grossAmount, asset, feeCharged) {
-  const gross = parseFloat(grossAmount);
-  let feeBps = FALLBACK_PLATFORM_FEE_BPS;
-  try {
-    const cfg = await getActiveConfig('platform', asset);
-    if (cfg) feeBps = cfg.fee_bps;
-  } catch (_) {
-    // fall back to env var if cache/DB is unavailable
-  }
-  const platformFee = parseFloat((gross * feeBps / 10000).toFixed(7));
-  const stellarBaseFeeXlm = feeCharged != null
-    ? parseFloat((parseInt(feeCharged, 10) / 1e7).toFixed(7))
-    : null;
-  const netAmount = parseFloat((gross - platformFee).toFixed(7));
-
-  return {
-    gross_amount_usdc: parseFloat(gross.toFixed(7)),
-    platform_fee_bps: feeBps,
-    platform_fee_usdc: platformFee,
-    stellar_base_fee_xlm: stellarBaseFeeXlm,
-    net_amount_usdc: parseFloat(netAmount.toFixed(7)),
-    asset,
-  };
-}
-
 // Approximate XLM/USD rate  in production replace with a live price feed
 const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
 

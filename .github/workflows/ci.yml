@@ -67,6 +67,14 @@ jobs:
         cd backend
         npm ci
 
+    # BE-191: required — a file that does not parse means the API cannot boot.
+    # Runs before lint/tests and must never be continue-on-error.
+    - name: Check syntax of every backend source file (required)
+      if: matrix.component == 'backend'
+      run: |
+        cd backend
+        node scripts/check-syntax.js
+
     - name: Lint (backend)
       if: matrix.component == 'backend'
       # continue-on-error: repo has pre-existing lint debt (~2.5k violations);
@@ -91,7 +99,8 @@ jobs:
         cd backend
         npx depcheck --ignores='swagger-jsdoc,swagger-ui-express,nodemon' --ignore-dirs='__mocks__,coverage'
 
-    - name: Check for duplicate route registrations (backend)
+    # Also fails on a router mounted twice on the same prefix in src/app.js (BE-192).
+    - name: Check for duplicate route registrations and router mounts (backend)
       if: matrix.component == 'backend'
       run: |
         cd backend

@@ -135,6 +135,10 @@ async function processOne(payment) {
 
   const { encrypted_secret_key } = walletResult.rows[0];
 
+  // Platform fee is deducted from the scheduled amount: the recipient gets the
+  // net amount and the fee breakdown is persisted with the transaction.
+  const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
+
   // BE-150: if this row was reclaimed (already in `processing` before this
   // claim), check whether the payment already landed on-chain before
   // re-sending, to avoid a double payment.
@@ -151,27 +155,20 @@ async function processOne(payment) {
     }
   }
 
+  let sentNow = false;
   if (!transactionHash) {
     const result = await sendPayment({
       senderPublicKey: payment.sender_wallet,
       encryptedSecretKey: encrypted_secret_key,
       recipientPublicKey: payment.recipient_wallet,
-      amount: payment.amount,
+      amount: feeBreakdown.net_amount,
       asset: payment.asset,
       memo: payment.memo || idempotencyMemo(payment),
     });
     transactionHash = result.transactionHash;
     ledger = result.ledger;
+    sentNow = true;
   }
-  const feeBreakdown = await buildFeeBreakdown(payment.amount, payment.asset);
-  const { transactionHash, ledger } = await sendPayment({
-    senderPublicKey: payment.sender_wallet,
-    encryptedSecretKey: encrypted_secret_key,
-    recipientPublicKey: payment.recipient_wallet,
-    amount: feeBreakdown.net_amount,
-    asset: payment.asset,
-    memo: payment.memo,
-  });
 
   // BE-149: The on-chain send already succeeded at this point. Any DB failure
   // below must NOT flip the schedule to 'failed' (that would let a user retry
@@ -181,43 +178,14 @@ async function processOne(payment) {
   const freq = (payment.frequency || '').toLowerCase();
   const isRecurring = freq === 'daily' || freq === 'weekly' || freq === 'monthly';
 
-  const client = await db.connect();
+  const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
 
     await client.query(
-      `INSERT INTO transactions (sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'completed')`,
-      [payment.sender_wallet, payment.recipient_wallet, payment.amount, payment.asset, payment.memo, transactionHash]
-  await db.query(
-    `INSERT INTO transactions (sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fee_amount, fee_breakdown)
-     VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8)`,
-    [payment.sender_wallet, payment.recipient_wallet, payment.amount, payment.asset, payment.memo, transactionHash, feeBreakdown.platform_fee_amount, JSON.stringify(feeBreakdown)]
-  );
-  collectPlatformFee(feeBreakdown, payment.sender_wallet);
-
-  // Advance the schedule for recurring payments instead of marking them
-  // completed after the first execution. This keeps the job in sync with
-  // the `execute_at`/frequency` schema exposed to the frontend.
-  const freq = (payment.frequency || '').toLowerCase();
-  if (freq === 'daily' || freq === 'weekly' || freq === 'monthly') {
-    const interval = freq === 'daily' ? '1 day' : freq === 'weekly' ? '7 days' : '1 month';
-    await db.query(
-      `UPDATE scheduled_payments
-       SET status = 'pending',
-           run_at = run_at + $interval::interval,
-           claimed_at = NULL,
-           claimed_by = NULL,
-           updated_at = NOW()
-       WHERE id = $1`,
-      [payment.id]
-    );
-  } else {
-    await db.query(
-      `UPDATE scheduled_payments
-       SET status = 'completed', claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
-       WHERE id = $1`,
-      [payment.id]
+      `INSERT INTO transactions (sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fee_amount, fee_breakdown)
+       VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8)`,
+      [payment.sender_wallet, payment.recipient_wallet, payment.amount, payment.asset, payment.memo, transactionHash, feeBreakdown.platform_fee_amount, JSON.stringify(feeBreakdown)]
     );
 
     // Advance the schedule for recurring payments instead of marking them
@@ -229,13 +197,17 @@ async function processOne(payment) {
         `UPDATE scheduled_payments
          SET status = 'pending',
              run_at = run_at + $2::interval,
+             claimed_at = NULL,
+             claimed_by = NULL,
              updated_at = NOW()
          WHERE id = $1`,
         [payment.id, interval]
       );
     } else {
       await client.query(
-        `UPDATE scheduled_payments SET status = 'completed', updated_at = NOW() WHERE id = $1`,
+        `UPDATE scheduled_payments
+         SET status = 'completed', claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
+         WHERE id = $1`,
         [payment.id]
       );
     }
@@ -252,6 +224,10 @@ async function processOne(payment) {
   } finally {
     client.release();
   }
+
+  // Only collect the platform fee for a payment sent in this run; a reconciled
+  // payment had its fee collected by the run that sent it.
+  if (sentNow) collectPlatformFee(feeBreakdown, payment.sender_wallet);
 
   logger.info('Scheduled payment executed', { id: payment.id, tx_hash: transactionHash, ledger });
 }
@@ -295,4 +271,4 @@ async function processScheduledPayments() {
   }
 }
 
-module.exports = { processScheduledPayments, claimDuePayments, idempotencyMemo };
+module.exports = { processScheduledPayments, processOne, claimDuePayments, idempotencyMemo };
