@@ -69,19 +69,19 @@ export default function Analytics() {
     setRefreshing(true);
     try {
       await api.post('/analytics/refresh');
-      toast.success('Analytics data refreshed');
+      toast.success(t('analytics.refreshSuccess'));
       // Re-fetch with fresh data
       await fetchAnalytics();
     } catch (err) {
       if (err?.response?.status === 403) {
-        toast.error('Only admins can trigger a manual refresh');
+        toast.error(t('analytics.refreshAdminOnly'));
       } else {
-        toast.error('Refresh failed — please try again');
+        toast.error(t('analytics.refreshFailed'));
       }
     } finally {
       setRefreshing(false);
     }
-  }, [fetchAnalytics]);
+  }, [fetchAnalytics, t]);
 
   useEffect(() => {
     fetchAnalytics();
@@ -109,7 +109,7 @@ export default function Analytics() {
       a.click();
       URL.revokeObjectURL(a.href);
     } catch {
-      toast.error('CSV export failed');
+      toast.error(t('analytics.csvExportFailed'));
     } finally {
       setCsvLoading(false);
     }

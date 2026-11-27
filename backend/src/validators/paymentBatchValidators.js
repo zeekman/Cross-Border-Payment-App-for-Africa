@@ -26,7 +26,10 @@ const validators = [
     .notEmpty()
     .withMessage("Recipient address is required")
     .custom((value) => {
-      if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
+      if (
+        !StellarSdk.StrKey.isValidEd25519PublicKey(value) &&
+        !StellarSdk.StrKey.isValidMed25519PublicKey(value)
+      ) {
         throw new Error("Invalid Stellar wallet address");
       }
       return true;

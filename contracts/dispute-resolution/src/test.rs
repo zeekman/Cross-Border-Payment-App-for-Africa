@@ -3,7 +3,7 @@
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Bytes, Env, IntoVal,
+    Address, BytesN, Env, IntoVal, String,
 };
 
 use crate::{DisputeResolutionContract, DisputeResolutionContractClient, DisputeStatus};
@@ -286,35 +286,73 @@ fn test_open_dispute_third_party_panics() {
 
 // ── submit_evidence ───────────────────────────────────────────────────────────
 
+fn ev_hash(env: &Env, seed: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[seed; 32])
+}
+
 #[test]
 fn test_submit_evidence_by_sender() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (sender, _, id) = open(&env, &client, &usdc_id, 500_0000000);
-    let evidence = Bytes::from_slice(&env, b"QmSomeCIDHash1234567890");
-    client.submit_evidence(&sender, &id, &evidence);
-    let d = client.get_dispute(&id);
-    assert_eq!(d.sender_evidence, evidence);
+    let uri = Some(String::from_str(&env, "ipfs://QmSomeCIDHash1234567890"));
+    let index = client.submit_evidence(&sender, &id, &ev_hash(&env, 1), &uri);
+    assert_eq!(index, 0);
+    let entries = client.get_evidence(&id, &0, &10);
+    assert_eq!(entries.len(), 1);
+    let e = entries.get(0).unwrap();
+    assert_eq!(e.submitter, sender);
+    assert_eq!(e.content_hash, ev_hash(&env, 1));
+    assert_eq!(e.uri, uri);
 }
 
 #[test]
 fn test_submit_evidence_by_recipient() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (_, recipient, id) = open(&env, &client, &usdc_id, 500_0000000);
-    let evidence = Bytes::from_slice(&env, b"QmRecipientCIDHash");
-    client.submit_evidence(&recipient, &id, &evidence);
-    let d = client.get_dispute(&id);
-    assert_eq!(d.recipient_evidence, evidence);
+    client.submit_evidence(&recipient, &id, &ev_hash(&env, 2), &None);
+    let e = client.get_evidence(&id, &0, &10).get(0).unwrap();
+    assert_eq!(e.submitter, recipient);
+    assert_eq!(e.uri, None);
 }
 
 #[test]
-fn test_submit_evidence_overwrites_previous() {
+fn test_submit_evidence_appends_instead_of_overwriting() {
+    let (env, client, _, _, usdc_id, _) = setup();
+    let (sender, recipient, id) = open(&env, &client, &usdc_id, 500_0000000);
+    client.submit_evidence(&sender, &id, &ev_hash(&env, 1), &None);
+    client.submit_evidence(&recipient, &id, &ev_hash(&env, 2), &None);
+    client.submit_evidence(&sender, &id, &ev_hash(&env, 3), &None);
+    assert_eq!(client.get_evidence_count(&id), 3);
+    let entries = client.get_evidence(&id, &0, &10);
+    assert_eq!(entries.get(0).unwrap().content_hash, ev_hash(&env, 1));
+    assert_eq!(entries.get(1).unwrap().content_hash, ev_hash(&env, 2));
+    assert_eq!(entries.get(2).unwrap().content_hash, ev_hash(&env, 3));
+    // Pagination.
+    let page = client.get_evidence(&id, &1, &1);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().content_hash, ev_hash(&env, 2));
+}
+
+#[test]
+#[should_panic(expected = "evidence limit reached for this party")]
+fn test_submit_evidence_per_party_cap() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (sender, _, id) = open(&env, &client, &usdc_id, 500_0000000);
-    let ev1 = Bytes::from_slice(&env, b"first");
-    let ev2 = Bytes::from_slice(&env, b"second");
-    client.submit_evidence(&sender, &id, &ev1);
-    client.submit_evidence(&sender, &id, &ev2);
-    assert_eq!(client.get_dispute(&id).sender_evidence, ev2);
+    for i in 0..6u8 {
+        client.submit_evidence(&sender, &id, &ev_hash(&env, i), &None);
+    }
+}
+
+#[test]
+fn test_submit_evidence_cap_is_per_party() {
+    let (env, client, _, _, usdc_id, _) = setup();
+    let (sender, recipient, id) = open(&env, &client, &usdc_id, 500_0000000);
+    for i in 0..5u8 {
+        client.submit_evidence(&sender, &id, &ev_hash(&env, i), &None);
+    }
+    // The other party still has its own allowance.
+    client.submit_evidence(&recipient, &id, &ev_hash(&env, 9), &None);
+    assert_eq!(client.get_evidence_count(&id), 6);
 }
 
 #[test]
@@ -323,16 +361,17 @@ fn test_submit_evidence_third_party_panics() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (_, _, id) = open(&env, &client, &usdc_id, 500_0000000);
     let outsider = Address::generate(&env);
-    client.submit_evidence(&outsider, &id, &Bytes::from_slice(&env, b"hack"));
+    client.submit_evidence(&outsider, &id, &ev_hash(&env, 1), &None);
 }
 
 #[test]
 #[should_panic(expected = "evidence exceeds maximum allowed size")]
-fn test_submit_evidence_too_large_panics() {
+fn test_submit_evidence_uri_too_long_panics() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (sender, _, id) = open(&env, &client, &usdc_id, 500_0000000);
-    let big = Bytes::from_slice(&env, &[0u8; 257]);
-    client.submit_evidence(&sender, &id, &big);
+    let long = [b'a'; 257];
+    let uri = Some(String::from_bytes(&env, &long));
+    client.submit_evidence(&sender, &id, &ev_hash(&env, 1), &uri);
 }
 
 #[test]
@@ -341,7 +380,7 @@ fn test_submit_evidence_after_deadline_panics() {
     let (env, client, _, _, usdc_id, _) = setup();
     let (sender, _, id) = open(&env, &client, &usdc_id, 500_0000000);
     env.ledger().with_mut(|li| li.timestamp += 7 * 24 * 60 * 60 + 1);
-    client.submit_evidence(&sender, &id, &Bytes::from_slice(&env, b"late"));
+    client.submit_evidence(&sender, &id, &ev_hash(&env, 1), &None);
 }
 
 // ── resolve_dispute ───────────────────────────────────────────────────────────
@@ -988,4 +1027,188 @@ fn test_open_escrow_dispute_non_escrow_caller_panics() {
     // escrow contract's authorization, so this must be rejected.
     env.set_auths(&[]);
     client.open_escrow_dispute(&escrow, &sender, &recipient, &500_0000000);
+}
+
+// ── SC-207: conflict of interest ─────────────────────────────────────────────
+
+/// Panel of 3 where `arb1` is also the dispute's sender. Returns
+/// (env, client, admin, usdc_id, arb1, arb2, arb3, recipient, dispute_id).
+fn setup_conflicted_panel() -> (
+    Env,
+    DisputeResolutionContractClient<'static>,
+    Address,
+    Address,
+    Address,
+    Address,
+    Address,
+    Address,
+    u64,
+) {
+    let (env, client, admin, _, usdc_id, _) = setup();
+    let arb1 = Address::generate(&env);
+    let arb2 = Address::generate(&env);
+    let arb3 = Address::generate(&env);
+    client.add_arbitrator(&admin, &arb1);
+    client.add_arbitrator(&admin, &arb2);
+    client.add_arbitrator(&admin, &arb3);
+
+    let amount = 1_000_0000000i128;
+    let recipient = Address::generate(&env);
+    mint(&env, &usdc_id, &arb1, amount + DEFAULT_FILING_FEE);
+    let id = client.open_dispute(&arb1, &arb1, &recipient, &amount);
+    (env, client, admin, usdc_id, arb1, arb2, arb3, recipient, id)
+}
+
+#[test]
+#[should_panic(expected = "arbitrator is a party to this dispute")]
+fn test_cast_vote_by_sender_arbitrator_panics() {
+    let (_, client, _, _, arb1, _, _, _, id) = setup_conflicted_panel();
+    client.cast_vote(&arb1, &id, &false);
+}
+
+#[test]
+#[should_panic(expected = "arbitrator is a party to this dispute")]
+fn test_cast_vote_by_recipient_arbitrator_panics() {
+    let (env, client, admin, _, usdc_id, _) = setup();
+    let arb = Address::generate(&env);
+    client.add_arbitrator(&admin, &arb);
+    let sender = Address::generate(&env);
+    let amount = 500_0000000i128;
+    mint(&env, &usdc_id, &sender, amount + DEFAULT_FILING_FEE);
+    let id = client.open_dispute(&sender, &sender, &arb, &amount);
+    client.cast_vote(&arb, &id, &true);
+}
+
+#[test]
+#[should_panic(expected = "arbitrator is a party to this dispute")]
+fn test_cast_vote_by_agent_arbitrator_panics() {
+    let (env, client, admin, _, usdc_id, _) = setup();
+    let agent = Address::generate(&env);
+    client.add_arbitrator(&admin, &agent);
+    let escrow = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    mint(&env, &usdc_id, &sender, DEFAULT_FILING_FEE);
+    let id = client.open_escrow_dispute(
+        &escrow, &sender, &1u64, &sender, &recipient, &agent, &500_0000000, &false,
+    );
+    client.cast_vote(&agent, &id, &false);
+}
+
+#[test]
+fn test_quorum_denominator_excludes_conflicted_arbitrator() {
+    // arb1 is recused, so the eligible panel is {arb2, arb3}. Under the
+    // default >60 % quorum both eligible members must agree.
+    let (env, client, _, usdc_id, _arb1, arb2, arb3, recipient, id) = setup_conflicted_panel();
+    let amount = 1_000_0000000i128;
+
+    client.cast_vote(&arb2, &id, &true);
+    assert_eq!(client.get_dispute(&id).status, DisputeStatus::Open);
+
+    client.cast_vote(&arb3, &id, &true);
+    assert_eq!(client.get_dispute(&id).status, DisputeStatus::ResolvedForRecipient);
+    assert_eq!(TokenClient::new(&env, &usdc_id).balance(&recipient), amount);
+}
+
+#[test]
+fn test_quorum_reached_with_lower_bps_over_eligible_panel() {
+    // With a 40 % quorum, 1-of-2 eligible members (5_000 bps) passes while
+    // 1-of-3 (3_333 bps) would not — proving the recused member is excluded
+    // from the quorum denominator.
+    let (env, client, admin, usdc_id, _arb1, arb2, _arb3, recipient, id) =
+        setup_conflicted_panel();
+    client.set_quorum_bps(&admin, &4_000u32);
+
+    client.cast_vote(&arb2, &id, &true);
+    assert_eq!(client.get_dispute(&id).status, DisputeStatus::ResolvedForRecipient);
+    assert_eq!(
+        TokenClient::new(&env, &usdc_id).balance(&recipient),
+        1_000_0000000i128
+    );
+}
+
+#[test]
+fn test_open_dispute_emits_arbitrator_recused() {
+    let (env, _client, _, _, _, _, _, _, _) = setup_conflicted_panel();
+    let found = env.events().all().iter().any(|(_, topics, _)| {
+        topics
+            .get(0)
+            .map(|t| {
+                let sym: Result<soroban_sdk::Symbol, _> = t.try_into_val(&env);
+                matches!(sym, Ok(s) if s == soroban_sdk::Symbol::new(&env, "ArbitratorRecused"))
+            })
+            .unwrap_or(false)
+    });
+    assert!(found, "ArbitratorRecused event was not emitted");
+}
+
+#[test]
+#[should_panic(expected = "arbitrator is a party to this dispute")]
+fn test_resolve_dispute_by_party_arbitrator_panics() {
+    let (env, client, _, arbitrator, usdc_id, _) = setup();
+    let recipient = Address::generate(&env);
+    let amount = 500_0000000i128;
+    mint(&env, &usdc_id, &arbitrator, amount + DEFAULT_FILING_FEE);
+    // The arbitrator opens a dispute against a counterparty, then tries to
+    // resolve it in their own favour.
+    let id = client.open_dispute(&arbitrator, &arbitrator, &recipient, &amount);
+    client.resolve_dispute(&arbitrator, &id, &false);
+}
+
+#[test]
+#[should_panic(expected = "arbitrator is a party to this dispute")]
+fn test_resolve_dispute_for_agent_by_agent_arbitrator_panics() {
+    let (env, client, admin, arbitrator, usdc_id, _) = setup();
+    let escrow = Address::generate(&env);
+    client.set_escrow_contract(&admin, &escrow);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    mint(&env, &usdc_id, &sender, DEFAULT_FILING_FEE);
+    let id = client.open_escrow_dispute(
+        &escrow, &sender, &1u64, &sender, &recipient, &arbitrator, &500_0000000, &false,
+    );
+    client.resolve_dispute_for_agent(&arbitrator, &id);
+}
+
+#[test]
+#[should_panic(expected = "arbitrator is a party to this dispute")]
+fn test_resolve_appeal_by_party_super_arbitrator_panics() {
+    let (env, client, _, arbitrator, usdc_id, super_arbitrator) = setup();
+    let sender = Address::generate(&env);
+    let amount = 500_0000000i128;
+    mint(&env, &usdc_id, &sender, amount + DEFAULT_FILING_FEE);
+    let id = client.open_dispute(&sender, &sender, &super_arbitrator, &amount);
+    client.resolve_dispute(&arbitrator, &id, &false);
+    client.appeal(&super_arbitrator, &id);
+    client.resolve_appeal(&super_arbitrator, &id, &true);
+}
+
+#[test]
+fn test_substitute_super_arbitrator_resolves_conflicted_appeal() {
+    let (env, client, admin, arbitrator, usdc_id, super_arbitrator) = setup();
+    let sender = Address::generate(&env);
+    let amount = 500_0000000i128;
+    mint(&env, &usdc_id, &sender, amount + DEFAULT_FILING_FEE);
+    let id = client.open_dispute(&sender, &sender, &super_arbitrator, &amount);
+    client.resolve_dispute(&arbitrator, &id, &false);
+    client.appeal(&super_arbitrator, &id);
+
+    let substitute = Address::generate(&env);
+    client.assign_substitute_super_arbitrator(&admin, &id, &substitute);
+    client.resolve_appeal(&substitute, &id, &false);
+
+    assert_eq!(client.get_dispute(&id).status, DisputeStatus::ResolvedForSender);
+    assert_eq!(
+        TokenClient::new(&env, &usdc_id).balance(&sender),
+        amount + DEFAULT_FILING_FEE
+    );
+}
+
+#[test]
+#[should_panic(expected = "super arbitrator is not a party to this dispute")]
+fn test_substitute_super_arbitrator_requires_conflict() {
+    let (env, client, admin, _, usdc_id, _) = setup();
+    let (_, _, id) = open(&env, &client, &usdc_id, 500_0000000i128);
+    client.assign_substitute_super_arbitrator(&admin, &id, &Address::generate(&env));
 }

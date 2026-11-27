@@ -41,7 +41,11 @@
     "have_account": "Una akaunti tayari?",
     "sign_in": "Ingia",
     "success": "Akaunti imefunguliwa! Pochi yako iko tayari.",
-    "error": "Usajili umeshindwa"
+    "error": "Usajili umeshindwa",
+    "toast_success": "Akaunti imefunguliwa! Pochi yako iko tayari.",
+    "toast_error": "Usajili umeshindwa",
+    "toast_phone_verified": "Nambari ya simu imethibitishwa kwa mafanikio!",
+    "toast_phone_verify_failed": "Imeshindwa kuthibitisha nambari ya simu"
   },
   "login": {
     "title": "Karibu tena",
@@ -70,7 +74,9 @@
     "reset_success_toast": "Nenosiri limebadilishwa. Unaweza kuingia sasa.",
     "back_to_login": "Rudi kuingia",
     "missing_token": "Kiungo si halali. Omba kipya kutoka ukurasa wa kuingia.",
-    "error_generic": "Kuna hitilafu. Jaribu tena."
+    "error_generic": "Kuna hitilafu. Jaribu tena.",
+    "toast_success": "Nenosiri limebadilishwa. Unaweza kuingia sasa.",
+    "toast_error": "Imeshindwa kuweka upya nenosiri. Jaribu tena."
   },
   "dashboard": {
     "greeting": "Habari,",
@@ -144,7 +150,12 @@
     "success": "Malipo yametumwa!",
     "error": "Muamala umeshindwa",
     "qr_unsupported_uri": "Kodi hii ya QR ni ombi la muamala, si ombi la malipo. Kodi za QR za malipo pekee ndizo zinazotumika.",
-    "qr_prefilled": "Maelezo ya malipo yamejazwa kutoka kodi ya QR — tafadhali kagua kabla ya kutuma."
+    "qr_prefilled": "Maelezo ya malipo yamejazwa kutoka kodi ya QR — tafadhali kagua kabla ya kutuma.",
+    "toast_success": "Malipo yametumwa kwa mafanikio!",
+    "toast_error": "Malipo yameshindwa. Tafadhali jaribu tena.",
+    "toast_invalid_amount": "Weka kiasi halali chenye hadi nafasi 7 za desimali",
+    "toast_invalid_address": "Weka anwani halali ya Stellar",
+    "toast_insufficient_balance": "Salio halitoshi kwa muamala huu"
   },
   "auth": {
     "setup_pin_title": "Weka PIN ya Muamala",
@@ -173,7 +184,12 @@
     "subtitle": "Shiriki anwani yako ya pochi au msimbo wa QR kupokea malipo",
     "address_label": "Anwani Yako ya Pochi ya Stellar",
     "warning": "Tuma XLM au mali za Stellar pekee kwenye anwani hii",
-    "address_copied": "Anwani imenakiliwa!"
+    "address_copied": "Anwani imenakiliwa!",
+    "toast_copied": "Anwani imenakiliwa kwenye ubao wa kunakili!",
+    "toast_copy_failed": "Imeshindwa kunakili anwani",
+    "toast_share_success": "Kiungo cha malipo kimeshirikiwa!",
+    "toast_share_failed": "Imeshindwa kushiriki kiungo cha malipo",
+    "toast_qr_generated": "Msimbo wa QR umezalishwa kwa mafanikio"
   },
   "history": {
     "title": "Historia",
@@ -190,7 +206,9 @@
     "asset_all": "Mali zote",
     "load_error": "Imeshindwa kupakia miamala",
     "load_more": "Pakia zaidi",
-    "loading_more": "Inapakia..."
+    "loading_more": "Inapakia...",
+    "toast_export_success": "Miamala imehamishwa kwa mafanikio",
+    "toast_export_error": "Imeshindwa kuhamisha miamala"
   },
   "profile": {
     "title": "Wasifu",
@@ -202,7 +220,12 @@
     "contact_added": "Mawasiliano yameongezwa",
     "contact_error": "Imeshindwa kuongeza mawasiliano",
     "address_copied": "Anwani imenakiliwa!",
-    "language": "Lugha"
+    "language": "Lugha",
+    "toast_contact_added": "Mawasiliano yameongezwa kwa mafanikio",
+    "toast_contact_error": "Imeshindwa kuongeza mawasiliano",
+    "toast_contact_removed": "Mawasiliano yameondolewa",
+    "toast_contact_remove_error": "Imeshindwa kuondoa mawasiliano",
+    "toast_profile_updated": "Wasifu umesasishwa kwa mafanikio"
   },
   "contacts_import": {
     "open": "Ingiza CSV",
@@ -464,51 +487,4 @@
     "amountPositive": "Kiasi lazima kiwe nambari chanya",
     "amountLimit": "Kiasi kinazidi kikomo cha uhamisho mmoja cha {{limit}} USDC",
     "noRecipientsCsv": "Hakuna wapokeaji waliopatikana kwenye faili la CSV",
-    "csvErrors_one": "Hitilafu {{count}} ya uthibitishaji imepatikana kwenye CSV",
-    "csvErrors_other": "Hitilafu {{count}} za uthibitishaji zimepatikana kwenye CSV",
-    "imported": "Wapokeaji {{count}} wameletwa",
-    "csvParseFailed": "Imeshindwa kuchanganua faili la CSV",
-    "addOne": "Ongeza angalau mpokeaji mmoja",
-    "submitted": "Malipo ya kundi yamewasilishwa",
-    "submitFailed": "Malipo ya kundi yameshindwa"
-  },
-  "kyc": {
-    "progress": "Maendeleo ya uthibitishaji wa KYC",
-    "stepAria": "Hatua ya {{id}}: {{label}}",
-    "completed": " (imekamilika)",
-    "current": " (ya sasa)",
-    "step1": "Taarifa Binafsi",
-    "step2": "Kupakia Hati",
-    "step3": "Kupiga Selfie",
-    "step4": "Kagua na Wasilisha",
-    "stepOf": "Hatua {{n}} kati ya 4 — {{label}}",
-    "verified": "Imethibitishwa",
-    "verifiedMsg": "Utambulisho wako umethibitishwa. Unaweza kutuma miamala ya kiasi chochote.",
-    "underReview": "Inakaguliwa",
-    "underReviewMsg": "Uwasilishaji wako wa KYC unakaguliwa. Hii kwa kawaida huchukua siku 1–2 za kazi.",
-    "rejected": "Imekataliwa",
-    "rejectedMsg": "Uwasilishaji wako wa awali ulikataliwa. Tafadhali wasilisha tena kwa taarifa sahihi.",
-    "unverified": "Haijathibitishwa",
-    "unverifiedMsg": "Thibitisha utambulisho wako ili kutuma miamala inayozidi sawa na $100 USD.",
-    "idNational": "Kitambulisho cha Taifa",
-    "idPassport": "Pasipoti ya Kimataifa",
-    "idDrivers": "Leseni ya Udereva",
-    "idVoters": "Kadi ya Mpiga Kura",
-    "back": "Rudi",
-    "title": "Uthibitishaji wa Utambulisho",
-    "subtitle": "Inahitajika kwa kufuata kanuni katika masoko ya Afrika.",
-    "loading": "Inapakia",
-    "dob": "Tarehe ya Kuzaliwa",
-    "continue": "Endelea",
-    "idType": "Aina ya Kitambulisho",
-    "selectIdType": "Chagua aina ya kitambulisho",
-    "idNumber": "Nambari ya Kitambulisho",
-    "idNumberPlaceholder": "Weka nambari yako ya kitambulisho",
-    "selfieHint": "Piga selfie wazi inayolingana na hati yako ya kitambulisho.",
-    "uploadSelfie": "Pakia selfie",
-    "disclaimer": "Taarifa zako hutumika tu kwa uthibitishaji wa utambulisho kama inavyohitajika na kanuni za fedha. Hati ghafi za kitambulisho hazihifadhiwi kamwe kwenye hifadhidata yetu.",
-    "submit": "Wasilisha kwa Uthibitishaji",
-    "submitted": "KYC imewasilishwa kwa mafanikio. Tutakagua ombi lako hivi karibuni.",
-    "submitFailed": "Uwasilishaji umeshindwa. Tafadhali jaribu tena."
-  }
-}
+    "csvErrors_one": "Hitilafu {{count}}

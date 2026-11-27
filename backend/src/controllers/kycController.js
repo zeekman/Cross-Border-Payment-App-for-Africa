@@ -1,5 +1,6 @@
 const db = require("../db");
 const { amlScreen } = require("../services/amlScreening");
+const transactionMonitoring = require("../services/transactionMonitoring");
 const audit = require("../services/audit");
 const logger = require("../utils/logger");
 
@@ -46,6 +47,8 @@ async function submitKYC(req, res, next) {
       date_of_birth,
       document_filename: req.file.filename,
       document_mimetype: req.file.mimetype,
+      // BE-225: envelope-encryption metadata { algorithm, iv, tag, wrapped_key }
+      document_encryption: req.kycDocument?.encryption || null,
       submitted_at: new Date().toISOString(),
     };
 
@@ -99,9 +102,37 @@ async function submitKYC(req, res, next) {
  * Fail-closed compliance gate: a high-value payment is blocked unless the
  * wallet was actually screened and returned a clear result.
  */
-async function amlRescreenForPayment(userId, walletAddress, amountUsd) {
+async function amlRescreenForPayment(userId, walletAddress, amountUsd, reviewContext = null) {
   if (amountUsd < AML_RESCREEN_THRESHOLD_USD) return null;
   const amlResult = await amlScreen(walletAddress, { userId });
+  if (reviewContext && amlResult.status !== 'clear') {
+    const reason = amlResult.status === 'flagged'
+      ? 'AML screening returned a flagged result.'
+      : `AML screening could not provide a clear result (${amlResult.status}).`;
+    const reviewCase = await transactionMonitoring.openCase({
+      userId,
+      senderWallet: reviewContext.senderWallet || walletAddress,
+      recipientWallet: reviewContext.recipientWallet,
+      amount: reviewContext.amount,
+      asset: reviewContext.asset,
+      source: 'aml',
+      reason,
+      paymentId: reviewContext.paymentId || null,
+      metadata: {
+        amount_usd: amountUsd,
+        status: amlResult.status,
+        provider: amlResult.provider,
+        risk_level: amlResult.risk_level,
+        reference_id: amlResult.reference_id,
+      },
+    });
+    await audit.log(userId, 'aml_payment_case_opened', null, null, {
+      walletAddress,
+      caseId: reviewCase.id,
+      amlResult,
+    });
+    return { caseOpened: true, case: reviewCase, amlResult };
+  }
   if (amlResult.status === 'flagged') {
     logger.warn('AML re-screen flagged wallet for high-value payment', { userId, walletAddress, amountUsd, amlResult });
     await audit.log(userId, 'aml_payment_flagged', null, null, { walletAddress, amountUsd, amlResult });
