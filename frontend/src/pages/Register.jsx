@@ -28,6 +28,8 @@ export default function Register() {
   const [phoneOtp, setPhoneOtp] = useState('');
   const [phoneVerifyLoading, setPhoneVerifyLoading] = useState(false);
   const [registeredPhone, setRegisteredPhone] = useState('');
+  // Token returned by register so the OTP step can authenticate (issue #1522)
+  const [phoneVerificationToken, setPhoneVerificationToken] = useState('');
 
   // Password strength indicator (issue #656) — rules come from the backend
   // password policy so the UI can never drift from what the server enforces.
@@ -80,11 +82,13 @@ export default function Register() {
       if (showImport && secretKey) payload.secret_key = secretKey;
       const refCode = searchParams.get('ref');
       if (refCode) payload.referral_code = refCode;
-      await register(payload);
+      const res = await register(payload);
       toast.success(t('register.success'));
       // If phone was provided, show verification step (issue #478)
       if (form.phone && form.phone.trim()) {
         setRegisteredPhone(form.phone);
+        // Capture the phone verification token so the OTP step can authenticate (issue #1522)
+        setPhoneVerificationToken(res?.phone_verification_token || '');
         setShowPhoneVerify(true);
       } else {
         const redirect = sessionStorage.getItem('afripay_redirect');
@@ -110,6 +114,12 @@ export default function Register() {
     }
     setPhoneVerifyLoading(true);
     try {
+      // Authenticate with the phone verification token from register (issue #1522)
+      const config = phoneVerificationToken
+        ? { headers: { Authorization: `Bearer ${phoneVerificationToken}` } }
+        : undefined;
+      await api.post('/auth/verify-phone', { phone: registeredPhone, otp: phoneOtp }, config);
+      toast.success('Phone number verified successfully!');
       await api.post('/auth/verify-phone', { phone: registeredPhone, otp: phoneOtp });
       toast.success(t('register.phone_verified'));
       setShowPhoneVerify(false);
@@ -196,6 +206,7 @@ export default function Register() {
             </label>
             <input
               type="tel"
+              placeholder="+254712345678"
               data-testid="register-phone"
               placeholder="+234..."
               value={form.phone}
@@ -212,60 +223,53 @@ export default function Register() {
               <input
                 type={showPass ? 'text' : 'password'}
                 required
+                placeholder="••••••••"
                 minLength={policy.min_length}
                 data-testid="register-password"
                 placeholder={t('register.password_placeholder')}
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
                 onBlur={() => setTouched({ ...touched, password: true })}
-                className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors pr-12 shadow-sm"
+                className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 pr-12 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors shadow-sm"
               />
               <button
                 type="button"
                 onClick={() => setShowPass(!showPass)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-white transition-colors"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
               >
                 {showPass ? <EyeOff size={18} /> : <Eye size={18} />}
               </button>
             </div>
-
-            {/* Strength indicator (issue #656) — hidden when password is empty */}
             {form.password && (
-              <div className="mt-2 space-y-2" aria-live="polite">
-                <div className="flex gap-1">
-                  {[1, 2, 3, 4].map((i) => (
-                    <div
-                      key={i}
-                      className={`h-1.5 flex-1 rounded-full transition-colors ${
-                        i <= strength.score ? strength.barColor : 'bg-gray-200 dark:bg-gray-700'
-                      }`}
-                    />
-                  ))}
-                </div>
-                <p className={`text-xs font-medium ${strength.textColor}`}>
-                  {strength.label}
-                </p>
-                <ul className="grid grid-cols-2 gap-x-3 gap-y-1">
-                  {checklist.map(({ key, label }) => (
-                    <li
-                      key={key}
-                      className={`flex items-center gap-1.5 text-xs ${
-                        strength.checks[key] ? 'text-green-500' : 'text-gray-400 dark:text-gray-500'
-                      }`}
-                    >
-                      {strength.checks[key] ? <Check size={12} /> : <X size={12} />} {label}
-                    </li>
-                  ))}
-                </ul>
+              <div className="mt-2 space-y-1">
+                {checklist.map((rule) => (
+                  <p
+                    key={rule.key}
+                    className={`text-xs flex items-center gap-1 ${
+                      rule.passed ? 'text-green-500' : 'text-gray-400 dark:text-gray-500'
+                    }`}
+                  >
+                    {rule.passed ? <Check size={12} /> : <X size={12} />} {rule.label}
+                  </p>
+                ))}
               </div>
             )}
           </div>
 
-          {/* Confirm password (issue #656) */}
           <div>
             <label className="text-sm text-gray-600 dark:text-gray-400 mb-1 block">
               {t('register.confirm_password')}
             </label>
+            <input
+              type={showPass ? 'text' : 'password'}
+              required
+              placeholder="••••••••"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              className={`w-full bg-white dark:bg-gray-800 border rounded-xl px-4 py-3 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors shadow-sm ${
+                passwordsMismatch ? 'border-red-500 dark:border-red-500' : 'border-gray-200 dark:border-gray-700'
+              }`}
+            />
             <div className="relative">
               <input
                 type={showPass ? 'text' : 'password'}
@@ -290,8 +294,14 @@ export default function Register() {
                 <AlertCircle size={12} /> {t('register.passwords_do_not_match')}
               </p>
             )}
+            {passwordsMatch && (
+              <p className="text-xs text-green-500 mt-1 flex items-center gap-1">
+                <Check size={12} /> Passwords match
+              </p>
+            )}
           </div>
 
+          <div>
           <button
             type="submit"
             data-testid="register-submit"
@@ -305,18 +315,19 @@ export default function Register() {
           <div className="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
             <button
               type="button"
-              onClick={() => {
-                setShowImport((v) => !v);
-                setSecretKey('');
-                setSecretKeyError('');
-                setShowSecretKey(false);
-              }}
-              className="w-full flex items-center justify-between px-4 py-3 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              onClick={() => setShowImport(!showImport)}
+              className="text-sm text-primary-500 flex items-center gap-1"
             >
               <span>{t('register.import_wallet')}</span>
               {showImport ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              {t('register.import_wallet')}
             </button>
             {showImport && (
+              <div className="mt-2">
+                <div className="relative">
+                  <input
+                    type={showSecretKey ? 'text' : 'password'}
+                    placeholder="S..."
               <div className="px-4 pb-4 space-y-2 bg-gray-50 dark:bg-gray-800/50">
                 <p className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/30 rounded-lg p-2">
                   {t('register.secret_key_warning')}
@@ -331,27 +342,70 @@ export default function Register() {
                       setSecretKey(e.target.value);
                       setSecretKeyError('');
                     }}
-                    className={`w-full bg-white dark:bg-gray-800 border rounded-xl px-4 py-3 text-gray-900 dark:text-white placeholder-gray-400 font-mono text-sm focus:outline-none focus:border-primary-500 transition-colors pr-12 ${secretKeyError ? 'border-red-500' : 'border-gray-200 dark:border-gray-700'}`}
+                    className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 pr-12 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors shadow-sm"
                   />
                   <button
                     type="button"
+                    onClick={() => setShowSecretKey(!showSecretKey)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
                     onClick={() => setShowSecretKey((v) => !v)}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-white transition-colors"
                     aria-label={showSecretKey ? t('register.hide_secret_key') : t('register.show_secret_key')}
                   >
-                    {showSecretKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                    {showSecretKey ? <EyeOff size={18} /> : <Eye size={18} />}
                   </button>
                 </div>
-                {secretKeyError && <p className="text-xs text-red-500">{secretKeyError}</p>}
+                {secretKeyError && (
+                  <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
+                    <AlertCircle size={12} /> {secretKeyError}
+                  </p>
+                )}
               </div>
             )}
           </div>
+
+          <button
+            type="submit"
+            disabled={submitDisabled}
+            className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 transition-colors"
+          >
+            {loading ? t('common.loading') : t('register.submit')}
+          </button>
         </form>
 
-        <p className="text-center text-gray-500 mt-6 text-sm">
+        {showPhoneVerify && (
+          <form onSubmit={handlePhoneVerify} className="mt-6 space-y-4">
+            <div className="flex items-center gap-2 text-gray-900 dark:text-white">
+              <Phone size={18} />
+              <h3 className="font-semibold">Verify your phone</h3>
+            </div>
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              Enter the 6-digit code sent to {registeredPhone}
+            </p>
+            <input
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              placeholder="000000"
+              value={phoneOtp}
+              onChange={(e) => setPhoneOtp(e.target.value.replace(/\D/g, ''))}
+              className="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-center text-2xl tracking-widest text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors shadow-sm"
+            />
+            <button
+              type="submit"
+              disabled={phoneVerifyLoading}
+              className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl py-3 transition-colors"
+            >
+              {phoneVerifyLoading ? t('common.loading') : 'Verify phone'}
+            </button>
+          </form>
+        )}
+
+        <p className="text-center text-sm text-gray-600 dark:text-gray-400 mt-6">
           {t('register.have_account')}{' '}
           <Link to="/login" className="text-primary-500 hover:underline">
-            {t('register.sign_in')}
+            {t('register.login')}
           </Link>
         </p>
       </div>

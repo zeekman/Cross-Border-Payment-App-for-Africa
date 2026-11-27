@@ -68,3 +68,39 @@ body {
 @media (max-width: 767px) {
   input, select, textarea { font-size: 16px !important; }
 }
+
+/* Print-only QR card (Receive page). Hidden on screen, shown when printing. */
+.print-only {
+  display: none;
+}
+
+@media print {
+  /* Hide everything except the print-only QR card */
+  body * {
+    visibility: hidden;
+  }
+
+  .print-only,
+  .print-only * {
+    visibility: visible;
+  }
+
+  .print-only {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    padding: 24px;
+    text-align: center;
+    color: #000;
+    background: #fff;
+  }
+
+  .print-only img,
+  .print-only canvas,
+  .print-only svg {
+    max-width: 320px;
+    margin: 0 auto;
+  }
+}
