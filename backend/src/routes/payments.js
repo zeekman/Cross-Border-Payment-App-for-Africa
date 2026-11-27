@@ -257,6 +257,7 @@ router.post(
 /**
  * POST /api/payments/send-path
  * @protected @idempotent
+ * Idempotency-Key header preven
  * Idempotency-Key header prevents duplicate path payments on client retry
  * (e.g. network timeout causing the client to resend the same request).
  * Closes #493
@@ -389,4 +390,4 @@ router.get("/:id", [
   validate,
 ], getPaymentById);
 
-module.exports = router;
+/* … truncated 3719 chars — edit only what you need near the top … */
