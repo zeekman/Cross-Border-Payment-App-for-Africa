@@ -276,6 +276,12 @@ pub enum DataKey {
     /// KYC tier (as a `u32` matching `afripay_types::KycTier`) that senders
     /// and agents must hold. Defaults to `Basic`.
     RequiredKycTier,
+    /// Seconds after `confirm_delivery` during which the recipient may still
+    /// `dispute_escrow` and `release_escrow` is blocked. Defaults to 0.
+    ReleaseChallengeSecs,
+    /// Ledger timestamp at which the agent called `confirm_delivery` for an
+    /// escrow. Kept under a separate key so existing `Escrow` records decode.
+    DeliveryConfirmedAt(u64),
 }
 
 const DEFAULT_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
@@ -316,6 +322,10 @@ const DEFAULT_CANCEL_HOLD_SECS: u64 = 24 * 60 * 60;
 /// Upper bound for the configurable hold period. Must stay below the escrow
 /// expiry so the sender always gets a cancel window before expiry.
 const MAX_CANCEL_HOLD_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Upper bound on the release challenge window (SC-210), so a misconfigured
+/// window cannot push release past the escrow's expiry for typical escrows.
+const MAX_RELEASE_CHALLENGE_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// Maximum allowed fee: 10% (1000 bps) per issue #766.
 const MAX_FEE_BPS: u32 = 1000;
@@ -684,6 +694,15 @@ impl EscrowContract {
         );
     }
 
+    /// Release the full escrow balance (minus the platform fee) to the agent.
+    ///
+    /// SC-210: the agent must first record the fiat payout with
+    /// [`confirm_delivery`] (panics with `delivery not confirmed` otherwise),
+    /// so every released escrow has a `DeliveryConfirmed` event and the
+    /// post-confirmation dispute rules apply. If a release challenge window is
+    /// configured (`set_release_challenge_period`, default 0), release is also
+    /// blocked until it has elapsed, giving the recipient time to call
+    /// `dispute_escrow` if the payout never arrived.
     pub fn release_escrow(env: Env, agent: Address, escrow_id: u64) {
         bump_instance(&env);
         agent.require_auth();
@@ -705,6 +724,25 @@ impl EscrowContract {
         // cancel_escrow — the agent cannot release funds after the protection window.
         if env.ledger().timestamp() >= escrow.expires_at {
             panic_with_error!(env, Error::EscrowExpired);
+        }
+        // SC-210: release requires a prior delivery confirmation.
+        if !escrow.payout_confirmed {
+            panic!("delivery not confirmed");
+        }
+        let challenge_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReleaseChallengeSecs)
+            .unwrap_or(0);
+        if challenge_secs > 0 {
+            let confirmed_at: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::DeliveryConfirmedAt(escrow_id))
+                .unwrap_or(escrow.updated_at);
+            if env.ledger().timestamp() < confirmed_at.saturating_add(challenge_secs) {
+                panic!("release challenge window has not elapsed");
+            }
         }
 
         // SC-117: Fix fee truncation by using checked arithmetic.
@@ -764,6 +802,9 @@ impl EscrowContract {
         );
     }
 
+    /// Record that the agent has paid the recipient in fiat. Required before
+    /// [`release_escrow`]; also blocks sender cancellation and restricts
+    /// disputes to the recipient.
     pub fn confirm_delivery(env: Env, agent: Address, escrow_id: u64) {
         bump_instance(&env);
         agent.require_auth();
@@ -791,6 +832,11 @@ impl EscrowContract {
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
         bump_persistent(&env, &DataKey::Escrow(escrow_id));
+        // Start of the release challenge window (SC-210).
+        env.storage()
+            .persistent()
+            .set(&DataKey::DeliveryConfirmedAt(escrow_id), &escrow.updated_at);
+        bump_persistent(&env, &DataKey::DeliveryConfirmedAt(escrow_id));
 
         env.events().publish(
             (Symbol::new(&env, "DeliveryConfirmed"),),
@@ -1115,6 +1161,29 @@ impl EscrowContract {
     }
 
     /// Returns the current cancel hold period in seconds.
+    /// Set the release challenge window (seconds) that must elapse between
+    /// `confirm_delivery` and `release_escrow`. During it the recipient may
+    /// still `dispute_escrow`. `0` (the default) disables the window. Admin only.
+    pub fn set_release_challenge_period(env: Env, admin: Address, challenge_secs: u64) {
+        bump_instance(&env);
+        require_admin(&env, &admin);
+        if challenge_secs > MAX_RELEASE_CHALLENGE_SECS {
+            panic!("Challenge period exceeds maximum of 7 days");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ReleaseChallengeSecs, &challenge_secs);
+    }
+
+    /// Current release challenge window in seconds (0 = disabled).
+    pub fn get_release_challenge_period(env: Env) -> u64 {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::ReleaseChallengeSecs)
+            .unwrap_or(0)
+    }
+
     pub fn get_cancel_hold_period(env: Env) -> u64 {
         bump_instance(&env);
         cancel_hold_period(&env)
@@ -1163,6 +1232,9 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .remove(&DataKey::EscrowDisputeWinner(escrow_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DeliveryConfirmedAt(escrow_id));
 
         env.events().publish(
             (Symbol::new(&env, "EscrowArchived"),),

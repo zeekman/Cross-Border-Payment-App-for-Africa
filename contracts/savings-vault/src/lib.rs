@@ -142,8 +142,11 @@ pub enum DataKey {
     Vault(Address, u32),
     /// owner -> next vault_id to assign
     NextVaultId(Address),
-    /// owner -> ids of the owner's open vaults
+    /// owner -> ids of the owner's open vaults (at most `MAX_VAULTS_PER_USER`)
     UserVaults(Address),
+    /// owner -> running sum of principal across the owner's open vaults, so
+    /// `get_balance` is O(1) regardless of how many vaults the owner holds
+    UserTotal(Address),
     TotalLocked,
     YieldAccrued(Address),
     YieldDistributor,
@@ -160,6 +163,11 @@ pub enum DataKey {
 
 const SECONDS_PER_YEAR: u64 = 31_536_000;
 const MAX_INTEREST_BPS: u32 = 2_000;
+/// Maximum number of open vaults a single user may hold at once (SC-208).
+/// Every `deposit` opens a new vault, so this bounds the per-user vault list
+/// that `deposit`, `withdraw` and the emergency exits read and rewrite.
+/// Withdrawing a vault in full frees its slot.
+pub const MAX_VAULTS_PER_USER: u32 = 50;
 /// Maximum deposit amount to prevent arithmetic overflow in interest and penalty math.
 pub const MAX_DEPOSIT_AMOUNT: i128 = 100_000_000_000_000_000_000; // 100B tokens (7 decimals)
 
@@ -387,26 +395,9 @@ impl SavingsVaultContract {
         }
         ids
     }
->>>> REPLACE
 
-        if ids.is_empty() {
-            env.storage().persistent().remove(&DataKey::UserVaults(user.clone()));
-        } else {
-            env.storage()
-                .persistent()
-                .set(&DataKey::UserVaults(user.clone()), &ids);
-        }
-    }
-        if ids.is_empty() {
-            env.storage().persistent().remove(&DataKey::UserVaults(user.clone()));
-        } else {
-            let key = DataKey::UserVaults(user.clone());
-            env.storage().persistent().set(&key, &ids);
-            Self::bump_persistent(env, &key);
-        }
-    }
-
-    /// Delete a vault and drop its id from the owner's list.
+    /// Delete a vault and drop its id from the owner's list. The list is
+    /// bounded by `MAX_VAULTS_PER_USER`, so rewriting it stays cheap.
     fn remove_vault(env: &Env, user: &Address, vault_id: u32) {
         env.storage()
             .persistent()
@@ -418,9 +409,38 @@ impl SavingsVaultContract {
         if ids.is_empty() {
             env.storage().persistent().remove(&DataKey::UserVaults(user.clone()));
         } else {
-            env.storage()
-                .persistent()
-                .set(&DataKey::UserVaults(user.clone()), &ids);
+            let key = DataKey::UserVaults(user.clone());
+            env.storage().persistent().set(&key, &ids);
+            Self::bump_persistent(env, &key);
+        }
+    }
+
+    /// Running total of `user`'s principal across all open vaults (SC-208).
+    ///
+    /// Users whose vaults predate `UserTotal` have no stored total yet; for
+    /// them the total is computed once from their (bounded) vault list and
+    /// persisted on the next `deposit` / `withdraw` via `set_user_total`.
+    fn user_total(env: &Env, user: &Address) -> i128 {
+        let key = DataKey::UserTotal(user.clone());
+        if let Some(total) = env.storage().persistent().get::<DataKey, i128>(&key) {
+            Self::bump_persistent(env, &key);
+            return total;
+        }
+        let mut total: i128 = 0;
+        for id in Self::user_vault_ids(env, user).iter() {
+            let vault: Vault = Self::load_vault(env, user, id);
+            total = total.checked_add(vault.balance).expect("balance overflow");
+        }
+        total
+    }
+
+    fn set_user_total(env: &Env, user: &Address, total: i128) {
+        let key = DataKey::UserTotal(user.clone());
+        if total == 0 {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &total);
+            Self::bump_persistent(env, &key);
         }
     }
 
@@ -515,10 +535,17 @@ impl SavingsVaultContract {
             &total,
         );
 
+        // SC-209: Checks-Effects-Interactions: close the vaults and update
+        // `TotalLocked` (the reserve was debited above) BEFORE the token
+        // transfer. Soroban blocks same-contract re-entry, but an
+        // admin-configured non-SAC token could call into other contracts that
+        // read this vault's state (e.g. `get_total_locked`) mid-transfer; they
+        // must never see funds that have already been paid out.
         for id in ids.iter() {
             env.storage().persistent().remove(&DataKey::Vault(user.clone(), id));
         }
         env.storage().persistent().remove(&DataKey::UserVaults(user.clone()));
+        env.storage().persistent().remove(&DataKey::UserTotal(user.clone()));
         if yield_amount != 0 {
             env.storage().persistent().set(&yield_key, &0i128);
             Self::bump_persistent(env, &yield_key);
@@ -535,6 +562,18 @@ impl SavingsVaultContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalLocked, &new_total);
+
+        // Interactions: pay out last.
+        let token_address: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAddress)
+            .expect("Contract not initialized");
+        token::Client::new(env, &token_address).transfer(
+            &env.current_contract_address(),
+            user,
+            &total,
+        );
         (principal, interest_paid, yield_amount)
     }
 
@@ -587,14 +626,22 @@ impl SavingsVaultContract {
         interest
     }
 
+    /// Settle the interest owed on a withdrawal of `withdraw_amount` from
+    /// `vault`: debit the interest reserve and the vault's accrued interest
+    /// and return the amount to pay the user.
+    ///
+    /// Effects only: this performs NO token transfer. The caller must pay the
+    /// returned amount after all state has been written (SC-209, CEI).
+    /// Must be called before `vault.balance` is reduced, since the interest
+    /// due is pro-rated against the pre-withdrawal balance.
     fn settle_interest_payment(
         env: &Env,
         user: &Address,
         vault: &mut Vault,
         withdraw_amount: i128,
-    ) {
+    ) -> i128 {
         if vault.accrued_interest <= 0 || withdraw_amount <= 0 || vault.balance <= 0 {
-            return;
+            return 0;
         }
         let interest_due = vault
             .accrued_interest
@@ -602,7 +649,7 @@ impl SavingsVaultContract {
             .and_then(|v| v.checked_div(vault.balance))
             .expect("interest due overflow");
         if interest_due <= 0 {
-            return;
+            return 0;
         }
         let reserve: i128 = env
             .storage()
@@ -648,6 +695,7 @@ impl SavingsVaultContract {
                 },
             );
         }
+        paid
     }
 
     /// Announce an emergency withdrawal. Must be called by admin.
@@ -902,6 +950,10 @@ impl SavingsVaultContract {
     /// Each deposit is its own vault: it never changes the unlock time (or
     /// penalty exposure) of funds the user already has in other vaults.
     ///
+    /// A user may hold at most `MAX_VAULTS_PER_USER` (50) open vaults; further
+    /// deposits panic with `vault limit reached` until a vault is fully
+    /// withdrawn (SC-208).
+    ///
     /// Inflows are gated by two independent kill switches, both of which must
     /// be clear for a deposit to succeed:
     /// - the governance `pause` flag (checked first, panics with
@@ -935,6 +987,15 @@ impl SavingsVaultContract {
 
         if unlock_time < min_unlock || unlock_time > max_unlock {
             panic_with_error!(env, Error::LockPeriodOutOfRange);
+        }
+
+        // SC-208: bound the per-user vault list.
+        let mut ids = Self::user_vault_ids(&env, &user);
+        if ids.len() >= MAX_VAULTS_PER_USER {
+            panic!(
+                "vault limit reached: max {} open vaults per user",
+                MAX_VAULTS_PER_USER
+            );
         }
 
         let token_address: Address = env
@@ -971,13 +1032,19 @@ impl SavingsVaultContract {
         };
         Self::save_vault(&env, &user, vault_id, &vault);
 
-        let mut ids = Self::user_vault_ids(&env, &user);
+        // Read the running total before the new id is listed, so a legacy
+        // user's lazily computed total does not double-count this vault.
+        let user_total = Self::user_total(&env, &user)
+            .checked_add(amount)
+            .expect("user total overflow");
+
         ids.push_back(vault_id);
         let ids_key = DataKey::UserVaults(user.clone());
         env.storage()
             .persistent()
             .set(&ids_key, &ids);
         Self::bump_persistent(&env, &ids_key);
+        Self::set_user_total(&env, &user, user_total);
 
         // Update total locked
         let total_locked: i128 = env
@@ -1004,10 +1071,22 @@ impl SavingsVaultContract {
 
     /// Withdraw `amount` of principal from one vault. The early-withdrawal
     /// penalty applies only if *this* vault is still locked.
+    ///
+    /// SC-209: follows Checks-Effects-Interactions, like `escrow`:
+    /// 1. validate the request;
+    /// 2. compute the penalty and settle interest (debiting the reserve);
+    /// 3. write the vault (or remove it), `TotalLocked` and `UserTotal`;
+    /// 4. only then transfer tokens to the user, and emit the event.
+    /// Soroban blocks same-contract re-entry, but the token is
+    /// admin-configured: a non-SAC token could call into other contracts that
+    /// read this vault's state (e.g. `get_total_locked`) during the transfer,
+    /// and they must not see funds that have already been paid out.
     pub fn withdraw(env: Env, user: Address, vault_id: u32, amount: i128) {
         Self::bump_instance(&env);
         user.require_auth();
         governance::require_not_paused(&env);
+
+        // ── Checks ──────────────────────────────────────────────────────────
         if amount <= 0 {
             panic_with_error!(env, Error::InvalidAmount);
         }
@@ -1020,13 +1099,13 @@ impl SavingsVaultContract {
 
         let token_address: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TokenAddress)
-            .unwrap();
+            .expect("Contract not initialized");
 
         let penalty_bps: u32 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::PenaltyBps)
             .unwrap_or(1000);
 
@@ -1044,37 +1123,53 @@ impl SavingsVaultContract {
             .checked_sub(penalty)
             .expect("withdrawal amount calculation underflow");
 
+        // ── Effects ─────────────────────────────────────────────────────────
+        // Interest is settled against the pre-withdrawal balance; this debits
+        // the reserve and the vault's accrued interest without transferring.
         Self::accrue_interest_internal(&env, &mut vault, false);
-        Self::settle_interest_payment(&env, &user, &mut vault, amount);
-
-        token::Client::new(&env, &token_address).transfer(
-            &env.current_contract_address(),
-            &user,
-            &withdraw_amount,
-        );
+        let interest_paid = Self::settle_interest_payment(&env, &user, &mut vault, amount);
 
         vault.balance = vault
             .balance
             .checked_sub(amount)
             .expect("vault balance underflow");
+        // The user total must be read while this vault is still listed so a
+        // legacy (lazily computed) total includes it before it is removed.
+        let user_total = Self::user_total(&env, &user)
+            .checked_sub(amount)
+            .expect("user total underflow");
         if vault.balance == 0 && vault.accrued_interest == 0 {
             Self::remove_vault(&env, &user, vault_id);
         } else {
             Self::save_vault(&env, &user, vault_id, &vault);
         }
+        Self::set_user_total(&env, &user, user_total);
 
-        // Update total locked
         let total_locked: i128 = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TotalLocked)
             .unwrap_or(0);
         let new_total = total_locked
             .checked_sub(amount)
             .expect("total locked underflow");
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::TotalLocked, &new_total);
+
+        // ── Interactions ────────────────────────────────────────────────────
+        // The penalty stays in the contract; principal (net of penalty) and
+        // settled interest are paid in a single transfer.
+        let payout = withdraw_amount
+            .checked_add(interest_paid)
+            .expect("payout overflow");
+        if payout > 0 {
+            token::Client::new(&env, &token_address).transfer(
+                &env.current_contract_address(),
+                &user,
+                &payout,
+            );
+        }
 
         env.events().publish(
             (Symbol::new(&env, "Withdrawal"),),
@@ -1088,13 +1183,35 @@ impl SavingsVaultContract {
     }
 
     /// Total principal `user` holds across all of their vaults.
+    ///
+    /// SC-208: reads the running `UserTotal` — a constant number of storage
+    /// entries regardless of how many vaults the user holds. (Users whose
+    /// vaults predate `UserTotal` fall back to a one-off sum over their
+    /// bounded vault list until their next deposit or withdrawal.)
     pub fn get_balance(env: Env, user: Address) -> i128 {
-        let mut total: i128 = 0;
-        for id in Self::user_vault_ids(&env, &user).iter() {
-            let vault: Vault = Self::load_vault(&env, &user, id);
-            total = total.checked_add(vault.balance).expect("balance overflow");
+        Self::user_total(&env, &user)
+    }
+
+    /// Paginated read of `user`'s open vaults as `(vault_id, Vault)` pairs, in
+    /// creation order. Returns at most `limit` entries (capped at
+    /// `MAX_VAULTS_PER_USER`) starting at position `start`; an empty list
+    /// when `start` is past the end.
+    pub fn get_vaults(env: Env, user: Address, start: u32, limit: u32) -> Vec<(u32, Vault)> {
+        let ids = Self::user_vault_ids(&env, &user);
+        let mut out: Vec<(u32, Vault)> = Vec::new(&env);
+        let limit = if limit > MAX_VAULTS_PER_USER {
+            MAX_VAULTS_PER_USER
+        } else {
+            limit
+        };
+        let end = start.saturating_add(limit).min(ids.len());
+        let mut i = start;
+        while i < end {
+            let id = ids.get(i).unwrap();
+            out.push_back((id, Self::load_vault(&env, &user, id)));
+            i += 1;
         }
-        total
+        out
     }
 
     /// Ids of `user`'s open vaults, in creation order.
@@ -1199,19 +1316,22 @@ impl SavingsVaultContract {
 
         let token_address: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TokenAddress)
             .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+
+        // SC-209: Checks-Effects-Interactions: zero the claimable yield BEFORE
+        // the token transfer, so nothing observing this contract during the
+        // transfer can see (or claim) yield that has already been paid.
+        env.storage()
+            .persistent()
+            .set(&DataKey::YieldAccrued(user.clone()), &0i128);
 
         token::Client::new(&env, &token_address).transfer(
             &env.current_contract_address(),
             &user,
             &yield_amount,
         );
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::YieldAccrued(user.clone()), &0i128);
 
         env.events().publish(
             (Symbol::new(&env, "YieldClaimed"),),
@@ -1225,9 +1345,14 @@ impl SavingsVaultContract {
     /// Get the total amount locked across all vaults.
     pub fn get_total_locked(env: Env) -> i128 {
         env.storage()
-            .persistent()
+            .instance()
             .get(&DataKey::TotalLocked)
             .unwrap_or(0)
+    }
+
+    /// Get the current interest reserve (tokens set aside to pay interest).
+    pub fn get_interest_reserve_balance(env: Env) -> i128 {
+        Self::get_interest_reserve(&env)
     }
 
     /// Get the accrued yield for a user.
