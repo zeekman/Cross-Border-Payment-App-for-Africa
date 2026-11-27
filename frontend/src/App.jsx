@@ -30,6 +30,7 @@ import Sessions from "./pages/Sessions";
 import Escrow from "./pages/Escrow";
 import NotFound from "./pages/NotFound";
 import Layout from "./components/Layout";
+import AppLock from "./components/AppLock";
 import ErrorBoundary from "./components/ErrorBoundary";
 import UpdateBanner from "./components/UpdateBanner";
 
@@ -145,7 +146,10 @@ function AppRoutes() {
           path="/"
           element={
             <PrivateRoute>
-              <Layout />
+              {/* FE-214: idle auto-lock covers the whole authenticated shell. */}
+              <AppLock>
+                <Layout />
+              </AppLock>
             </PrivateRoute>
           }
         >

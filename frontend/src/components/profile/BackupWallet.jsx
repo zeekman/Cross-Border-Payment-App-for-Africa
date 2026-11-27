@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import { Copy, CheckCheck, ShieldAlert, Eye, EyeOff } from 'lucide-react';
 import api from '../../utils/api';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function BackupWallet() {
 
@@ -20,7 +21,7 @@ export default function BackupWallet() {
       setExportedKey(res.data.secret_key);
       setBackupPassword('');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Export failed');
+      toast.error(apiErrorMessage(err));
     } finally {
       setBackupLoading(false);
     }

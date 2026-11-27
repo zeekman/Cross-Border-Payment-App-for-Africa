@@ -6,6 +6,7 @@ import { createIdempotencyKey, postWithIdempotency } from '../utils/idempotency'
 import useStepUp from '../hooks/useStepUp';
 import { useVisibleInterval } from '../hooks/useVisibleInterval';
 import toast from 'react-hot-toast';
+import { apiErrorMessage } from '../utils/apiError';
 
 const REFRESH_INTERVAL = 15; // seconds
 const HIGH_IMPACT_PCT = 2;
@@ -226,7 +227,7 @@ export default function Swap() {
       if (errCode === 'PRICE_MOVED' || errCode === 'SLIPPAGE_EXCEEDED') {
         toast.error('Price moved too much. Increase your slippage tolerance and try again.');
       } else {
-        toast.error(err.response?.data?.error || err.response?.data?.errors?.[0]?.msg || 'Swap failed');
+        toast.error(apiErrorMessage(err));
       }
     } finally {
       setSubmitting(false);

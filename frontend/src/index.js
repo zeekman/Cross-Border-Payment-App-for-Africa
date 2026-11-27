@@ -5,6 +5,10 @@ import './index.css';
 import './i18n';
 import App from './App';
 import { register as registerSW } from './serviceWorker';
+import { captureInstallPrompt } from './hooks/useInstallPrompt';
+
+// FE-213: capture `beforeinstallprompt` before React mounts so it isn't missed.
+captureInstallPrompt();
 
 Sentry.init({
   dsn: process.env.REACT_APP_SENTRY_DSN,

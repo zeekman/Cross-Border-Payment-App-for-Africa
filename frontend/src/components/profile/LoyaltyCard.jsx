@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import { Gift } from 'lucide-react';
 import api from '../../utils/api';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function LoyaltyCard() {
 
@@ -19,7 +20,7 @@ export default function LoyaltyCard() {
       const res = await api.get('/loyalty/balance');
       setLoyaltyBalance(res.data.points || 0);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to redeem points');
+      toast.error(apiErrorMessage(err));
     } finally {
       setRedeemLoading(false);
     }

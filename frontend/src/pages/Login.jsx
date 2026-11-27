@@ -6,6 +6,7 @@ import { Eye, EyeOff, ArrowLeft, ShieldCheck, MailCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
 import { useVisibleInterval } from '../hooks/useVisibleInterval';
+import { apiErrorMessage } from '../utils/apiError';
 
 export default function Login() {
   const { login, updateUser } = useAuth();
@@ -175,10 +176,7 @@ export default function Login() {
       );
       await completeTwoFactorLogin(res);
     } catch (err) {
-      toast.error(
-        err.response?.data?.error ||
-          t('login.backup_code_error', 'Invalid or already-used backup code. Try another one.')
-      );
+      toast.error(apiErrorMessage(err));
       setBackupCode('');
       backupInputRef.current?.focus();
     } finally {

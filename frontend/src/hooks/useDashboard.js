@@ -14,6 +14,7 @@ import { usePushNotifications } from '../hooks/usePushNotifications';
 import { getQueueCountForUser } from '../utils/offlineDB';
 import { IS_TESTNET } from '../config/network';
 import { safeAnchorUrl } from '../utils/anchorUrl';
+import { apiErrorMessage } from '../utils/apiError';
 
 
 function normalizeWalletsResponse(data) {
@@ -249,7 +250,7 @@ export function useDashboard() {
       setWallets(walletsData);
       setWalletError(walletsData.length === 0);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Funding failed');
+      toast.error(apiErrorMessage(err));
     } finally {
       setFunding(false);
     }
@@ -281,7 +282,7 @@ export function useDashboard() {
       }
     } catch (err) {
       if (win) win.close();
-      toast.error(err.response?.data?.error || err.message || `Failed to ${action}`);
+      toast.error(apiErrorMessage(err));
     } finally {
       setAnchorLoading(false);
       setAnchorAction(null);
@@ -301,7 +302,7 @@ export function useDashboard() {
       setWallets(walletsRes.data.wallets);
       setActiveWalletId(res.data.wallet.id);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to create wallet');
+      toast.error(apiErrorMessage(err));
     } finally {
       setCreatingWallet(false);
     }

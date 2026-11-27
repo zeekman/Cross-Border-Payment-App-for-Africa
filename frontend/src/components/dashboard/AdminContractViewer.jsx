@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import api from '../../utils/api';
 import toast from 'react-hot-toast';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function AdminContractViewer({ user }) {
   const [adminContractId, setAdminContractId] = useState('');
@@ -17,7 +18,7 @@ export default function AdminContractViewer({ user }) {
       });
       setAdminContractState(res.data.data || []);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to fetch contract state');
+      toast.error(apiErrorMessage(err));
     } finally {
       setAdminStateLoading(false);
     }

@@ -27,6 +27,9 @@ import PushNotificationPrompt from '../components/PushNotificationPrompt';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import { usePaymentStream, CONNECTION_STATE } from '../hooks/usePaymentStream';
 import { useVisibleInterval } from '../hooks/useVisibleInterval';
+import { markFirstSendForInstall } from '../hooks/useInstallPrompt';
+import { useAuth } from '../context/AuthContext';
+import { apiErrorMessage } from '../utils/apiError';
 
 // Lazy-loaded so react-qr-reader and @ledgerhq/* stay out of the main bundle.
 const QRScanner = lazy(() => import('../components/QRScanner'));
@@ -61,6 +64,7 @@ function stepReducer(state, action) {
 export default function SendMoney() {
   const confirm = useConfirm();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { t, i18n } = useTranslation();
   const [searchParams] = useSearchParams();
   const submitButtonRef = React.useRef(null);
@@ -672,7 +676,7 @@ export default function SendMoney() {
       setLedgerNetworkPassphrase(res.data.network_passphrase);
       setShowLedgerModal(true);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to build transaction');
+      toast.error(apiErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -693,7 +697,7 @@ export default function SendMoney() {
       resetForm();
       navigate('/dashboard');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to submit Ledger transaction');
+      toast.error(apiErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -734,6 +738,8 @@ export default function SendMoney() {
           });
         }
         toast.success(t('send.success'));
+        // FE-213: a first successful send makes the install banner eligible.
+        markFirstSendForInstall(user?.id);
         if (requestId) {
           await api
             .post(`/payment-requests/${requestId}/claim`, {
@@ -818,7 +824,7 @@ export default function SendMoney() {
           memoRef.current?.focus();
         }, 50);
       } else {
-        toast.error(err.response?.data?.error || t('send.error'));
+        toast.error(apiErrorMessage(err));
         setShowPINVerification(false);
         // Stay on step 4 so the user can retry without starting over
       }

@@ -6,6 +6,7 @@ import { Trash2, Shield, Key, AlertCircle, Monitor } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../utils/api';
 import { useConfirm } from '../../context/ConfirmContext';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function SecuritySigners() {
   const confirm = useConfirm();
@@ -42,7 +43,7 @@ export default function SecuritySigners() {
       setInflationDest(null);
       toast.success('Inflation destination cleared');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to clear inflation destination');
+      toast.error(apiErrorMessage(err));
     } finally {
       setClearingInflation(false);
     }
@@ -56,7 +57,7 @@ export default function SecuritySigners() {
       setSigners((prev) => prev.filter((s) => s.key !== signerKey));
       toast.success('Signer removed');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to remove signer');
+      toast.error(apiErrorMessage(err));
     } finally {
       setRemovingSignerKey(null);
     }

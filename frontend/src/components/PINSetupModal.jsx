@@ -3,6 +3,7 @@ import { Lock, X, Fingerprint } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import { apiErrorMessage } from '../utils/apiError';
 
 async function registerWebAuthn() {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
@@ -83,7 +84,7 @@ export default function PINSetupModal({ isOpen, onClose, onSuccess }) {
       }
     } catch (err) {
       setError(err.response?.data?.error || t('auth.pin_error'));
-      toast.error(err.response?.data?.error || t('auth.pin_error'));
+      toast.error(apiErrorMessage(err));
     } finally {
       setLoading(false);
     }

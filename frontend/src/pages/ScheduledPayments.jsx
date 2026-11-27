@@ -9,6 +9,7 @@ import { useConfirm } from '../context/ConfirmContext';
 import { CURRENCIES } from '../utils/currency';
 import ScheduledPaymentsCalendar from '../components/ScheduledPaymentsCalendar';
 import { validateStellarAddress } from '../utils/validation';
+import { apiErrorMessage } from '../utils/apiError';
 
 export default function ScheduledPayments() {
   const { requestStepUp, stepUpModal } = useStepUp();
@@ -87,7 +88,7 @@ export default function ScheduledPayments() {
       setShowForm(false);
       fetchPayments();
     } catch (err) {
-      toast.error(err.response?.data?.error || t('scheduled.error'));
+      toast.error(apiErrorMessage(err));
     }
   };
 

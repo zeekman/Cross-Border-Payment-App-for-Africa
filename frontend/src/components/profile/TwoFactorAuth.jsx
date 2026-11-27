@@ -4,6 +4,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { Copy, Shield } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../utils/api';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function TwoFactorAuth() {
   const { user, updateUser } = useAuth();
@@ -24,7 +25,7 @@ export default function TwoFactorAuth() {
       setTwoFAStep('setup');
       setBackupCodesAcknowledged(false);
     } catch (err) {
-      toast.error(err.response?.data?.error || '2FA setup failed');
+      toast.error(apiErrorMessage(err));
     } finally {
       setTwoFALoading(false);
     }
@@ -41,7 +42,7 @@ export default function TwoFactorAuth() {
       setTwoFACode('');
       updateUser({ totp_enabled: true });
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Invalid code');
+      toast.error(apiErrorMessage(err));
     } finally {
       setTwoFALoading(false);
     }
@@ -57,7 +58,7 @@ export default function TwoFactorAuth() {
       setTwoFAPassword('');
       updateUser({ totp_enabled: false });
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to disable 2FA');
+      toast.error(apiErrorMessage(err));
     } finally {
       setTwoFALoading(false);
     }

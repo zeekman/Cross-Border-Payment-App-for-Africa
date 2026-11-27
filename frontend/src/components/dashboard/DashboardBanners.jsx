@@ -1,9 +1,13 @@
 import { IS_TESTNET } from '../../config/network';
 import { Download, FlaskConical, Clock, Mail, Bell, X } from 'lucide-react';
+import InstallAppBanner from './InstallAppBanner';
 
 export default function DashboardBanners({ user, pushLoading, pushSubscribe, showPushBanner, dismissPushBanner, funding, queueCount, isOnline, showEmailBanner, setShowEmailBanner, isConnected, isReconnecting, streamError, loadDashboard, fundWallet, accountExists, showFundWalletButton }) {
   return (
     <>
+      {/* Install prompt (FE-213) */}
+      <InstallAppBanner user={user} />
+
       {/* Testnet banner */}
       {IS_TESTNET && (
         <div className="flex items-center justify-between bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3">

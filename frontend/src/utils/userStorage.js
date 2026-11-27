@@ -9,11 +9,16 @@ export const DEVICE_KEYS = new Set([
   'stellar_status_cache',
 ]);
 
+// Per-user preferences namespaced by user id (see utils/userPrefs.js) — kept
+// across logout so the auto-lock timeout (FE-214) and install-banner
+// dismissal (FE-213) stay per user; they hold no personal data.
+export const PRESERVED_KEY_PREFIXES = ['afripay_pref:'];
+
 function clearStore(store) {
   if (!store) return;
   try {
     Object.keys(store)
-      .filter((key) => !DEVICE_KEYS.has(key))
+      .filter((key) => !DEVICE_KEYS.has(key) && !PRESERVED_KEY_PREFIXES.some((p) => key.startsWith(p)))
       .forEach((key) => store.removeItem(key));
   } catch {
     /* storage unavailable (private mode) — nothing to clear */

@@ -12,6 +12,7 @@ import { TransactionCardSkeleton } from '../components/Skeleton';
 import ConfirmModal from '../components/ConfirmModal';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { setCacheEntry, getCacheEntry } from '../utils/offlineDB';
+import { apiErrorMessage } from '../utils/apiError';
 
 const STATUS_COLORS = {
   completed: 'text-primary-400 bg-primary-500/10',
@@ -332,7 +333,7 @@ export default function TransactionHistory() {
       setReportType('other');
       toast.success('Issue reported. Our team will review it shortly.');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to submit report');
+      toast.error(apiErrorMessage(err));
     } finally {
       setReportLoading(false);
     }

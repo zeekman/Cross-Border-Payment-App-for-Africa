@@ -5,6 +5,7 @@ import api from '../utils/api';
 import { CURRENCIES } from '../utils/currency';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import { apiErrorMessage } from '../utils/apiError';
 
 const PAGE_SIZE = 10;
 const STATUS_STYLES = {
@@ -58,7 +59,7 @@ function MyRequests() {
       toast.success('Request cancelled');
       load();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to cancel request');
+      toast.error(apiErrorMessage(err));
     }
   };
 
@@ -150,7 +151,7 @@ export default function RequestMoney() {
       setRequestDetails({ id: res.data.id, amount: res.data.amount, asset: res.data.asset });
       toast.success(t('request.created') || 'Payment request created');
     } catch (err) {
-      toast.error(err.response?.data?.error || t('request.error') || 'Failed to create request');
+      toast.error(apiErrorMessage(err));
     } finally {
       setLoading(false);
     }

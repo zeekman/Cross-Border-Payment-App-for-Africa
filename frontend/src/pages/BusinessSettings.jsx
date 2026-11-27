@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { truncateAddress } from '../utils/currency';
 import ConfirmModal from '../components/ConfirmModal';
 import toast from 'react-hot-toast';
+import { apiErrorMessage } from '../utils/apiError';
 
 export default function BusinessSettings() {
   const confirm = useConfirm();
@@ -77,7 +78,7 @@ export default function BusinessSettings() {
       setRevealedSecret(webhookId);
       toast.success('Secret rotated successfully');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to rotate secret');
+      toast.error(apiErrorMessage(err));
     } finally {
       setRotating(null);
       setRotateConfirm(null);
@@ -98,7 +99,7 @@ export default function BusinessSettings() {
       updateUser({ account_type: 'business' });
       toast.success('Account upgraded to Business');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Upgrade failed');
+      toast.error(apiErrorMessage(err));
     } finally {
       setUpgrading(false);
     }
@@ -140,7 +141,7 @@ export default function BusinessSettings() {
       toast.success('Signer added');
     } catch (err) {
       // Keep the typed key/label so the user does not have to re-enter them.
-      toast.error(err.response?.data?.error || err.response?.data?.errors?.[0]?.msg || 'Failed to add signer');
+      toast.error(apiErrorMessage(err));
     } finally {
       setAdding(false);
     }
@@ -165,7 +166,7 @@ export default function BusinessSettings() {
         toast.success('Signer removed');
       }
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to remove signer');
+      toast.error(apiErrorMessage(err));
     } finally {
       setRemoving(null);
     }

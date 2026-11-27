@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import toast from 'react-hot-toast';
 import { Plus, AlertCircle } from 'lucide-react';
 import api from '../../utils/api';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export default function SupportTickets() {
 
@@ -24,7 +25,7 @@ export default function SupportTickets() {
       const res = await api.get('/support/tickets');
       setTickets(res.data.tickets || []);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to create support ticket');
+      toast.error(apiErrorMessage(err));
     } finally {
       setSupportLoading(false);
     }
