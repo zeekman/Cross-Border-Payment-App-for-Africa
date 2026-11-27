@@ -89,7 +89,11 @@
     "have_account": "Kana da asusun riga?",
     "sign_in": "Shiga",
     "success": "An buɗe asusun! Jakar kuɗinka tana shirye.",
-    "error": "Rajista ta kasa"
+    "error": "Rajista ta kasa",
+    "toast_success": "An buɗe asusun! Jakar kuɗinka tana shirye.",
+    "toast_error": "Rajista ta kasa. Da fatan a sake gwadawa.",
+    "toast_password_mismatch": "Kalmomin sirri ba su dace ba",
+    "toast_invalid_email": "Da fatan a shigar da ingantaccen adireshin imel"
   },
   "login": {
     "title": "Barka da dawowar",
@@ -118,7 +122,9 @@
     "reset_success_toast": "An sabunta kalmar sirri. Yanzu zaka iya shiga.",
     "back_to_login": "Komawa zuwa shiga",
     "missing_token": "Wannan hanya ba ta da kyau. Nemi sabuwa daga shafin shiga.",
-    "error_generic": "Wani abu ya yi kuskure. Sake gwadawa."
+    "error_generic": "Wani abu ya yi kuskure. Sake gwadawa.",
+    "toast_success": "An sabunta kalmar sirri. Yanzu zaka iya shiga.",
+    "toast_error": "An kasa sake saita kalmar sirri. Da fatan a sake gwadawa."
   },
   "dashboard": {
     "greeting": "Barka,",
@@ -192,7 +198,11 @@
     "success": "An aika biyan kuɗi!",
     "error": "Ma'amala ta kasa",
     "qr_unsupported_uri": "Wannan lambar QR buƙatar ma'amala ce, ba buƙatar biyan kuɗi ba. Lambobin QR na biyan kuɗi kawai ake tallafawa.",
-    "qr_prefilled": "An cike bayanan biyan kuɗi daga lambar QR — da fatan za a duba kafin aikawa."
+    "qr_prefilled": "An cike bayanan biyan kuɗi daga lambar QR — da fatan za a duba kafin aikawa.",
+    "toast_success": "An aika biyan kuɗi cikin nasara!",
+    "toast_error": "An kasa aika biyan kuɗi. Da fatan a sake gwadawa.",
+    "toast_invalid_address": "Da fatan a shigar da ingantaccen adireshin Stellar",
+    "toast_invalid_amount": "Shigar da ingantaccen adadi mai har zuwa lambobi 7 bayan aya"
   },
   "auth": {
     "setup_pin_title": "Saita PIN na Ma'amala",
@@ -221,7 +231,12 @@
     "subtitle": "Raba adireshi ko lambar QR don karɓar biyan kuɗi",
     "address_label": "Adireshi Jakar Stellar Naka",
     "warning": "Aika XLM ko kadarorin Stellar kawai zuwa wannan adireshi",
-    "address_copied": "An kwafi adireshi!"
+    "address_copied": "An kwafi adireshi!",
+    "toast_copied": "An kwafi adireshin jakar kuɗi!",
+    "toast_copy_failed": "An kasa kwafi adireshi",
+    "toast_qr_failed": "An kasa ƙirƙirar lambar QR",
+    "toast_share_success": "An raba hanyar biyan kuɗi",
+    "toast_share_failed": "An kasa raba hanyar biyan kuɗi"
   },
   "history": {
     "search_placeholder": "Bincika memo, adireshin, ko adadin",
@@ -238,7 +253,9 @@
     "filter_received": "karɓa",
     "to": "Zuwa:",
     "from": "Daga:",
-    "export_csv": "Fitar CSV"
+    "export_csv": "Fitar CSV",
+    "toast_export_success": "An fitar da ma'amaloli zuwa CSV",
+    "toast_export_failed": "An kasa fitar da ma'amaloli"
   },
   "profile": {
     "title": "Bayanan Kai",
@@ -250,7 +267,12 @@
     "contact_added": "An ƙara tuntuɓi",
     "contact_error": "Ƙara tuntuɓi ya kasa",
     "address_copied": "An kwafi adireshi!",
-    "language": "Harshe"
+    "language": "Harshe",
+    "toast_contact_added": "An ƙara tuntuɓi cikin nasara",
+    "toast_contact_error": "An kasa ƙara tuntuɓi",
+    "toast_contact_removed": "An cire tuntuɓi",
+    "toast_contact_remove_error": "An kasa cire tuntuɓi",
+    "toast_address_copied": "An kwafi adireshi!"
   },
   "contacts_import": {
     "open": "Shigo da CSV",
@@ -518,45 +540,4 @@
     "csvParseFailed": "An kasa karanta fayil ɗin CSV",
     "addOne": "Ƙara aƙalla mai karɓa ɗaya",
     "submitted": "An aika biyan kuɗi na gungu",
-    "submitFailed": "Biyan kuɗi na gungu ya gaza"
-  },
-  "kyc": {
-    "progress": "Ci gaban tabbatar da KYC",
-    "stepAria": "Mataki na {{id}}: {{label}}",
-    "completed": " (an kammala)",
-    "current": " (na yanzu)",
-    "step1": "Bayanan sirri",
-    "step2": "Loda takarda",
-    "step3": "Ɗaukar selfie",
-    "step4": "Duba ka aika",
-    "stepOf": "Mataki {{n}} cikin 4 — {{label}}",
-    "verified": "An tabbatar",
-    "verifiedMsg": "An tabbatar da ainihin ka. Za ka iya aika ciniki na kowane adadi.",
-    "underReview": "Ana dubawa",
-    "underReviewMsg": "Ana duba bayanan KYC naka. Wannan yawanci yana ɗaukar kwanakin aiki 1–2.",
-    "rejected": "An ƙi",
-    "rejectedMsg": "An ƙi bayanan da ka aika a baya. Da fatan za a sake aikawa da cikakkun bayanai.",
-    "unverified": "Ba a tabbatar ba",
-    "unverifiedMsg": "Tabbatar da ainihin ka don aika ciniki sama da kwatankwacin $100 USD.",
-    "idNational": "Katin shaidar ɗan ƙasa",
-    "idPassport": "Fasfo na ƙasa da ƙasa",
-    "idDrivers": "Lasisin tuƙi",
-    "idVoters": "Katin zaɓe",
-    "back": "Koma",
-    "title": "Tabbatar da ainihi",
-    "subtitle": "Ana buƙata don bin ƙa'idoji a kasuwannin Afirka.",
-    "loading": "Ana lodawa",
-    "dob": "Ranar haihuwa",
-    "continue": "Ci gaba",
-    "idType": "Nau'in shaida",
-    "selectIdType": "Zaɓi nau'in shaida",
-    "idNumber": "Lambar shaida",
-    "idNumberPlaceholder": "Shigar da lambar shaidarka",
-    "selfieHint": "Ɗauki selfie mai haske wanda ya dace da takardar shaidarka.",
-    "uploadSelfie": "Loda selfie",
-    "disclaimer": "Ana amfani da bayananka kawai don tabbatar da ainihi kamar yadda dokokin kuɗi suka buƙata. Ba a taɓa adana ainihin takardun shaida a ma'ajin bayananmu ba.",
-    "submit": "Aika don tabbatarwa",
-    "submitted": "An aika KYC cikin nasara. Za mu duba aikace-aikacenka nan ba da jimawa ba.",
-    "submitFailed": "Aikawa ya gaza. Da fatan a sake gwadawa."
-  }
-}
+    "submitFailed": "Biyan kuɗi na gungu ya

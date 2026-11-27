@@ -36,6 +36,7 @@ const api = axios.create({
 const refreshClient = axios.create({
   baseURL,
   withCredentials: true,
+  timeout,
 });
 
 // refreshClient also needs the CSRF header for /auth/refresh

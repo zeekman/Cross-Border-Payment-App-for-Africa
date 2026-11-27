@@ -113,8 +113,21 @@ user already holds in other vaults.
 - `withdraw(user, vault_id, amount)` / `accrue_interest(user, vault_id)` act on one vault;
   the early-withdrawal penalty depends only on that vault's `unlock_time`.
 - `get_vault(user, vault_id)`, `get_unlock_time(user, vault_id)` read one vault;
-  `get_vault_ids(user)` lists open vaults and `get_balance(user)` sums their principal.
+  `get_vault_ids(user)` lists open vaults and `get_vaults(user, start, limit)`
+  returns a page of `(vault_id, Vault)` pairs.
+- `get_balance(user)` returns the user's total principal from a running
+  `UserTotal(user)` entry updated on every deposit / withdrawal, so it reads a
+  constant number of entries no matter how many vaults the user holds (SC-208).
+- A user may hold at most **`MAX_VAULTS_PER_USER` = 50** open vaults. A further
+  `deposit` panics with `vault limit reached: max 50 open vaults per user` until a
+  vault is fully withdrawn.
 - A vault is deleted once its principal and accrued interest are both zero.
+- Exits (`withdraw`, `emergency_withdraw`, `emergency_return_funds`,
+  `claim_yield`) follow Checks-Effects-Interactions (SC-209): the vault,
+  `TotalLocked`, `UserTotal`, interest reserve and yield balances are all written
+  before any token transfer, so other contracts never observe a `TotalLocked`
+  that includes funds already paid out. `get_interest_reserve_balance()` exposes
+  the reserve for the solvency invariant `token balance >= TotalLocked + reserve`.
 
 ## Operational Runbooks
 

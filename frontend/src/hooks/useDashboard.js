@@ -13,7 +13,6 @@ import { usePullToRefresh } from '../hooks/usePullToRefresh';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import { getQueueCountForUser } from '../utils/offlineDB';
 import { IS_TESTNET } from '../config/network';
-import { safeAnchorUrl } from '../utils/anchorUrl';
 
 
 function normalizeWalletsResponse(data) {
@@ -76,8 +75,8 @@ export function useDashboard() {
   const [copied, setCopied] = useState(false);
   const { displayCurrency: selectedCurrency, setDisplayCurrency: setSelectedCurrency } = useCurrency();
   const [funding, setFunding] = useState(false);
-  const [anchorLoading, setAnchorLoading] = useState(false);
-  const [anchorAction, setAnchorAction] = useState(null);
+  const [anchorLoading] = useState(false);
+  const [anchorAction] = useState(null);
   const [balanceIncreased, setBalanceIncreased] = useState(false);
   const [fromCache, setFromCache] = useState(false);
   const [showZeroBalances, setShowZeroBalances] = useState(false);
@@ -255,38 +254,7 @@ export function useDashboard() {
     }
   };
 
-  const handleAnchorAction = async (action) => {
-    setAnchorLoading(true);
-    setAnchorAction(action);
-    const win = window.open('', 'anchor', 'width=500,height=600');
-    // Prevent reverse tabnabbing: the third-party anchor must not get a handle to this tab.
-    if (win) win.opener = null;
-    try {
-      const asset = 'USDC';
-      const endpoint = action === 'deposit' ? '/anchor/deposit' : '/anchor/withdraw';
-      const res = await api.post(endpoint, { asset });
-      const url = safeAnchorUrl(res.data?.url);
-      if (!url) throw new Error('Refusing to open an untrusted anchor URL');
-      if (win) {
-        win.location.href = url;
-      } else {
-        toast(
-          (tst) => (
-            <a href={url} target="_blank" rel="noopener noreferrer" onClick={() => toast.dismiss(tst.id)}>
-              Continue to anchor
-            </a>
-          ),
-          { duration: 15000 }
-        );
-      }
-    } catch (err) {
-      if (win) win.close();
-      toast.error(err.response?.data?.error || err.message || `Failed to ${action}`);
-    } finally {
-      setAnchorLoading(false);
-      setAnchorAction(null);
-    }
-  };
+  const handleAnchorAction = (action) => navigate(`/ramp?type=${action}`);
 
   const handleCreateWallet = async (e) => {
     e.preventDefault();
@@ -325,7 +293,9 @@ export function useDashboard() {
   const displayBalance =
     selectedCurrency === 'XLM'
       ? selectedAssetBalance
-      : convertFromXLM(xlmBalance, selectedCurrency);
+      : currencies.some((c) => c.code === selectedCurrency) || selectedCurrency.length === 3
+        ? convertFromXLM(xlmBalance, selectedCurrency)
+        : selectedAssetBalance;
   const walletUnavailable = !loading && walletError && !wallet;
 
   const {
@@ -386,9 +356,7 @@ export function useDashboard() {
     funding,
     setFunding,
     anchorLoading,
-    setAnchorLoading,
     anchorAction,
-    setAnchorAction,
     balanceIncreased,
     setBalanceIncreased,
     fromCache,

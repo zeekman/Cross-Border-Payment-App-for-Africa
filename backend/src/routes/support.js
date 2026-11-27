@@ -5,7 +5,14 @@ const rateLimit = require('express-rate-limit');
 const authMiddleware = require('../middleware/auth');
 const { readLimiter } = require('../middleware/rateLimiter');
 const supportUpload = require('../middleware/supportUpload');
-const { createTicket, listTickets, getAttachment } = require('../controllers/supportController');
+const {
+  createTicket,
+  listTickets,
+  getAttachment,
+  getTicket,
+  addUserMessage,
+  closeTicket,
+} = require('../controllers/supportController');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -48,7 +55,12 @@ router.use(readLimiter);
  *             required: [type, description]
  *             properties:
  *               transaction_id:
- *                 type: integer
+ *                 type: string
+ *                 format: uuid
+ *                 description: UUID of one of the user's own transactions (any of their wallets)
+ *               tx_hash:
+ *                 type: string
+ *                 description: Alternative to transaction_id — the Stellar transaction hash
  *               type:
  *                 type: string
  *                 enum: [wrong_address, wrong_amount, failed_deducted, other]
@@ -62,6 +74,8 @@ router.use(readLimiter);
  *     responses:
  *       201:
  *         description: Ticket created
+ *       404:
+ *         description: Transaction not found or does not belong to the user
  *       429:
  *         description: Rate limit exceeded
  *   get:
@@ -72,6 +86,75 @@ router.use(readLimiter);
  *     responses:
  *       200:
  *         description: List of tickets
+ *
+ * /api/support/tickets/{id}:
+ *   get:
+ *     summary: Get one of the user's tickets with attachments and messages
+ *     tags: [Support]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Ticket detail
+ *       404:
+ *         description: Ticket not found (or not owned by the user)
+ *
+ * /api/support/tickets/{id}/messages:
+ *   post:
+ *     summary: Reply to one of the user's tickets (reopens a resolved ticket)
+ *     tags: [Support]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [body]
+ *             properties:
+ *               body:
+ *                 type: string
+ *                 maxLength: 5000
+ *     responses:
+ *       201:
+ *         description: Message added
+ *       404:
+ *         description: Ticket not found
+ *       409:
+ *         description: Ticket closed more than 30 days ago
+ *
+ * /api/support/tickets/{id}/close:
+ *   post:
+ *     summary: Close one of the user's tickets
+ *     tags: [Support]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Ticket closed
+ *       404:
+ *         description: Ticket not found
+ *       409:
+ *         description: Ticket already closed
  *
  * /api/support/tickets/{id}/attachments/{filename}:
  *   get:
@@ -109,15 +192,31 @@ router.post(
       .isLength({ max: 2000 })
       .withMessage('description must be under 2000 characters'),
     body('transaction_id')
-      .optional()
-      .isInt({ min: 1 })
-      .withMessage('transaction_id must be a positive integer'),
+      .optional({ checkFalsy: true })
+      .isUUID()
+      .withMessage('transaction_id must be a valid UUID'),
+    body('tx_hash')
+      .optional({ checkFalsy: true })
+      .matches(/^[a-f0-9]{64}$/i)
+      .withMessage('tx_hash must be a 64-character hex string'),
   ],
   validate,
   createTicket
 );
 
 router.get('/tickets', listTickets);
+
+const ticketIdParam = param('id').isInt({ min: 1 }).withMessage('id must be a positive integer');
+const messageBody = body('body')
+  .trim()
+  .notEmpty()
+  .withMessage('body is required')
+  .isLength({ max: 5000 })
+  .withMessage('body must be under 5000 characters');
+
+router.get('/tickets/:id', [ticketIdParam], validate, getTicket);
+router.post('/tickets/:id/messages', [ticketIdParam, messageBody], validate, addUserMessage);
+router.post('/tickets/:id/close', [ticketIdParam], validate, closeTicket);
 
 router.get(
   '/tickets/:id/attachments/:filename',

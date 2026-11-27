@@ -10,7 +10,9 @@
  *   ENCRYPTION_KEY                 — 32-char AES key for secret decryption
  */
 
+const crypto = require("crypto");
 const StellarSdk = require("@stellar/stellar-sdk");
+const { toApiError } = require("../utils/sorobanErrors");
 
 const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
@@ -49,19 +51,13 @@ async function sendAndConfirm(keypair, operation) {
 
   const result = await rpc.sendTransaction(prepared);
   if (result.status === "ERROR") {
-    throw Object.assign(
-      new Error(`Contract call failed: ${result.errorResult}`),
-      { status: 400 }
-    );
+    throw toApiError(result, 'disputeResolution');
   }
 
   const response = await waitForSorobanTx(rpc, result);
 
   if (response.status !== "SUCCESS") {
-    throw Object.assign(
-      new Error(`Transaction failed: ${response.status}`),
-      { status: 400 }
-    );
+    throw toApiError(response, 'disputeResolution');
   }
 
   return { hash: result.hash, returnValue: response.returnValue };
@@ -100,9 +96,14 @@ async function openDispute({ encryptedSecretKey, sender, recipient, amount }) {
 }
 
 /**
- * Submit evidence hash for an open dispute.
- * The submitter (sender or recipient) signs the transaction.
- * Can accept either string evidence (IPFS CID) or hex SHA-256 hash.
+ * Submit evidence for an open dispute.
+ * The submitter (sender, recipient or agent) signs the transaction.
+ *
+ * The contract stores only a 32-byte content hash plus an optional short URI,
+ * never raw document bytes. `evidence` may be:
+ *   - a hex SHA-256 hash (64 chars) → submitted as the content hash, no URI;
+ *   - an IPFS CID / URI string      → content hash = SHA-256 of the string,
+ *                                     the string itself is submitted as the URI.
  *
  * Returns { txHash }.
  */
@@ -113,14 +114,19 @@ async function submitEvidence({ encryptedSecretKey, disputeId, evidence }) {
   const keypair = StellarSdk.Keypair.fromSecret(secretKey);
   const submitter = keypair.publicKey();
 
-  // Accept hex SHA-256 hash (64 chars) or string evidence (IPFS CID)
   const isSha256Hash = /^[a-fA-F0-9]{64}$/.test(evidence);
-  const evidenceBuffer = isSha256Hash ? Buffer.from(evidence, "hex") : Buffer.from(evidence, "utf8");
+  const contentHash = isSha256Hash
+    ? Buffer.from(evidence, "hex")
+    : crypto.createHash("sha256").update(evidence, "utf8").digest();
+  const uri = isSha256Hash
+    ? StellarSdk.xdr.ScVal.scvVoid()
+    : StellarSdk.nativeToScVal(evidence, { type: "string" });
 
   const args = [
     StellarSdk.nativeToScVal(submitter, { type: "address" }),
     StellarSdk.nativeToScVal(BigInt(disputeId), { type: "u64" }),
-    StellarSdk.xdr.ScVal.scvBytes(evidenceBuffer),
+    StellarSdk.xdr.ScVal.scvBytes(contentHash),
+    uri,
   ];
 
   const { hash } = await sendAndConfirm(keypair, {

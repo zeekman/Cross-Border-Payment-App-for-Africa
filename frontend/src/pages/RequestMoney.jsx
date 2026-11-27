@@ -55,10 +55,10 @@ function MyRequests() {
   const cancelRequest = async (id) => {
     try {
       await api.delete(`/payment-requests/${id}`);
-      toast.success('Request cancelled');
+      toast.success(t('request.cancelled') || 'Request cancelled');
       load();
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to cancel request');
+      toast.error(err.response?.data?.error || t('request.cancel_error') || 'Failed to cancel request');
     }
   };
 
@@ -163,7 +163,7 @@ export default function RequestMoney() {
       toast.success(t('common.copied'));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error('Failed to copy link');
+      toast.error(t('request.copy_error') || 'Failed to copy link');
     }
   };
 
@@ -171,10 +171,10 @@ export default function RequestMoney() {
     try {
       await navigator.clipboard.writeText(paymentLink);
       setCopiedDeep(true);
-      toast.success('Deep link copied');
+      toast.success(t('request.deep_link_copied') || 'Deep link copied');
       setTimeout(() => setCopiedDeep(false), 2000);
     } catch {
-      toast.error('Failed to copy deep link');
+      toast.error(t('request.deep_link_copy_error') || 'Failed to copy deep link');
     }
   };
 

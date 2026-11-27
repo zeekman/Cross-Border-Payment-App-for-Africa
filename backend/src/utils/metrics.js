@@ -35,6 +35,13 @@ const wsConnections = new client.Gauge({
   registers: [registry],
 });
 
+const priceOracleFetchTotal = new client.Counter({
+  name: 'price_oracle_fetch_total',
+  help: 'Upstream price oracle fetches',
+  labelNames: ['source', 'status'],
+  registers: [registry],
+});
+
 const anchorPollDuration = new client.Histogram({
   name: 'anchor_poll_duration_seconds',
   help: 'Anchor transaction-status poll duration in seconds, per anchor',
@@ -110,6 +117,13 @@ const webhookDeliveriesTotal = new client.Counter({
 const webhookEndpointsDisabledTotal = new client.Counter({
   name: 'afripay_webhook_endpoints_disabled_total',
   help: 'Webhook endpoints automatically disabled after consecutive failed events',
+  registers: [registry],
+});
+
+const smsSendTotal = new client.Counter({
+  name: 'sms_send_total',
+  help: 'SMS send attempts by provider (twilio, africastalking, mock) and status (success, failure)',
+  labelNames: ['provider', 'status'],
   registers: [registry],
 });
 
@@ -207,6 +221,43 @@ const sep31CallbackSkippedTotal = new client.Counter({
   registers: [registry],
 });
 
+// BE-222: background job metrics
+const jobRunsTotal = new client.Counter({
+  name: 'job_runs_total',
+  help: 'Scheduled job runs by outcome (success|error|skipped_locked)',
+  labelNames: ['job', 'status'],
+  registers: [registry],
+});
+
+const jobDurationSeconds = new client.Histogram({
+  name: 'job_duration_seconds',
+  help: 'Scheduled job duration in seconds',
+  labelNames: ['job'],
+  buckets: [0.1, 0.5, 1, 5, 15, 30, 60, 300, 900],
+  registers: [registry],
+});
+
+const jobLastSuccessTimestamp = new client.Gauge({
+  name: 'job_last_success_timestamp',
+  help: 'Unix time (seconds) of the last successful run of each job',
+  labelNames: ['job'],
+  registers: [registry],
+});
+
+const jobIntervalSeconds = new client.Gauge({
+  name: 'job_interval_seconds',
+  help: 'Approximate cron interval of each job in seconds (for staleness alerts)',
+  labelNames: ['job'],
+  registers: [registry],
+});
+
+const jobItemsProcessedTotal = new client.Counter({
+  name: 'job_items_processed_total',
+  help: 'Items processed by scheduled jobs',
+  labelNames: ['job'],
+  registers: [registry],
+});
+
 // BE-178: fraud rule load/evaluation failures
 const fraudRuleErrorsTotal = new client.Counter({
   name: 'fraud_rule_errors_total',
@@ -215,7 +266,15 @@ const fraudRuleErrorsTotal = new client.Counter({
   registers: [registry],
 });
 
+// BE-172: shared Redis connection readiness (dropped by a bad merge).
+const redisUp = new client.Gauge({
+  name: 'redis_up',
+  help: 'Whether the shared Redis connection is ready (1) or unavailable (0)',
+  registers: [registry],
+});
+
 module.exports = {
+  priceOracleFetchTotal,
   registry,
   redisUp,
   httpRequestDuration,
@@ -235,6 +294,7 @@ module.exports = {
   webhookEndpointsDisabledTotal,
   amlScreeningsTotal,
   amlScreeningCoverageGauge,
+  smsSendTotal,
   rateLimiterDegraded,
   rateLimiterRedisFailuresTotal,
   distributedLockRenewalFailuresTotal,
@@ -247,5 +307,10 @@ module.exports = {
   txQueueBackpressure,
   txQueuePendingTasksTotal,
   sep31CallbackSkippedTotal,
+  jobRunsTotal,
+  jobDurationSeconds,
+  jobLastSuccessTimestamp,
+  jobIntervalSeconds,
+  jobItemsProcessedTotal,
   fraudRuleErrorsTotal,
 };

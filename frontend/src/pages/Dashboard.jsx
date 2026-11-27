@@ -27,7 +27,7 @@ import { useCurrency } from '../context/CurrencyContext';
 import { BalanceCardSkeleton, TransactionRowSkeleton } from '../components/Skeleton';
 import { useWallet } from '../context/WalletContext';
 import api from '../utils/api';
-import { truncateAddress } from '../utils/currency';
+import { formatAmount, truncateAddress } from '../utils/currency';
 import { useExchangeRates } from '../hooks/useExchangeRates';
 import { useCountUp } from '../hooks/useCountUp';
 import { usePaymentStream } from '../hooks/usePaymentStream';
@@ -284,7 +284,11 @@ export default function Dashboard() {
 
           {/* Primary display: selected asset balance */}
           <div className="flex items-end gap-2 mb-2">
-            <BalanceDisplay balance={parseFloat(displayBalance)} />
+            {displayBalance == null ? (
+              <span className="text-4xl font-bold text-white">—</span>
+            ) : (
+              <BalanceDisplay balance={parseFloat(displayBalance)} currency={selectedCurrency} />
+            )}
             <span className="text-primary-200 mb-1">{selectedCurrency}</span>
           </div>
           {xlmAvailable !== null && selectedCurrency === 'XLM' && (
@@ -354,7 +358,7 @@ export default function Dashboard() {
           </div>
           {usingApproximateRates && (
             <p className="text-primary-200/90 text-xs mb-3 leading-snug">
-              {t('common.rates_disclaimer')}
+              {t('common.rates_unavailable', 'Rates unavailable')}
             </p>
           )}
 
