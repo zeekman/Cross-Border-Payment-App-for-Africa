@@ -10,7 +10,6 @@ const metricsMiddleware = require('./middleware/metricsMiddleware');
 const errorHandler = require('./middleware/errorHandler');
 const { registry } = require('./utils/metrics');
 const rateLimit = require('express-rate-limit');
-const rateLimiters = require('./middleware/rateLimiter');
 
 const { getHealth: getLedgerHealth } = require('./services/ledgerListener');
 
@@ -121,10 +120,8 @@ app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avat
   },
 }));
 
-// Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set)
-app.use('/api/auth/login', rateLimiters.authLimiter);
-app.use('/api/auth/register', rateLimiters.authLimiter);
-
+// Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set).
+// Auth limiters are mounted per route in routes/auth.js (BE-194).
 app.use('/api/auth', authRoutes);
 // Authenticated wallet/payment data must never be cached (FE-162)
 app.use(['/api/wallet', '/api/payments'], (req, res, next) => {
@@ -132,14 +129,16 @@ app.use(['/api/wallet', '/api/payments'], (req, res, next) => {
   next();
 });
 // Deprecated alias for /api/contacts (BE-188) — same router and middleware stack.
+// It lives under /api/wallet, so it gets the same geo-restriction (BE-192).
 const CONTACTS_SUNSET = 'Wed, 31 Mar 2027 00:00:00 GMT';
-app.use('/api/wallet/contacts', (req, res, next) => {
+app.use('/api/wallet/contacts', geoRestriction, (req, res, next) => {
   res.set('Deprecation', 'true');
   res.set('Sunset', CONTACTS_SUNSET);
   res.set('Link', '</api/contacts>; rel="successor-version"');
   next();
 }, contactsRoutes);
-app.use('/api/wallet', walletRoutes);
+// BE-192: mount the wallet router exactly once. An earlier unguarded mount
+// above this line handled every request and bypassed geoRestriction.
 app.use('/api/wallet', geoRestriction, walletRoutes);
 app.use('/api/payments', geoRestriction, paymentRoutes);
 app.use('/api/payment-requests', geoRestriction, paymentRequestRoutes);
@@ -215,6 +214,111 @@ const swaggerOptions = {
         Error: {
           type: 'object',
           properties: {
-            error
+            error: {
+              type: 'string'
+            },
+            errors: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  msg: { type: 'string' },
+                  param: { type: 'string' }
+                }
+              }
+            }
+          }
+        },
+        // Derived directly from the express-validator field spec in
+        // validators/paymentSendValidators.js so the docs cannot drift from
+        // what the runtime validators actually accept.
+        PaymentSendRequest: paymentSendValidators.openApiSchema
+      }
+    }
+  },
+  apis: ['./src/routes/*.js']
+};
 
-/* … truncated 587 chars — edit only what you need near the top … */
+const specs = swaggerJsdoc(swaggerOptions);
+
+app.use('/api/docs', (req, res, next) => {
+  res.removeHeader('Content-Security-Policy');
+  next();
+});
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs));
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     summary: Public liveness probe
+ *     description: Returns the overall status and pool utilization. Use /api/admin/health for full diagnostics.
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   enum: [ok, degraded]
+ *                 pool:
+ *                   type: object
+ *                   properties:
+ *                     total: { type: integer }
+ *                     idle: { type: integer }
+ *                     waiting: { type: integer }
+ *       503:
+ *         description: Service is degraded
+ */
+app.get('/health', async (req, res) => {
+  try {
+    const health = await runHealthChecks();
+    res.status(health.status === 'ok' ? 200 : 503).json({
+      status: health.status,
+      pool: health.pool,
+    });
+  } catch {
+    res.status(503).json({ status: 'degraded' });
+  }
+});
+
+const deepHealthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: 'Too many health check requests.' },
+});
+
+app.get('/health/deep', deepHealthLimiter, async (req, res) => {
+  try {
+    const health = await runDeepHealthChecks();
+    const httpStatus = health.status === 'unhealthy' ? 503 : 200;
+    res.status(httpStatus).json(health);
+  } catch {
+    res.status(503).json({ status: 'unhealthy' });
+  }
+});
+app.get('/api/health/ledger-listener', (req, res) => {
+  res.json(getLedgerHealth());
+});
+
+app.get('/metrics', async (req, res) => {
+  // BE-174: METRICS_TOKEN is required in production (enforced by validateEnv),
+  // so /metrics is never public there.
+  const token = process.env.METRICS_TOKEN;
+  if (token || process.env.NODE_ENV === 'production') {
+    const auth = req.headers.authorization || '';
+    if (!token || auth !== `Bearer ${token}`) {
+      return res.status(401).end();
+    }
+  }
+  res.set('Content-Type', registry.contentType);
+  res.end(await registry.metrics());
+});
+
+app.use(errorHandler);
+
+module.exports = app;
