@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
-    Address, Env, IntoVal,
+    vec, Address, Env, IntoVal, Vec,
 };
 
 use crate::{LoyaltyTokenContract, LoyaltyTokenContractClient};
@@ -962,4 +962,286 @@ fn test_old_admin_cannot_propose_after_rotation() {
     advance_past_rotation_delay(&env);
     client.accept_admin(&new_admin);
     client.propose_admin(&admin, &another);
+}
+
+// ── Tier configuration (SC-203) ───────────────────────────────────────────────
+
+#[test]
+fn test_get_tiers_returns_defaults() {
+    let (_, client, _) = setup();
+    let tiers = client.get_tiers();
+    assert_eq!(tiers.len(), 4);
+    assert_eq!(tiers.get(0).unwrap().threshold, 50);
+    assert_eq!(tiers.get(3).unwrap().discount_bps, 7_500);
+    assert!(tiers.get(3).unwrap().enabled);
+}
+
+#[test]
+fn test_admin_can_update_tier() {
+    let (_, client, admin) = setup();
+    client.set_tier(&admin, &1u32, &200, &3_000, &true);
+    let tier = client.get_tier(&1u32);
+    assert_eq!(tier.threshold, 200);
+    assert_eq!(tier.discount_bps, 3_000);
+    assert_eq!(client.get_tiers().get(1).unwrap().threshold, 200);
+}
+
+#[test]
+fn test_admin_can_add_next_tier() {
+    let (_, client, admin) = setup();
+    client.set_tier(&admin, &4u32, &5_000, &8_000, &true);
+    assert_eq!(client.get_tiers().len(), 5);
+}
+
+#[test]
+#[should_panic(expected = "invalid tier index")]
+fn test_set_tier_index_out_of_range_panics() {
+    let (_, client, admin) = setup();
+    client.set_tier(&admin, &5u32, &5_000, &8_000, &true);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_non_admin_cannot_set_tier() {
+    let (env, client, _) = setup();
+    let attacker = Address::generate(&env);
+    client.set_tier(&attacker, &0u32, &10, &9_000, &true);
+}
+
+#[test]
+#[should_panic(expected = "threshold must be positive")]
+fn test_set_tier_zero_threshold_panics() {
+    let (_, client, admin) = setup();
+    client.set_tier(&admin, &0u32, &0, &1_000, &true);
+}
+
+#[test]
+#[should_panic(expected = "discount_bps exceeds maximum")]
+fn test_set_tier_discount_too_high_panics() {
+    let (_, client, admin) = setup();
+    client.set_tier(&admin, &0u32, &50, &10_001, &true);
+}
+
+#[test]
+#[should_panic(expected = "tier thresholds must be increasing")]
+fn test_set_tier_non_increasing_threshold_panics() {
+    let (_, client, admin) = setup();
+    // Tier 1 threshold above tier 2 (500).
+    client.set_tier(&admin, &1u32, &600, &2_500, &true);
+}
+
+#[test]
+fn test_disabled_tier_is_ignored_for_ordering() {
+    let (_, client, admin) = setup();
+    client.set_tier(&admin, &2u32, &500, &5_000, &false);
+    // With tier 2 disabled, tier 1 may now exceed its old threshold.
+    client.set_tier(&admin, &1u32, &600, &2_500, &true);
+    assert_eq!(client.get_tier(&1u32).threshold, 600);
+}
+
+#[test]
+#[should_panic(expected = "tier disabled")]
+fn test_redeem_disabled_tier_panics() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+    client.mint(&admin, &user, &1_000);
+    client.set_tier(&admin, &3u32, &1_000, &7_500, &false);
+    client.redeem(&user, &3u32);
+}
+
+// ── KYC transfer restriction (SC-204) ─────────────────────────────────────────
+
+mod mock_kyc {
+    use soroban_sdk::{contract, contractimpl, Address, Env};
+
+    use crate::KycTier;
+
+    /// Minimal stand-in for the kyc-attestation contract.
+    #[contract]
+    pub struct MockKyc;
+
+    #[contractimpl]
+    impl MockKyc {
+        pub fn set_verified(env: Env, user: Address, verified: bool) {
+            env.storage().instance().set(&user, &verified);
+        }
+
+        pub fn is_valid_and_unexpired(env: Env, user: Address, _tier: KycTier) -> bool {
+            env.storage().instance().get(&user).unwrap_or(false)
+        }
+    }
+}
+
+fn setup_kyc() -> (
+    Env,
+    LoyaltyTokenContractClient<'static>,
+    Address,
+    mock_kyc::MockKycClient<'static>,
+) {
+    let (env, client, admin) = setup();
+    let kyc_id = env.register(mock_kyc::MockKyc, ());
+    let kyc = mock_kyc::MockKycClient::new(&env, &kyc_id);
+    client.set_kyc_contract(&admin, &kyc_id);
+    (env, client, admin, kyc)
+}
+
+#[test]
+fn test_kyc_contract_getter() {
+    let (_, client, _, kyc) = setup_kyc();
+    assert_eq!(client.get_kyc_contract(), Some(kyc.address.clone()));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_non_admin_cannot_set_kyc_contract() {
+    let (env, client, _) = setup();
+    let attacker = Address::generate(&env);
+    client.set_kyc_contract(&attacker, &Address::generate(&env));
+}
+
+#[test]
+fn test_transfer_between_verified_wallets_succeeds() {
+    let (env, client, admin, kyc) = setup_kyc();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    kyc.set_verified(&alice, &true);
+    kyc.set_verified(&bob, &true);
+    client.mint(&admin, &alice, &100);
+    client.transfer(&alice, &bob, &40);
+    assert_eq!(client.balance(&bob), 40);
+}
+
+#[test]
+#[should_panic(expected = "recipient not KYC verified")]
+fn test_transfer_to_unverified_wallet_panics() {
+    let (env, client, admin, kyc) = setup_kyc();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    kyc.set_verified(&alice, &true);
+    client.mint(&admin, &alice, &100);
+    client.transfer(&alice, &bob, &40);
+}
+
+#[test]
+#[should_panic(expected = "sender not KYC verified")]
+fn test_transfer_from_unverified_wallet_panics() {
+    let (env, client, admin, kyc) = setup_kyc();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    kyc.set_verified(&bob, &true);
+    client.mint(&admin, &alice, &100);
+    client.transfer(&alice, &bob, &40);
+}
+
+#[test]
+#[should_panic(expected = "recipient not KYC verified")]
+fn test_transfer_from_allowance_to_unverified_wallet_panics() {
+    let (env, client, admin, kyc) = setup_kyc();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let spender = Address::generate(&env);
+    kyc.set_verified(&alice, &true);
+    client.mint(&admin, &alice, &100);
+    client.approve(&alice, &spender, &100, &FAR_FUTURE);
+    client.transfer_from(&spender, &alice, &bob, &40);
+}
+
+#[test]
+fn test_kyc_does_not_affect_mint_and_redeem() {
+    let (env, client, admin, _) = setup_kyc();
+    let user = Address::generate(&env); // never verified
+    client.mint(&admin, &user, &100);
+    client.redeem(&user, &1u32);
+    assert_eq!(client.balance(&user), 0);
+}
+
+// ── batch_mint (SC-205) ───────────────────────────────────────────────────────
+
+#[test]
+fn test_batch_mint_mints_all_entries() {
+    let (env, client, admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let entries = vec![&env, (a.clone(), 10i128), (b.clone(), 20i128), (a.clone(), 5i128)];
+    client.batch_mint(&admin, &entries);
+    assert_eq!(client.balance(&a), 15);
+    assert_eq!(client.balance(&b), 20);
+    assert_eq!(client.total_supply(), 35);
+}
+
+#[test]
+fn test_batch_mint_with_invalid_entry_mints_nothing() {
+    let (env, client, admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let entries = vec![&env, (a.clone(), 10i128), (b.clone(), 0i128)];
+    assert!(client.try_batch_mint(&admin, &entries).is_err());
+    assert_eq!(client.balance(&a), 0);
+    assert_eq!(client.balance(&b), 0);
+    assert_eq!(client.total_supply(), 0);
+}
+
+#[test]
+#[should_panic(expected = "max supply exceeded")]
+fn test_batch_mint_respects_supply_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LoyaltyTokenContract, ());
+    let client = LoyaltyTokenContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &100);
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    // Each entry fits on its own; together they exceed the cap.
+    let entries = vec![&env, (a, 60i128), (b, 41i128)];
+    client.batch_mint(&admin, &entries);
+}
+
+#[test]
+fn test_batch_mint_exactly_to_cap_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LoyaltyTokenContract, ());
+    let client = LoyaltyTokenContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &100);
+    let entries = vec![
+        &env,
+        (Address::generate(&env), 60i128),
+        (Address::generate(&env), 40i128),
+    ];
+    client.batch_mint(&admin, &entries);
+    assert_eq!(client.total_supply(), 100);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: caller is not admin")]
+fn test_batch_mint_non_admin_panics() {
+    let (env, client, _) = setup();
+    let attacker = Address::generate(&env);
+    let entries = vec![&env, (attacker.clone(), 10i128)];
+    client.batch_mint(&attacker, &entries);
+}
+
+#[test]
+#[should_panic(expected = "batch too large")]
+fn test_batch_mint_over_cap_panics() {
+    let (env, client, admin) = setup();
+    let mut entries = Vec::new(&env);
+    for _ in 0..51 {
+        entries.push_back((Address::generate(&env), 1i128));
+    }
+    client.batch_mint(&admin, &entries);
+}
+
+#[test]
+fn test_batch_mint_50_entries_fits_budget() {
+    let (env, client, admin) = setup();
+    let mut entries = Vec::new(&env);
+    for _ in 0..50 {
+        entries.push_back((Address::generate(&env), 10i128));
+    }
+    env.cost_estimate().budget().reset_default();
+    client.batch_mint(&admin, &entries);
+    assert_eq!(client.total_supply(), 500);
 }

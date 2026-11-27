@@ -17,16 +17,25 @@
 //! |   2   |   500 pts |    50 %  |
 //! |   3   |  1000 pts |    75 %  |
 //!
+//! The admin can reprice, add or disable tiers at runtime with [`set_tier`];
+//! [`get_tier`] / [`get_tiers`] expose the live configuration.
+//!
 //! ## Redemption
 //! Call [`redeem`] with a `tier_index` to burn that tier's threshold points
-//! and record the discount entitlement. The backend calls [`get_discount`]
-//! to determine the highest tier the user qualifies for without burning tokens.
+//! and record the discount entitlement. Disabled tiers cannot be redeemed.
+//!
+//! ## KYC transfer restriction
+//! When the admin configures a KYC attestation contract via
+//! [`set_kyc_contract`], [`transfer`] and [`transfer_from`] require both the
+//! sender and the recipient to hold a valid, unexpired `Basic` attestation.
+//! Minting and redemption are unaffected.
 //!
 //! ## SEP-41 interface
 //! Implements the SEP-41 token interface:
 //! `allowance`, `approve`, `balance`, `burn`, `burn_from`,
 //! `decimals`, `mint`, `name`, `symbol`, `total_supply`,
-//! `transfer`, `transfer_from`.
+//! `transfer`, `transfer_from`. [`batch_mint`] mints to many recipients in one
+//! transaction and emits one SEP-41 `mint` event per recipient.
 //!
 //! Every state-changing function emits the SEP-41-shaped events
 //! (`transfer`, `mint`, `burn`, `approve`) via `env.events().publish(...)` so
@@ -35,19 +44,19 @@
 //! and the awarded discount.
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, IntoVal, String, Symbol,
-    Vec,
+    contract, contractclient, contractimpl, contracttype, symbol_short, Address, Env, IntoVal,
+    String, Symbol, Vec,
 };
 
 // ── KYC Tier enum ────────────────────────────────────────────────────────────────
-// Replicated from kyc-attestation contract for type safety in cross-contract calls.
-#[derive(Debug, Clone, Copy)]
-#[contracttype]
-#[repr(u32)]
-pub enum KycTier {
-    Basic = 0,
-    Enhanced = 1,
-    Business = 2,
+// Defined once in the shared `afripay-types` crate (SC-214); re-exported here so
+// existing `loyalty_token_contract::KycTier` imports keep working.
+pub use afripay_types::KycTier;
+
+/// Subset of the kyc-attestation contract interface used by transfers.
+#[contractclient(name = "KycAttestationClient")]
+pub trait KycAttestationInterface {
+    fn is_valid_and_unexpired(env: Env, user: Address, tier: KycTier) -> bool;
 }
 
 #[derive(Debug)]
@@ -59,6 +68,8 @@ pub struct AllowanceValue {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
 mod test_allowance;
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
@@ -71,6 +82,8 @@ pub enum DataKey {
     MaxSupply,
     Balance(Address),
     Allowance(Address, Address), // (owner, spender)
+    /// Address of the kyc-attestation contract. When set, transfers require
+    /// both parties to hold a valid `Basic` attestation.
     KycContractAddress,
     /// Snapshot counter used to assign the next snapshot id.
     SnapshotCounter,
@@ -97,6 +110,18 @@ pub struct Tier {
     pub threshold: i128,
     /// Fee discount in basis points (e.g. 2500 = 25 %). Max 9000 (90 %).
     pub discount_bps: u32,
+    /// Disabled tiers cannot be redeemed.
+    pub enabled: bool,
+}
+
+/// Payload of the `TierUpdated` event.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct TierUpdated {
+    pub index: u32,
+    pub threshold: i128,
+    pub discount_bps: u32,
+    pub enabled: bool,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -106,6 +131,9 @@ const MAX_TIERS: u32 = 5;
 
 /// Hard cap on discount_bps to prevent 100 % fee waivers.
 const MAX_DISCOUNT_BPS: u32 = 9_000;
+
+/// Maximum number of entries accepted by [`LoyaltyTokenContract::batch_mint`].
+const MAX_BATCH_MINT: u32 = 50;
 
 // ── TTL policy ────────────────────────────────────────────────────────────────
 // Instance storage (Admin, MaxSupply, counters) is bumped on every entry point.
@@ -160,10 +188,10 @@ impl LoyaltyTokenContract {
 
         // Install default tiers.
         let tiers = [
-            Tier { threshold: 50, discount_bps: 1_000 },
-            Tier { threshold: 100, discount_bps: 2_500 },
-            Tier { threshold: 500, discount_bps: 5_000 },
-            Tier { threshold: 1_000, discount_bps: 7_500 },
+            Tier { threshold: 50, discount_bps: 1_000, enabled: true },
+            Tier { threshold: 100, discount_bps: 2_500, enabled: true },
+            Tier { threshold: 500, discount_bps: 5_000, enabled: true },
+            Tier { threshold: 1_000, discount_bps: 7_500, enabled: true },
         ];
         for (i, tier) in tiers.iter().enumerate() {
             let key = DataKey::Tier(i as u32);
@@ -175,6 +203,137 @@ impl LoyaltyTokenContract {
             (symbol_short!("init"), symbol_short!("done")),
             (admin, max_supply),
         );
+    }
+
+    // ── Tier configuration ────────────────────────────────────────────────────
+
+    /// Create or update redemption tier `index`. Admin only.
+    ///
+    /// Tiers are stored contiguously: `index` must refer to an existing tier
+    /// or be the next free slot (and below `MAX_TIERS`). A tier is never
+    /// removed — set `enabled = false` to retire it.
+    ///
+    /// Validation:
+    /// * `threshold > 0`
+    /// * `discount_bps <= MAX_DISCOUNT_BPS`
+    /// * thresholds strictly increase with the index across enabled tiers
+    ///
+    /// Emits `TierUpdated { index, threshold, discount_bps, enabled }`.
+    pub fn set_tier(
+        env: Env,
+        admin: Address,
+        index: u32,
+        threshold: i128,
+        discount_bps: u32,
+        enabled: bool,
+    ) {
+        Self::bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        if index >= MAX_TIERS {
+            panic!("invalid tier index");
+        }
+        if threshold <= 0 {
+            panic!("threshold must be positive");
+        }
+        if discount_bps > MAX_DISCOUNT_BPS {
+            panic!("discount_bps exceeds maximum");
+        }
+        let configured = Self::tier_count(&env);
+        if index > configured {
+            panic!("tier index must be contiguous");
+        }
+
+        if enabled {
+            let mut i = 0u32;
+            while i < configured {
+                if i != index {
+                    let other: Tier = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::Tier(i))
+                        .unwrap();
+                    if other.enabled
+                        && ((i < index && other.threshold >= threshold)
+                            || (i > index && other.threshold <= threshold))
+                    {
+                        panic!("tier thresholds must be increasing");
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        let key = DataKey::Tier(index);
+        env.storage().persistent().set(
+            &key,
+            &Tier { threshold, discount_bps, enabled },
+        );
+        Self::bump_persistent(&env, &key);
+
+        env.events().publish(
+            (Symbol::new(&env, "TierUpdated"), index),
+            TierUpdated { index, threshold, discount_bps, enabled },
+        );
+    }
+
+    /// Return the configuration of tier `index`.
+    pub fn get_tier(env: Env, index: u32) -> Tier {
+        Self::bump_instance(&env);
+        if index >= MAX_TIERS {
+            panic!("invalid tier index");
+        }
+        let key = DataKey::Tier(index);
+        let tier: Tier = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("tier not configured");
+        Self::bump_persistent(&env, &key);
+        tier
+    }
+
+    /// Return every configured tier, ordered by index (position == index).
+    /// Includes disabled tiers so the UI can show them as unavailable.
+    pub fn get_tiers(env: Env) -> Vec<Tier> {
+        Self::bump_instance(&env);
+        let mut tiers: Vec<Tier> = Vec::new(&env);
+        let mut i = 0u32;
+        while i < MAX_TIERS {
+            let key = DataKey::Tier(i);
+            match env.storage().persistent().get::<DataKey, Tier>(&key) {
+                Some(tier) => {
+                    Self::bump_persistent(&env, &key);
+                    tiers.push_back(tier);
+                }
+                None => break,
+            }
+            i += 1;
+        }
+        tiers
+    }
+
+    // ── KYC configuration ─────────────────────────────────────────────────────
+
+    /// Set the kyc-attestation contract used to restrict transfers. Admin only.
+    ///
+    /// Once set, [`transfer`] and [`transfer_from`] require both `from` and
+    /// `to` to pass `is_valid_and_unexpired(addr, KycTier::Basic)`.
+    pub fn set_kyc_contract(env: Env, admin: Address, kyc_contract: Address) {
+        Self::bump_instance(&env);
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::KycContractAddress, &kyc_contract);
+        env.events().publish(
+            (Symbol::new(&env, "KycContractSet"),),
+            kyc_contract,
+        );
+    }
+
+    /// Return the configured kyc-attestation contract, if any.
+    pub fn get_kyc_contract(env: Env) -> Option<Address> {
+        Self::bump_instance(&env);
+        env.storage().instance().get(&DataKey::KycContractAddress)
     }
 
     // ── Admin rotation (two-step, timelocked) ─────────────────────────────────
@@ -528,6 +687,7 @@ impl LoyaltyTokenContract {
         if amount <= 0 {
             panic!("amount must be positive");
         }
+        Self::require_kyc(&env, &from, &to);
         Self::move_balance(&env, &from, &to, amount);
         env.events().publish(
             (symbol_short!("transfer"), from, to),
@@ -546,6 +706,7 @@ impl LoyaltyTokenContract {
         if amount <= 0 {
             panic!("amount must be positive");
         }
+        Self::require_kyc(&env, &from, &to);
         Self::spend_allowance(&env, &from, &spender, amount);
         Self::move_balance(&env, &from, &to, amount);
         env.events().publish(
@@ -569,8 +730,8 @@ impl LoyaltyTokenContract {
         if admin != stored_admin {
             panic!("unauthorized: caller is not admin");
         }
-        if amount < 0 {
-            panic!("amount must be non-negative");
+        if amount <= 0 {
+            panic!("amount must be positive");
         }
         let total: i128 = Self::total_supply(env.clone());
         let max: i128 = Self::max_supply(env.clone());
@@ -585,6 +746,55 @@ impl LoyaltyTokenContract {
             (symbol_short!("mint"), admin, to),
             amount,
         );
+    }
+
+    /// Mint to many recipients in one transaction. Admin only.
+    ///
+    /// `entries` holds at most `MAX_BATCH_MINT` `(recipient, amount)` pairs.
+    /// Every amount must be positive and the batch total must fit under
+    /// `max_supply`; all entries are validated before any balance changes, so
+    /// the batch either mints everything or panics without minting anything.
+    ///
+    /// Emits one SEP-41 `mint` event (topics `("mint", admin, to)`, data
+    /// `amount`) per entry for wallet/indexer compatibility.
+    pub fn batch_mint(env: Env, admin: Address, entries: Vec<(Address, i128)>) {
+        Self::bump_instance(&env);
+        governance::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        if entries.is_empty() {
+            panic!("empty batch");
+        }
+        if entries.len() > MAX_BATCH_MINT {
+            panic!("batch too large");
+        }
+
+        let mut batch_total: i128 = 0;
+        for (_, amount) in entries.iter() {
+            if amount <= 0 {
+                panic!("amount must be positive");
+            }
+            batch_total = batch_total
+                .checked_add(amount)
+                .expect("max supply exceeded");
+        }
+        let total: i128 = Self::total_supply(env.clone());
+        let max: i128 = Self::max_supply(env.clone());
+        if total + batch_total > max {
+            panic!("max supply exceeded");
+        }
+
+        for (to, amount) in entries.iter() {
+            let balance = Self::balance(env.clone(), to.clone());
+            Self::set_balance(&env, &to, balance + amount);
+            env.events().publish(
+                (symbol_short!("mint"), admin.clone(), to),
+                amount,
+            );
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalSupply, &(total + batch_total));
+        Self::bump_persistent(&env, &DataKey::TotalSupply);
     }
 
     /// Burn `amount` from `from`'s own balance.
@@ -654,6 +864,9 @@ impl LoyaltyTokenContract {
             .persistent()
             .get(&tier_key)
             .expect("tier not configured");
+        if !tier.enabled {
+            panic!("tier disabled");
+        }
         let balance = Self::balance(env.clone(), user.clone());
         if balance < tier.threshold {
             panic!("insufficient points for tier");
@@ -671,6 +884,43 @@ impl LoyaltyTokenContract {
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
+
+    /// Require `admin` to authorise and match the stored admin.
+    fn require_admin(env: &Env, admin: &Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if *admin != stored_admin {
+            panic!("unauthorized: caller is not admin");
+        }
+    }
+
+    /// Number of contiguous tiers configured from index 0.
+    fn tier_count(env: &Env) -> u32 {
+        let mut i = 0u32;
+        while i < MAX_TIERS && env.storage().persistent().has(&DataKey::Tier(i)) {
+            i += 1;
+        }
+        i
+    }
+
+    /// If a KYC contract is configured, require both transfer parties to hold
+    /// a valid, unexpired `Basic` attestation.
+    fn require_kyc(env: &Env, from: &Address, to: &Address) {
+        let kyc: Option<Address> = env.storage().instance().get(&DataKey::KycContractAddress);
+        if let Some(kyc) = kyc {
+            let client = KycAttestationClient::new(env, &kyc);
+            if !client.is_valid_and_unexpired(from, &KycTier::Basic) {
+                panic!("sender not KYC verified");
+            }
+            if !client.is_valid_and_unexpired(to, &KycTier::Basic) {
+                panic!("recipient not KYC verified");
+            }
+        }
+    }
 
     /// Extend the TTL of instance storage (global config) if it is nearing expiry.
     fn bump_instance(env: &Env) {
