@@ -44,6 +44,23 @@ to the dispute (#1366):
   `close_disputed_escrow(escrow_id, winner)` so the escrow leaves
   `UnderDispute` (#1367).
 
+## Conflict of interest (SC-207)
+
+An arbitrator who is a party to a dispute (its sender, recipient or escrow
+agent) may not decide it. `cast_vote`, `resolve_dispute*` and `resolve_appeal*`
+panic with `arbitrator is a party to this dispute` for such a caller.
+
+- Conflicted panel members are recused: `ArbitratorRecused { dispute_id, arbitrator }`
+  is emitted when the dispute is opened, and they are excluded from the
+  quorum denominator in `cast_vote`.
+- If the single arbitrator is conflicted, the dispute is decided by the panel
+  (`cast_vote`).
+- If the super-arbitrator is conflicted, the admin escalates with
+  `assign_substitute_super_arbitrator(admin, dispute_id, substitute)`, which
+  lets a non-conflicted substitute call `resolve_appeal*` for that dispute only
+  (`SubstituteSuperArbAssigned` event). It panics if the super-arbitrator is not
+  actually conflicted or if the substitute is a party.
+
 ## API
 
 ### `open_dispute(opener, sender, recipient, amount)`

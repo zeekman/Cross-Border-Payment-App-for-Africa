@@ -108,9 +108,9 @@ fn test_vault_records_survive_ttl_expiry_after_activity() {
 
     // Records must still be readable and usable after the bump.
     env.ledger().set_sequence_number(env.ledger().sequence() + 100_000);
-    let vault = client.get_vault(&user, &id);
+    let vault = client.get_vault(&user, &id).unwrap();
     assert_eq!(vault.balance, amount);
-    assert_eq!(client.get_unlock_time(&user, &id), unlock_time);
+    assert_eq!(client.get_unlock_time(&user, &id), Some(unlock_time));
 
     env.ledger().set_timestamp(unlock_time + 1);
     client.withdraw(&user, &id, &amount);
@@ -118,7 +118,7 @@ fn test_vault_records_survive_ttl_expiry_after_activity() {
 }
 
 #[test]
-#[should_panic(expected = "Contract already initialized")]
+#[should_panic(expected = "Error(Contract, #2)")]
 fn test_double_initialize() {
     let (_, client, admin, usdc_id) = setup();
     client.initialize(&admin, &usdc_id, &1000u32);
@@ -136,11 +136,11 @@ fn test_deposit() {
     client.deposit(&user, &amount, &unlock_time);
 
     assert_eq!(client.get_balance(&user), amount);
-    assert_eq!(client.get_unlock_time(&user, &0), unlock_time);
+    assert_eq!(client.get_unlock_time(&user, &0), Some(unlock_time));
 }
 
 #[test]
-#[should_panic(expected = "Amount must be positive")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_deposit_zero_amount() {
     let (env, client, _, _) = setup();
     let user = Address::generate(&env);
@@ -148,7 +148,7 @@ fn test_deposit_zero_amount() {
 }
 
 #[test]
-#[should_panic(expected = "Unlock time must be in the future")]
+#[should_panic(expected = "Error(Contract, #7)")]
 fn test_deposit_past_unlock_time() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -254,7 +254,7 @@ fn test_zero_penalty_bps_no_penalty_on_early_withdrawal() {
 }
 
 #[test]
-#[should_panic(expected = "Insufficient balance")]
+#[should_panic(expected = "Error(Contract, #9)")]
 fn test_withdraw_more_than_balance() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -269,7 +269,7 @@ fn test_withdraw_more_than_balance() {
 }
 
 #[test]
-#[should_panic(expected = "No vault found for user")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_withdraw_no_vault() {
     let (env, client, _, _) = setup();
     let user = Address::generate(&env);
@@ -296,11 +296,11 @@ fn test_multiple_deposits_create_independent_vaults() {
     assert_ne!(id1, id2);
     assert_eq!(client.get_vault_ids(&user), soroban_sdk::vec![&env, id1, id2]);
     assert_eq!(client.get_balance(&user), amount1 + amount2);
-    assert_eq!(client.get_vault(&user, &id1).balance, amount1);
-    assert_eq!(client.get_vault(&user, &id2).balance, amount2);
+    assert_eq!(client.get_vault(&user, &id1).unwrap().balance, amount1);
+    assert_eq!(client.get_vault(&user, &id2).unwrap().balance, amount2);
     // Each vault keeps the unlock time it was opened with.
-    assert_eq!(client.get_unlock_time(&user, &id1), unlock_time1);
-    assert_eq!(client.get_unlock_time(&user, &id2), unlock_time2);
+    assert_eq!(client.get_unlock_time(&user, &id1), Some(unlock_time1));
+    assert_eq!(client.get_unlock_time(&user, &id2), Some(unlock_time2));
     assert_eq!(client.get_total_locked(), amount1 + amount2);
 }
 
@@ -324,7 +324,7 @@ fn test_later_deposit_does_not_relock_unlocked_funds() {
     assert_eq!(token.balance(&user), first); // no penalty
     assert_eq!(client.get_balance(&user), second);
     assert_eq!(client.get_vault_ids(&user), soroban_sdk::vec![&env, id2]);
-    assert_eq!(client.get_vault(&user, &id1).balance, 0); // closed
+    assert_eq!(client.get_vault(&user, &id1), None); // closed
 }
 
 #[test]
@@ -343,8 +343,8 @@ fn test_deposit_with_earlier_unlock_keeps_requested_time() {
     let id2 = client.deposit(&user, &amount2, &unlock_time2);
 
     // The second vault is not silently pushed out to the first one's date.
-    assert_eq!(client.get_unlock_time(&user, &id1), unlock_time1);
-    assert_eq!(client.get_unlock_time(&user, &id2), unlock_time2);
+    assert_eq!(client.get_unlock_time(&user, &id1), Some(unlock_time1));
+    assert_eq!(client.get_unlock_time(&user, &id2), Some(unlock_time2));
 
     // Once the earlier vault unlocks it can be withdrawn without penalty
     // while the other stays locked.
@@ -376,7 +376,7 @@ fn test_deposit_event_reports_requested_unlock_time() {
 }
 
 #[test]
-#[should_panic(expected = "No vault found for user")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_withdraw_unknown_vault_id_panics() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -395,22 +395,19 @@ fn test_get_vault_returns_full_info() {
     mint_usdc(&env, &usdc_id, &client.address, &user, amount);
     client.deposit(&user, &amount, &unlock_time);
 
-    let vault = client.get_vault(&user, &0);
+    let vault = client.get_vault(&user, &0).unwrap();
     assert_eq!(vault.balance, amount);
     assert_eq!(vault.unlock_time, unlock_time);
 }
 
 #[test]
-fn test_get_vault_no_deposit_returns_zeros() {
-    let (_, client, _, _) = setup();
-    let user = Address::generate(&client.env);
-    let vault = client.get_vault(&user);
+fn test_get_vault_no_deposit_returns_none() {
+    // SC-213: a missing vault is `None`, not a zeroed struct that looks like
+    // "unlocked at epoch 0 with 0 balance".
     let (env, client, _, _) = setup();
     let user = Address::generate(&env);
-    let vault = client.get_vault(&user, &0);
-    assert_eq!(vault.balance, 0);
-    assert_eq!(vault.unlock_time, 0);
-    assert_eq!(vault.last_accrue_time, 0);
+    assert_eq!(client.get_vault(&user, &0), None);
+    assert_eq!(client.get_vault(&user, &42), None);
 }
 
 #[test]
@@ -424,12 +421,26 @@ fn test_get_balance_no_vault() {
 
 #[test]
 fn test_get_unlock_time_no_vault() {
-    let (_, client, _, _) = setup();
-    let user = Address::generate(&client.env);
-    assert_eq!(client.get_unlock_time(&user), 0);
     let (env, client, _, _) = setup();
     let user = Address::generate(&env);
-    assert_eq!(client.get_unlock_time(&user, &0), 0);
+    assert_eq!(client.get_unlock_time(&user, &0), None);
+}
+
+#[test]
+fn test_get_vault_returns_none_after_full_withdrawal() {
+    // A fully withdrawn (removed) vault must be distinguishable from a live one.
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86_400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    let id = client.deposit(&user, &amount, &unlock_time);
+    assert!(client.get_vault(&user, &id).is_some());
+
+    env.ledger().set_timestamp(unlock_time + 1);
+    client.withdraw(&user, &id, &amount);
+    assert_eq!(client.get_vault(&user, &id), None);
+    assert_eq!(client.get_unlock_time(&user, &id), None);
 }
 
 #[test]
@@ -475,7 +486,7 @@ fn test_emergency_withdraw_after_delay() {
 }
 
 #[test]
-#[should_panic(expected = "emergency withdrawal not yet allowed")]
+#[should_panic(expected = "Error(Contract, #15)")]
 fn test_emergency_withdraw_before_delay_panics() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -506,7 +517,7 @@ fn test_cancel_emergency_before_delay() {
 }
 
 #[test]
-#[should_panic(expected = "no emergency announced")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn test_cancel_emergency_without_announcement_panics() {
     let (_, client, admin, _) = setup();
     client.cancel_emergency(&admin);
@@ -540,7 +551,7 @@ fn test_deactivate_emergency_cancels() {
 }
 
 #[test]
-#[should_panic(expected = "no emergency active")]
+#[should_panic(expected = "Error(Contract, #18)")]
 fn test_deactivate_without_activation_panics() {
     let (_, client, admin, _) = setup();
     client.deactivate_emergency(&admin);
@@ -563,7 +574,7 @@ fn test_emergency_return_funds_after_48h() {
 }
 
 #[test]
-#[should_panic(expected = "emergency return not yet allowed: 48h not elapsed")]
+#[should_panic(expected = "Error(Contract, #19)")]
 fn test_emergency_return_funds_before_48h_panics() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -599,7 +610,7 @@ fn test_set_interest_rate() {
 }
 
 #[test]
-#[should_panic(expected = "unauthorized: caller is not admin")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_set_interest_rate_non_admin_panics() {
     let (env, client, _, _) = setup();
     let impostor = Address::generate(&env);
@@ -626,7 +637,7 @@ fn test_accrue_interest_credits_vault_balance() {
     // 5% of 1000 USDC = 50 USDC
     let expected_interest = 50_0000000i128;
     assert_eq!(client.get_balance(&user), deposit);
-    assert_eq!(client.get_vault(&user, &0).accrued_interest, expected_interest);
+    assert_eq!(client.get_vault(&user, &0).unwrap().accrued_interest, expected_interest);
 }
 
 #[test]
@@ -668,7 +679,7 @@ fn test_accrue_interest_emits_event() {
 }
 
 #[test]
-#[should_panic(expected = "interest rate not set")]
+#[should_panic(expected = "Error(Contract, #11)")]
 fn test_accrue_interest_without_rate_panics() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -706,7 +717,7 @@ fn test_accrue_interest_is_user_callable() {
     // accrue_interest is authorised by the vault owner; no admin needed.
     env.ledger().with_mut(|li| li.timestamp += 86400);
     client.accrue_interest(&user, &0);
-    assert!(client.get_vault(&user, &0).accrued_interest > 0);
+    assert!(client.get_vault(&user, &0).unwrap().accrued_interest > 0);
 }
 
 #[test]
@@ -727,15 +738,15 @@ fn test_two_depositors_independent() {
     client.deposit(&user2, &amount2, &unlock_time2);
 
     assert_eq!(client.get_balance(&user1), amount1);
-    assert_eq!(client.get_unlock_time(&user1, &0), unlock_time1);
+    assert_eq!(client.get_unlock_time(&user1, &0), Some(unlock_time1));
     assert_eq!(client.get_balance(&user2), amount2);
-    assert_eq!(client.get_unlock_time(&user2, &0), unlock_time2);
+    assert_eq!(client.get_unlock_time(&user2, &0), Some(unlock_time2));
 }
 
 // ── SC-033: Emergency Mode State Machine & Illegal Transition Tests ───────────
 
 #[test]
-#[should_panic(expected = "emergency already active")]
+#[should_panic(expected = "Error(Contract, #17)")]
 fn test_double_activate_panics() {
     let (_, client, admin, _) = setup();
     client.activate_emergency(&admin);
@@ -743,7 +754,7 @@ fn test_double_activate_panics() {
 }
 
 #[test]
-#[should_panic(expected = "emergency already announced")]
+#[should_panic(expected = "Error(Contract, #13)")]
 fn test_double_announce_panics() {
     let (_, client, admin, _) = setup();
     client.announce_emergency(&admin);
@@ -751,7 +762,7 @@ fn test_double_announce_panics() {
 }
 
 #[test]
-#[should_panic(expected = "cannot cancel after emergency delay has elapsed")]
+#[should_panic(expected = "Error(Contract, #16)")]
 fn test_cancel_after_delay_panics() {
     let (env, client, admin, _) = setup();
     client.announce_emergency(&admin);
@@ -760,7 +771,7 @@ fn test_cancel_after_delay_panics() {
 }
 
 #[test]
-#[should_panic(expected = "no emergency announced")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn test_emergency_withdraw_without_announcement_panics() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -772,7 +783,7 @@ fn test_emergency_withdraw_without_announcement_panics() {
 }
 
 #[test]
-#[should_panic(expected = "no emergency active")]
+#[should_panic(expected = "Error(Contract, #18)")]
 fn test_emergency_return_funds_without_activation_panics() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -784,7 +795,7 @@ fn test_emergency_return_funds_without_activation_panics() {
 }
 
 #[test]
-#[should_panic(expected = "No vault found for user")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_emergency_withdraw_then_return_funds_mutually_exclusive() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -806,7 +817,7 @@ fn test_emergency_withdraw_then_return_funds_mutually_exclusive() {
 }
 
 #[test]
-#[should_panic(expected = "No vault found for user")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_emergency_return_funds_then_withdraw_mutually_exclusive() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -828,7 +839,7 @@ fn test_emergency_return_funds_then_withdraw_mutually_exclusive() {
 }
 
 #[test]
-#[should_panic(expected = "No vault found for user")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_double_emergency_withdraw_panics() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -845,7 +856,7 @@ fn test_double_emergency_withdraw_panics() {
 }
 
 #[test]
-#[should_panic(expected = "No vault found for user")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_double_emergency_return_funds_panics() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -864,7 +875,7 @@ fn test_double_emergency_return_funds_panics() {
 // ── SC-032: Penalty Math Checked Arithmetic & Bounds Tests ────────────────────
 
 #[test]
-#[should_panic(expected = "Amount exceeds maximum deposit bound")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_deposit_exceeds_max_bound_panics() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -900,14 +911,14 @@ fn test_penalty_math_property_over_input_space() {
 
 // SC-034: Lock bounds tests
 #[test]
-#[should_panic(expected = "min_secs must be less than max_secs")]
+#[should_panic(expected = "Error(Contract, #23)")]
 fn test_update_lock_bounds_inverted_range_panics() {
     let (env, client, admin, _) = setup();
     client.update_lock_bounds(&admin, &1000, &500);
 }
 
 #[test]
-#[should_panic(expected = "min_secs must be less than max_secs")]
+#[should_panic(expected = "Error(Contract, #23)")]
 fn test_update_lock_bounds_equal_range_panics() {
     let (env, client, admin, _) = setup();
     client.update_lock_bounds(&admin, &500, &500);
@@ -961,7 +972,7 @@ fn test_flash_deposit_yield_capture_is_time_weighted() {
     // Accrue interest after 1 second
     client.accrue_interest(&user, &0);
 
-    let vault = client.get_vault(&user, &0);
+    let vault = client.get_vault(&user, &0).unwrap();
     // Yield for 1 second out of 31,536,000 seconds per year at 10%
     // Full year interest would be 100 USDC (100_0000000). For 1 second, it should be tiny (< 1 USDC)
     assert!(vault.accrued_interest < 1_0000000i128);
@@ -1130,7 +1141,7 @@ fn reserve_of(env: &Env, client: &SavingsVaultContractClient) -> i128 {
 }
 
 #[test]
-#[should_panic(expected = "deposits disabled: emergency in progress")]
+#[should_panic(expected = "Error(Contract, #12)")]
 fn test_deposit_rejected_after_announce_emergency() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -1140,7 +1151,7 @@ fn test_deposit_rejected_after_announce_emergency() {
 }
 
 #[test]
-#[should_panic(expected = "deposits disabled: emergency in progress")]
+#[should_panic(expected = "Error(Contract, #12)")]
 fn test_deposit_rejected_while_emergency_active() {
     let (env, client, admin, usdc_id) = setup();
     let user = Address::generate(&env);
@@ -1296,7 +1307,7 @@ fn test_accept_admin_requires_new_admin_auth() {
 }
 
 #[test]
-#[should_panic(expected = "unauthorized: caller is not admin")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_propose_admin_non_admin_panics() {
     let (env, client, _, _) = setup();
     let impostor = Address::generate(&env);
@@ -1330,7 +1341,7 @@ fn test_cancel_admin_proposal_without_proposal_panics() {
 }
 
 #[test]
-#[should_panic(expected = "unauthorized: caller is not admin")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_old_admin_loses_privileges_after_rotation() {
     let (env, client, admin, _) = setup();
     let new_admin = Address::generate(&env);
@@ -1422,4 +1433,211 @@ fn test_deposit_allowed_again_after_unpause() {
     client.deposit(&user, &1_0000000, &(env.ledger().timestamp() + 86_400));
 
     assert_eq!(client.get_balance(&user), 1_0000000);
+}
+
+// ── SC-208: bounded vault list, O(1) balance, pagination ─────────────────────
+
+const DAY: u64 = 86_400;
+
+#[test]
+#[should_panic(expected = "vault limit reached")]
+fn test_deposit_beyond_vault_cap_panics() {
+    let (env, client, _, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let cap = crate::MAX_VAULTS_PER_USER;
+    mint_usdc(&env, &usdc_id, &client.address, &user, (cap as i128 + 1) * 1_0000000);
+    let unlock = env.ledger().timestamp() + DAY;
+    for _ in 0..cap {
+        client.deposit(&user, &1_0000000, &unlock);
+    }
+    client.deposit(&user, &1_0000000, &unlock);
+}
+
+#[test]
+fn test_full_withdrawal_frees_a_vault_slot() {
+    let (env, client, _, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let cap = crate::MAX_VAULTS_PER_USER;
+    mint_usdc(&env, &usdc_id, &client.address, &user, (cap as i128 + 1) * 1_0000000);
+    let unlock = env.ledger().timestamp() + DAY;
+    for _ in 0..cap {
+        client.deposit(&user, &1_0000000, &unlock);
+    }
+    env.ledger().set_timestamp(unlock + 1);
+    client.withdraw(&user, &0, &1_0000000);
+    client.deposit(&user, &1_0000000, &(env.ledger().timestamp() + DAY));
+    assert_eq!(client.get_vault_ids(&user).len(), cap);
+    assert_eq!(client.get_balance(&user), cap as i128 * 1_0000000);
+}
+
+#[test]
+fn test_get_balance_reads_constant_entries_regardless_of_vault_count() {
+    let (env, client, _, usdc_id) = setup();
+    let cap = crate::MAX_VAULTS_PER_USER;
+    let unlock = env.ledger().timestamp() + DAY;
+
+    let small = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &client.address, &small, 1_0000000);
+    client.deposit(&small, &1_0000000, &unlock);
+
+    let large = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &client.address, &large, cap as i128 * 1_0000000);
+    for _ in 0..cap {
+        client.deposit(&large, &1_0000000, &unlock);
+    }
+
+    assert_eq!(client.get_balance(&small), 1_0000000);
+    let small_res = env.cost_estimate().resources();
+    let small_reads = small_res.disk_read_entries + small_res.memory_read_entries;
+
+    assert_eq!(client.get_balance(&large), cap as i128 * 1_0000000);
+    let large_res = env.cost_estimate().resources();
+    let large_reads = large_res.disk_read_entries + large_res.memory_read_entries;
+
+    assert_eq!(small_reads, large_reads);
+}
+
+#[test]
+fn test_get_vaults_paginates() {
+    let (env, client, _, usdc_id) = setup();
+    let user = Address::generate(&env);
+    mint_usdc(&env, &usdc_id, &client.address, &user, 5 * 1_0000000);
+    for i in 0..5u64 {
+        client.deposit(&user, &1_0000000, &(env.ledger().timestamp() + DAY * (i + 1)));
+    }
+
+    let page = client.get_vaults(&user, &1, &2);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap().0, 1);
+    assert_eq!(page.get(1).unwrap().0, 2);
+    assert_eq!(page.get(1).unwrap().1.balance, 1_0000000);
+
+    assert_eq!(client.get_vaults(&user, &4, &10).len(), 1);
+    assert_eq!(client.get_vaults(&user, &5, &10).len(), 0);
+}
+
+/// Sum of the balances of all of `user`'s open vaults, read via pagination.
+fn sum_vault_balances(client: &SavingsVaultContractClient, user: &Address) -> i128 {
+    let mut total = 0i128;
+    for (_, vault) in client.get_vaults(user, &0, &crate::MAX_VAULTS_PER_USER).iter() {
+        total += vault.balance;
+    }
+    total
+}
+
+/// Asserts the SC-209 solvency invariant: the contract always holds at least
+/// `TotalLocked` plus the interest reserve.
+fn assert_solvent(env: &Env, client: &SavingsVaultContractClient, usdc_id: &Address) {
+    let held = TokenClient::new(env, usdc_id).balance(&client.address);
+    assert!(
+        held >= client.get_total_locked() + client.get_interest_reserve_balance(),
+        "contract balance {} below TotalLocked {} + reserve {}",
+        held,
+        client.get_total_locked(),
+        client.get_interest_reserve_balance()
+    );
+}
+
+#[test]
+fn test_user_total_matches_vault_sum_over_random_sequences() {
+    // Deterministic pseudo-random sequences (LCG) of deposits and partial /
+    // full withdrawals across several seeds.
+    for seed in [1u64, 7, 42, 1337, 9001] {
+        let (env, client, admin, usdc_id) = setup();
+        let distributor = Address::generate(&env);
+        client.set_fee_distributor(&admin, &distributor);
+        mint_usdc(&env, &usdc_id, &client.address, &distributor, 1_000_0000000);
+        client.fund_interest_reserve(&distributor, &1_000_0000000);
+        client.set_interest_rate(&admin, &500u32);
+
+        let user = Address::generate(&env);
+        mint_usdc(&env, &usdc_id, &client.address, &user, 100_000_0000000);
+
+        let mut state = seed;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state >> 33
+        };
+
+        for _ in 0..40 {
+            let ids = client.get_vault_ids(&user);
+            let do_deposit = ids.is_empty() || (next() % 2 == 0 && ids.len() < crate::MAX_VAULTS_PER_USER);
+            if do_deposit {
+                let amount = (next() % 1_000 + 1) as i128 * 1_0000000;
+                let unlock = env.ledger().timestamp() + DAY * (next() % 30 + 1);
+                client.deposit(&user, &amount, &unlock);
+            } else {
+                let id = ids.get((next() % ids.len() as u64) as u32).unwrap();
+                let vault = client.get_vault(&user, &id);
+                if vault.balance > 0 {
+                    let amount = if next() % 3 == 0 {
+                        vault.balance
+                    } else {
+                        (next() as i128 % vault.balance) + 1
+                    };
+                    client.withdraw(&user, &id, &amount);
+                }
+            }
+            env.ledger().set_timestamp(env.ledger().timestamp() + DAY * (next() % 5));
+
+            assert_eq!(client.get_balance(&user), sum_vault_balances(&client, &user));
+            assert_eq!(client.get_total_locked(), client.get_balance(&user));
+            assert_solvent(&env, &client, &usdc_id);
+        }
+    }
+}
+
+// ── SC-209: CEI ordering / solvency invariant ────────────────────────────────
+
+#[test]
+fn test_withdraw_with_interest_keeps_contract_solvent() {
+    let (env, client, admin, usdc_id) = setup();
+    let distributor = Address::generate(&env);
+    client.set_fee_distributor(&admin, &distributor);
+    mint_usdc(&env, &usdc_id, &client.address, &distributor, 100_0000000);
+    client.fund_interest_reserve(&distributor, &100_0000000);
+    client.set_interest_rate(&admin, &1_000u32);
+
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock = env.ledger().timestamp() + 30 * DAY;
+    mint_usdc(&env, &usdc_id, &client.address, &user, amount);
+    client.deposit(&user, &amount, &unlock);
+    assert_solvent(&env, &client, &usdc_id);
+
+    env.ledger().set_timestamp(unlock + 1);
+    client.withdraw(&user, &0, &(amount / 2));
+    assert_solvent(&env, &client, &usdc_id);
+    assert_eq!(client.get_total_locked(), amount / 2);
+
+    client.withdraw(&user, &0, &(amount / 2));
+    assert_solvent(&env, &client, &usdc_id);
+    assert_eq!(client.get_total_locked(), 0);
+    // Principal plus some interest was paid out of the reserve.
+    assert!(TokenClient::new(&env, &usdc_id).balance(&user) > amount);
+}
+
+#[test]
+fn test_emergency_exits_keep_contract_solvent() {
+    let (env, client, admin, usdc_id) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let unlock = env.ledger().timestamp() + DAY;
+    mint_usdc(&env, &usdc_id, &client.address, &a, 10_0000000);
+    mint_usdc(&env, &usdc_id, &client.address, &b, 20_0000000);
+    client.deposit(&a, &10_0000000, &unlock);
+    client.deposit(&b, &20_0000000, &unlock);
+
+    client.announce_emergency(&admin);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 172_800);
+    client.emergency_withdraw(&admin, &a);
+    assert_solvent(&env, &client, &usdc_id);
+    assert_eq!(client.get_total_locked(), 20_0000000);
+    assert_eq!(client.get_balance(&a), 0);
+
+    client.emergency_withdraw(&admin, &b);
+    assert_solvent(&env, &client, &usdc_id);
+    assert_eq!(client.get_total_locked(), 0);
 }

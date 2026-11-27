@@ -64,13 +64,13 @@ export default function Profile() {
     // (backend/src/routes/auth.js avatarUpload: 5 MB, image/(jpeg|png|webp))
     // so invalid files fail fast before any bytes are uploaded.
     if (file.size > 5 * 1024 * 1024) {
-      setAvatarError('File too large. Maximum size is 5 MB.');
-      toast.error('File too large. Maximum size is 5 MB.');
+      setAvatarError(t('profile.avatar.fileTooLarge'));
+      toast.error(t('profile.avatar.fileTooLarge'));
       return;
     }
     if (!/^image\/(jpeg|png|webp)$/.test(file.type)) {
-      setAvatarError('Only JPEG, PNG, and WebP files are accepted.');
-      toast.error('Only JPEG, PNG, and WebP files are accepted.');
+      setAvatarError(t('profile.avatar.invalidType'));
+      toast.error(t('profile.avatar.invalidType'));
       return;
     }
     setAvatarError('');
@@ -81,7 +81,7 @@ export default function Profile() {
   const handleCropSuccess = (avatarUrl) => {
     updateUser({ avatar_url: avatarUrl });
     setCropFile(null);
-    toast.success('Profile photo updated');
+    toast.success(t('profile.avatar.updated'));
   };
 
 
@@ -97,6 +97,52 @@ export default function Profile() {
 
 
 
+  React.useEffect(() => {
+    const fetchContacts = async () => {
+      try {
+        const res = await api.get('/contacts');
+        setContacts(res.data.contacts || []);
+      } catch {
+        toast.error(t('profile.contacts.loadFailed'));
+      } finally {
+        setContactsLoading(false);
+      }
+    };
+    const fetchActivity = async () => {
+      try {
+        const res = await api.get('/auth/activity');
+        setActivity(res.data.activity || []);
+      } catch {
+        // non-critical, silently ignore
+      } finally {
+        setActivityLoading(false);
+      }
+    };
+    const fetchTickets = async () => {
+      try {
+        const res = await api.get('/support/tickets');
+        setTickets(res.data.tickets || []);
+      } catch {
+        // non-critical, silently ignore
+      } finally {
+        setTicketsLoading(false);
+      }
+    };
+    const fetchLoyaltyBalance = async () => {
+      try {
+        await refreshLoyalty();
+      } catch {
+        // non-critical, silently ignore
+      } finally {
+        setLoyaltyLoading(false);
+      }
+    };
+    fetchContacts();
+    fetchActivity();
+    fetchTickets();
+    fetchLoyaltyBalance();
+  }, []);
+
 
 
   const copyAddress = async () => {
@@ -106,7 +152,7 @@ export default function Profile() {
       toast.success(t('profile.address_copied'));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error('Failed to copy address');
+      toast.error(t('profile.address_copy_failed'));
     }
   };
 

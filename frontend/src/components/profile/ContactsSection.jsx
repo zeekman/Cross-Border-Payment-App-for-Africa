@@ -3,6 +3,7 @@ import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { Plus, Trash2 } from 'lucide-react';
 import { truncateAddress } from '../../utils/currency';
+import { validateStellarAddress } from '../../utils/validation';
 import api from '../../utils/api';
 import ImportContactsModal from '../ImportContactsModal';
 
@@ -27,12 +28,18 @@ export default function ContactsSection() {
 
   const addContact = async (e) => {
     e.preventDefault();
+    const wallet_address = newContact.wallet_address.trim();
+    const addressError = validateStellarAddress(wallet_address);
+    if (addressError) {
+      toast.error(addressError);
+      return;
+    }
     try {
       const tags = newContact.tags
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean);
-      const res = await api.post('/contacts', { ...newContact, tags });
+      const res = await api.post('/contacts', { ...newContact, wallet_address, tags });
       setContacts([...contacts, res.data.contact]);
       setNewContact({
         name: '',

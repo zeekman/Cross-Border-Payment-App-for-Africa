@@ -90,7 +90,7 @@ export default function ResetPassword() {
     setLoading(true);
     try {
       await api.post('/auth/reset-password', { token: tokenFromUrl, password });
-      toast.success('Password reset successfully. Please log in.');
+      toast.success(t('passwordReset.reset_success'));
       navigate('/login');
     } catch (err) {
       const msg =

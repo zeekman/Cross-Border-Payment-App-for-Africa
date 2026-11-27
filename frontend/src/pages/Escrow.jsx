@@ -1,13 +1,33 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 import { createIdempotencyKey, postWithIdempotency } from '../utils/idempotency';
+import useContractStates from '../hooks/useContractStates';
+import ContractStatusBanners from '../components/ContractStatusBanners';
 import useStepUp from '../hooks/useStepUp';
 import { useConfirm } from '../context/ConfirmContext';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 
+const CONTRACTS = ['escrow', 'agentEscrow'];
+const formatCountdown = (ms) => {
+  if (!Number.isFinite(ms) || ms <= 0) return '0m';
+  const totalMinutes = Math.ceil(ms / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+};
+
+const formatDate = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString();
+};
+
 export default function Escrow() {
+  const { states: contractStates, paused: contractPaused } = useContractStates(CONTRACTS);
   const createKeyRef = useRef(createIdempotencyKey());
   const { requestStepUp, stepUpModal } = useStepUp();
   const confirm = useConfirm();
@@ -35,6 +55,52 @@ export default function Escrow() {
   const [partialEscrow, setPartialEscrow] = useState(null);
   const [partialAmount, setPartialAmount] = useState('');
   const [partialLoading, setPartialLoading] = useState(false);
+
+  // Ticking clock so cancellable_at countdowns stay live.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const isExpired = (escrow) => {
+    if (escrow.status === 'expired') return true;
+    if (!escrow.expires_at) return false;
+    const expiresAt = new Date(escrow.expires_at).getTime();
+    return Number.isFinite(expiresAt) && expiresAt <= now;
+  };
+
+  const cancellableInMs = (escrow) => {
+    if (!escrow.cancellable_at) return 0;
+    const at = new Date(escrow.cancellable_at).getTime();
+    if (!Number.isFinite(at)) return 0;
+    return Math.max(0, at - now);
+  };
+
+  const canCancel = (escrow) =>
+    escrow.status === 'pending' && !escrow.payout_confirmed && cancellableInMs(escrow) <= 0;
+
+  const timelineSteps = (escrow) => {
+    const expired = isExpired(escrow);
+    const cancelled = escrow.status === 'cancelled';
+    const released = escrow.status === 'released';
+    const confirmed = escrow.payout_confirmed || escrow.status === 'confirmed';
+    return [
+      { key: 'created', label: t('escrow.timeline.created', 'Created'), done: true },
+      { key: 'confirmed', label: t('escrow.timeline.confirmed', 'Agent confirmed'), done: confirmed },
+      {
+        key: 'final',
+        label: expired
+          ? t('escrow.timeline.expired', 'Expired')
+          : cancelled
+          ? t('escrow.timeline.cancelled', 'Cancelled')
+          : released
+          ? t('escrow.timeline.released', 'Released')
+          : t('escrow.timeline.released', 'Released'),
+        done: expired || cancelled || released,
+      },
+    ];
+  };
 
   const feeBps = partialEscrow?.fee_bps ?? 250; // platform fee from escrow, fallback 2.5%
 
@@ -76,6 +142,7 @@ export default function Escrow() {
 
   const handleCreateEscrow = async (e) => {
     e.preventDefault();
+    if (contractPaused) return;
     if (!createForm.agent_wallet || !createForm.recipient_wallet || !createForm.amount) {
       toast.error('Please fill in all fields');
       return;
@@ -107,6 +174,12 @@ export default function Escrow() {
     setLoading(true);
     try {
       const { data } = await postWithIdempotency('/escrow/create', createForm, createKeyRef.current.get(), { headers: { 'X-Step-Up-Token': stepUpToken } });
+      const { data } = await postWithIdempotency(
+        '/escrow/create',
+        createForm,
+        createKeyRef.current.get(),
+        { headers: { 'X-Step-Up-Token': stepUpToken } },
+      );
       createKeyRef.current.reset();
       toast.success('Escrow created successfully');
       setCreateForm({ agent_wallet: '', recipient_wallet: '', amount: '', asset: 'USDC' });
@@ -142,7 +215,15 @@ export default function Escrow() {
     }
   };
 
-  const handleCancelEscrow = async (escrowId) => {
+  const handleCancelEscrow = async (escrowId, escrow) => {
+    if (escrow && !canCancel(escrow)) {
+      if (escrow.payout_confirmed) {
+        toast.error(t('escrow.cancel_blocked_confirmed', 'Cannot cancel: the agent has already confirmed delivery.'));
+      } else {
+        toast.error(t('escrow.cancel_blocked_hold', 'Cannot cancel: the hold period has not elapsed yet.'));
+      }
+      return;
+    }
     if (!(await confirm(t('confirm.cancel_escrow', 'Cancel this escrow? Locked funds will be returned to the sender.'), { title: t('confirm.cancel_escrow_title', 'Cancel escrow'), confirmLabel: t('confirm.cancel_escrow_btn', 'Cancel escrow') }))) return;
 
     const stepUpToken = await requestStepUp();
@@ -212,6 +293,8 @@ export default function Escrow() {
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950 p-4 md:p-6">
       <div className="max-w-4xl mx-auto">
         <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-6">Agent Escrow</h1>
+
+        <ContractStatusBanners states={contractStates} />
 
         {/* Tabs */}
         <div className="flex gap-4 mb-6 border-b border-gray-200 dark:border-gray-800" role="tablist" aria-label="Escrow views">
@@ -316,7 +399,9 @@ export default function Escrow() {
 
               <button
                 type="submit"
+                disabled={loading || contractPaused}
                 disabled={loading}
+                data-testid="escrow-create-submit"
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium py-2 rounded-lg transition-colors"
               >
                 {loading ? 'Creating...' : 'Create Escrow'}
@@ -387,52 +472,144 @@ export default function Escrow() {
 
             {!loading && !error && escrows.length > 0 && (
               <div className="space-y-3">
-                {escrows.map((escrow) => (
-                  <div
-                    key={escrow.id}
-                    className="border border-gray-200 dark:border-gray-800 rounded-lg p-4"
-                  >
-                    <div className="flex justify-between items-start mb-2">
-                      <div>
-                        <p className="font-medium text-gray-900 dark:text-white">
-                          {escrow.amount} {escrow.asset}
-                        </p>
-                        <p className="text-sm text-gray-600 dark:text-gray-400">
-                          Status: {escrow.status}
-                        </p>
-                      </div>
-                      <span className="text-xs px-2 py-1 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">
-                        {escrow.status}
-                      </span>
-                    </div>
-                    <div className="flex gap-2 mt-3">
-                      {escrow.status === 'pending' && (
-                        <>
-                          <button
-                            onClick={() => handleConfirmEscrow(escrow.id, escrow)}
-                            className="px-3 py-1 text-sm bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
-                          >
-                            Confirm
-                          </button>
-                          <button
-                            onClick={() => handleCancelEscrow(escrow.id)}
-                            className="px-3 py-1 text-sm bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
-                          >
-                            Cancel
-                          </button>
-                        </>
-                      )}
-                      {escrow.status !== 'cancelled' && escrow.status !== 'released' && (
-                        <button
-                          onClick={() => openPartialRelease(escrow)}
-                          className="px-3 py-1 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                {escrows.map((escrow) => {
+                  const expired = isExpired(escrow);
+                  const remainingMs = cancellableInMs(escrow);
+                  const cancelEnabled = canCancel(escrow);
+                  const confirmed = escrow.payout_confirmed || escrow.status === 'confirmed';
+                  return (
+                    <div
+                      key={escrow.id}
+                      data-testid={`escrow-item-${escrow.id}`}
+                      className="border border-gray-200 dark:border-gray-800 rounded-lg p-4"
+                    >
+                      <div className="flex justify-between items-start mb-2">
+                        <div>
+                          <p className="font-medium text-gray-900 dark:text-white">
+                            {escrow.amount} {escrow.asset}
+                          </p>
+                          <p className="text-sm text-gray-600 dark:text-gray-400">
+                            Status: {escrow.status}
+                          </p>
+                        </div>
+                        <span
+                          data-testid={`escrow-status-${escrow.id}`}
+                          className="text-xs px-2 py-1 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300"
                         >
-                          Partial Release
-                        </button>
+                          {expired ? t('escrow.status.expired', 'Expired') : escrow.status}
+                        </span>
+                      </div>
+
+                      {/* Status timeline */}
+                      <ol
+                        data-testid={`escrow-timeline-${escrow.id}`}
+                        className="flex flex-wrap items-center gap-2 text-xs text-gray-600 dark:text-gray-400 mt-2"
+                      >
+                        {timelineSteps(escrow).map((step, idx) => (
+                          <li key={step.key} className="flex items-center gap-2">
+                            <span
+                              className={`inline-block w-2 h-2 rounded-full ${
+                                step.done ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-700'
+                              }`}
+                              aria-hidden="true"
+                            />
+                            <span className={step.done ? 'text-gray-900 dark:text-gray-200' : ''}>
+                              {step.label}
+                            </span>
+                            {idx < 2 && <span aria-hidden="true">→</span>}
+                          </li>
+                        ))}
+                      </ol>
+
+                      {expired && (
+                        <p
+                          data-testid={`escrow-expired-${escrow.id}`}
+                          className="mt-2 text-sm text-amber-700 dark:text-amber-400"
+                        >
+                          {t('escrow.expired_refund', 'Expired – refund available')}
+                        </p>
                       )}
+
+                      {confirmed && !expired && (
+                        <div
+                          data-testid={`escrow-confirmed-notice-${escrow.id}`}
+                          className="mt-2 text-sm text-green-700 dark:text-green-400"
+                        >
+                          {t(
+                            'escrow.agent_confirmed',
+                            "Agent confirmed payout. Open a dispute if you didn't receive it."
+                          )}{' '}
+                          <Link
+                            to={`/disputes/new?escrow=${encodeURIComponent(escrow.id)}`}
+                            data-testid={`escrow-dispute-link-${escrow.id}`}
+                            className="underline font-medium"
+                          >
+                            {t('escrow.open_dispute', 'Open a dispute')}
+                          </Link>
+                        </div>
+                      )}
+
+                      {escrow.expires_at && !expired && (
+                        <p
+                          data-testid={`escrow-expires-${escrow.id}`}
+                          className="mt-2 text-xs text-gray-600 dark:text-gray-400"
+                        >
+                          {t('escrow.expires_at', 'Expires: {{date}}', {
+                            date: formatDate(escrow.expires_at),
+                          })}
+                        </p>
+                      )}
+
+                      <div className="flex gap-2 mt-3">
+                        {escrow.status === 'pending' && !expired && (
+                          <>
+                            <button
+                              onClick={() => handleConfirmEscrow(escrow.id, escrow)}
+                              data-testid={`escrow-confirm-${escrow.id}`}
+                              className="px-3 py-1 text-sm bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => handleCancelEscrow(escrow.id, escrow)}
+                              disabled={!cancelEnabled}
+                              title={
+                                !cancelEnabled && remainingMs > 0
+                                  ? t('escrow.cancellable_in', 'Cancellable in {{time}}', {
+                                      time: formatCountdown(remainingMs),
+                                    })
+                                  : undefined
+                              }
+                              data-testid={`escrow-cancel-${escrow.id}`}
+                              className="px-3 py-1 text-sm bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded transition-colors"
+                            >
+                              Cancel
+                            </button>
+                            {remainingMs > 0 && (
+                              <span
+                                data-testid={`escrow-cancellable-in-${escrow.id}`}
+                                className="self-center text-xs text-gray-600 dark:text-gray-400"
+                              >
+                                {t('escrow.cancellable_in', 'Cancellable in {{time}}', {
+                                  time: formatCountdown(remainingMs),
+                                })}
+                              </span>
+                            )}
+                          </>
+                        )}
+                        {escrow.status !== 'cancelled' && escrow.status !== 'released' && !expired && (
+                          <button
+                            onClick={() => openPartialRelease(escrow)}
+                            data-testid={`escrow-partial-release-${escrow.id}`}
+                            className="px-3 py-1 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                          >
+                            Partial Release
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

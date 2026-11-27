@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+afripay-types = { path = "../afripay-types" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

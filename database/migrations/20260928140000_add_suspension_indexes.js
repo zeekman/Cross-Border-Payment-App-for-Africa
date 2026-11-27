@@ -1,9 +1,7 @@
--- Migration: Add indexes and verify columns for suspension enforcement
--- Issue: BE-104 - Access token revocation and suspension enforcement
--- Date: 2026-09-28
-
-BEGIN;
-
+// BE-104: indexes, views and helper functions for suspension enforcement.
+// Runs inside node-pg-migrate's own transaction (no BEGIN/COMMIT here).
+exports.up = (pgm) => {
+  pgm.sql(`
 -- Verify that is_suspended column exists
 -- (Should already exist from bulk-suspend feature, but verify)
 DO $$
@@ -46,7 +44,7 @@ END $$;
 
 -- Add partial index for suspended users (for fast lookups)
 -- Only indexes rows where is_suspended = TRUE (typically small subset)
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_suspended 
+CREATE INDEX IF NOT EXISTS idx_users_suspended 
 ON users(is_suspended) 
 WHERE is_suspended = TRUE;
 
@@ -68,7 +66,7 @@ END $$;
 
 -- Add index on sessions.token_jti for fast JTI lookups
 -- Used when checking if a JTI has been blacklisted via session revocation
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_token_jti 
+CREATE INDEX IF NOT EXISTS idx_sessions_token_jti 
 ON sessions(token_jti) 
 WHERE token_jti IS NOT NULL;
 
@@ -76,7 +74,7 @@ COMMENT ON INDEX idx_sessions_token_jti IS
 'Index for fast JTI lookups when checking token revocation status';
 
 -- Add index on sessions for active sessions lookup
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_active_user 
+CREATE INDEX IF NOT EXISTS idx_sessions_active_user 
 ON sessions(user_id, is_active) 
 WHERE is_active = TRUE;
 
@@ -183,20 +181,17 @@ FROM users;
 
 COMMENT ON VIEW v_suspension_stats IS 
 'Statistics view for monitoring suspension trends. Used by admin dashboard and monitoring.';
+  `);
+};
 
-COMMIT;
-
--- Verification queries (run these manually after migration)
--- 1. Check that indexes were created
--- SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'users' AND indexname LIKE '%suspended%';
--- SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'sessions' AND indexname LIKE '%jti%';
-
--- 2. Check suspended accounts
--- SELECT * FROM v_suspended_accounts;
-
--- 3. Check suspension statistics
--- SELECT * FROM v_suspension_stats;
-
--- 4. Test the suspend/unsuspend functions
--- SELECT suspend_user('user-uuid-here'::UUID, 'Test suspension');
--- SELECT unsuspend_user('user-uuid-here'::UUID);
+exports.down = (pgm) => {
+  pgm.sql(`
+DROP VIEW IF EXISTS v_suspension_stats;
+DROP VIEW IF EXISTS v_suspended_accounts;
+DROP FUNCTION IF EXISTS unsuspend_user(UUID, UUID);
+DROP FUNCTION IF EXISTS suspend_user(UUID, TEXT, UUID);
+DROP INDEX IF EXISTS idx_sessions_active_user;
+DROP INDEX IF EXISTS idx_sessions_token_jti;
+DROP INDEX IF EXISTS idx_users_suspended;
+  `);
+};

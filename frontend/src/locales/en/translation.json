@@ -1,4 +1,52 @@
 {
+  "paymentRequest": {
+    "requestedBy": "Requested by",
+    "unknown": "Unknown requester",
+    "verified": "Verified",
+    "memberSince": "Member since {{date}}",
+    "expiresIn": "Expires in {{time}}",
+    "notContact": "You haven't paid this person before. Only pay requests from people you know.",
+    "cancelled": "This payment request was cancelled.",
+    "unavailable": "Payment request unavailable"
+  },
+  "pinPolicy": {
+    "repeated": "PINs with repeated digits are easy to guess",
+    "sequential": "Avoid sequences like 1234",
+    "common": "This PIN is too common",
+    "personal": "Avoid your birth year or date of birth",
+    "sixDigits": "6-digit PINs are much harder to guess"
+  },
+  "contractStatus": {
+    "names": {
+      "escrow": "escrow",
+      "agentEscrow": "agent escrow",
+      "savingsVault": "savings vault",
+      "recurringPayments": "recurring payments"
+    },
+    "paused": {
+      "escrow": "Escrow creation is temporarily paused for maintenance. Existing escrows can still be cancelled or released.",
+      "agentEscrow": "Agent escrow creation is temporarily paused for maintenance. Existing escrows can still be cancelled or released.",
+      "savingsVault": "Savings deposits are temporarily paused for maintenance. Existing savings can still be withdrawn once unlocked.",
+      "recurringPayments": "Creating scheduled payments is temporarily paused for maintenance. Existing schedules can still be cancelled."
+    },
+    "upgrade": "An upgrade to the {{contract}} contract is scheduled for {{eta}}.",
+    "upgradeNoEta": "An upgrade to the {{contract}} contract is pending.",
+    "releaseNotes": "Release notes",
+    "exit": "Withdraw or cancel",
+    "dismiss": "Dismiss"
+  },
+  "webhookVerify": {
+    "title": "Verify signatures",
+    "eventId": "Stable ID for the event; retries reuse it.",
+    "deliveryId": "Unique ID for each delivery attempt.",
+    "timestamp": "Unix time, in seconds, when the delivery was signed.",
+    "signature": "HMAC-SHA256 of \"timestamp.body\", in the form t=<timestamp>,v1=<signature>. During secret rotation there may be more than one v1.",
+    "tolerance": "Reject deliveries whose timestamp differs from your clock by more than 5 minutes.",
+    "dedupe": "Store each X-AfriPay-Event-Id and ignore events you have already processed.",
+    "copy": "Copy snippet",
+    "requestHeaders": "Request headers",
+    "headersUnavailable": "Headers were not recorded for this attempt."
+  },
   "common": {
     "offline_cached": "You're offline — showing cached data",
     "back": "Back",
@@ -44,7 +92,11 @@
     "sign_in": "Sign in",
     "success": "Account created! Your wallet is ready.",
     "error": "Registration failed",
-    "verify_email_notice": "Please check your email to verify your account."
+    "verify_email_notice": "Please check your email to verify your account.",
+    "phone_verified": "Phone number verified successfully!",
+    "phone_verification_failed": "Phone verification failed",
+    "passwords_do_not_match": "Passwords do not match",
+    "email_verified": "Email verified successfully!"
   },
   "login": {
     "title": "Welcome back",
@@ -96,7 +148,8 @@
     "reset_success_toast": "Password updated. You can sign in now.",
     "back_to_login": "Back to sign in",
     "missing_token": "This reset link is invalid or incomplete. Request a new one from the login page.",
-    "error_generic": "Something went wrong. Please try again."
+    "error_generic": "Something went wrong. Please try again.",
+    "reset_failed": "Failed to reset password"
   },
   "dashboard": {
     "greeting": "Good day,",
@@ -113,7 +166,11 @@
   "analytics": {
     "title": "Analytics",
     "error": "Failed to load analytics",
-    "no_data": "No analytics data available yet"
+    "no_data": "No analytics data available yet",
+    "export_success": "Analytics exported successfully",
+    "export_failed": "Failed to export analytics",
+    "filter_applied": "Filters applied",
+    "refresh_success": "Analytics refreshed"
   },
   "send": {
     "title": "Send Money",
@@ -185,6 +242,9 @@
     "request_load_failed": "Could not load this payment request.",
     "request_expires": "Payment request expires",
     "confirm_total": "Total:"
+    "invalid_amount": "Enter a valid amount with up to 7 decimal places",
+    "invalid_address": "Enter a valid Stellar address",
+    "send_failed": "Failed to send payment"
   },
   "auth": {
     "setup_pin_title": "Set Transaction PIN",
@@ -214,7 +274,12 @@
     "address_label": "Your Stellar Wallet Address",
     "federation_label": "Federation address",
     "warning": "Only send XLM or Stellar-based assets to this address",
-    "address_copied": "Address copied!"
+    "address_copied": "Address copied!",
+    "qr_generated": "QR code generated successfully",
+    "qr_generation_failed": "Failed to generate QR code",
+    "share_success": "Address shared successfully",
+    "share_failed": "Failed to share address",
+    "copy_failed": "Failed to copy address"
   },
   "request": {
     "title": "Request Money",
@@ -224,6 +289,10 @@
     "invalid_amount": "Please enter a valid amount",
     "success": "Payment request created!",
     "create_another": "Create Another"
+    "invalid_amount": "Enter a valid amount with up to 7 decimal places",
+    "invalid_address": "Enter a valid Stellar address",
+    "copy_success": "Request link copied!",
+    "copy_failed": "Failed to copy request link"
   },
   "scheduled": {
     "title": "Scheduled Payments",
@@ -240,7 +309,54 @@
     "title": "Swap",
     "dex_rate": "DEX rate",
     "slippage_tolerance": "Slippage Tolerance",
-    "custom": "Custom"
+    "custom": "Custom",
+    "success": "Swap completed successfully!",
+    "error": "Swap failed",
+    "invalid_amount": "Enter a valid amount with up to 7 decimal places"
+  },
+  "save": {
+    "success": "Savings deposit successful!",
+    "error": "Failed to save money",
+    "invalid_amount": "Enter a valid amount with up to 7 decimal places"
+  },
+  "escrow": {
+    "created": "Escrow created successfully",
+    "create_failed": "Failed to create escrow",
+    "released": "Escrow funds released successfully",
+    "release_failed": "Failed to release escrow funds",
+    "cancelled": "Escrow cancelled",
+    "cancel_failed": "Failed to cancel escrow",
+    "invalid_amount": "Enter a valid amount with up to 7 decimal places"
+  },
+  "history": {
+    "export_success": "Transaction history exported",
+    "export_failed": "Failed to export transaction history"
+  },
+  "profile": {
+    "updated": "Profile updated successfully",
+    "update_failed": "Failed to update profile",
+    "avatar_updated": "Profile photo updated",
+    "avatar_failed": "Failed to update profile photo",
+    "password_changed": "Password changed successfully"
+  },
+  "admin": {
+    "user_updated": "User updated successfully",
+    "user_update_failed": "Failed to update user",
+    "user_suspended": "User suspended",
+    "user_suspend_failed": "Failed to suspend user",
+    "user_activated": "User activated",
+    "user_activate_failed": "Failed to activate user",
+    "settings_saved": "Settings saved successfully"
+  },
+  "businessSettings": {
+    "saved": "Business settings saved successfully",
+    "save_failed": "Failed to save business settings",
+    "logo_updated": "Business logo updated",
+    "logo_failed": "Failed to update business logo",
+    "webhook_added": "Webhook added successfully",
+    "webhook_add_failed": "Failed to add webhook",
+    "webhook_deleted": "Webhook deleted",
+    "webhook_delete_failed": "Failed to delete webhook"
   },
   "contacts_import": {
     "open": "Import CSV",

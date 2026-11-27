@@ -295,7 +295,7 @@ export default function TransactionHistory() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      let msg = 'Export failed. Please try again.';
+      let msg = t('history.export_failed');
       try {
         const data = err.response?.data;
         const text = data instanceof Blob ? await data.text() : null;
@@ -304,6 +304,31 @@ export default function TransactionHistory() {
       toast.error(msg);
     } finally {
       setExporting(false);
+    }
+  }
+
+  async function handleSubmitReport(e) {
+    e.preventDefault();
+    setConfirmReport(true);
+  }
+
+  async function doSubmitReport() {
+    setReportLoading(true);
+    try {
+      await api.post('/support/tickets', {
+        transaction_id: reportTx.id,
+        type: reportType,
+        description: reportDesc,
+      });
+      setConfirmReport(false);
+      setReportTx(null);
+      setReportDesc('');
+      setReportType('other');
+      toast.success(t('history.report_success'));
+    } catch (err) {
+      toast.error(err.response?.data?.error || t('history.report_failed'));
+    } finally {
+      setReportLoading(false);
     }
   }
 
@@ -780,7 +805,7 @@ export default function TransactionHistory() {
                         navigator.clipboard.writeText(selectedTx.tx_hash);
                         setCopiedHash(true);
                         setTimeout(() => setCopiedHash(false), 2000);
-                        toast.success('Hash copied');
+                        toast.success(t('history.hash_copied'));
                       }}
                       className="text-gray-400 hover:text-white transition-colors shrink-0"
                       title="Copy hash"

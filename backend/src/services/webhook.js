@@ -8,7 +8,10 @@ const { validateOutboundUrl } = require('../utils/ssrf');
 const { decryptSecret } = require('../utils/symmetricEncryption');
 const logger = require('../utils/logger');
 
+const webhookSignature = require('../utils/webhookSignature');
+
 const MAX_ATTEMPTS = 3;
+const WEBHOOK_TIMEOUT_MS = parseInt(process.env.WEBHOOK_TIMEOUT_MS || '10000', 10);
 
 /**
  * Perform a single HTTPS POST with the AfriPay webhook signature header.
@@ -19,9 +22,53 @@ const MAX_ATTEMPTS = 3;
  * @param {import('https').Agent|undefined} agent - DNS-pinned agent (SSRF protection)
  * @returns {Promise<number>} Resolves with the HTTP status code on 2xx
  */
+async function isPublicHttpsUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== 'https:') {
+    return false;
+  }
+
+  const hostname = parsed.hostname;
+
+  // Reject bare private IPs
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) && isPrivateIp(hostname)) {
+    return false;
+  }
+
+  // Resolve and check returned IP
+  try {
+    const { address } = await require('dns').promises.lookup(hostname);
+    if (isPrivateIp(address)) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  return true;
+}
+
+function sign(secret, payload) {
+  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
+}
+
+function httpsPost(url, body, signature, meta = {}) {
 function httpsPost(url, body, signature, agent) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
+    const extraHeaders = {};
+    if (meta.eventId) extraHeaders['X-AfriPay-Event-Id'] = meta.eventId;
+    if (meta.deliveryId) extraHeaders['X-AfriPay-Delivery-Id'] = String(meta.deliveryId);
+    if (meta.timestamp) {
+      extraHeaders['X-AfriPay-Timestamp'] = String(meta.timestamp);
+      extraHeaders['X-AfriPay-Signature-v2'] = webhookSignature.buildHeader(meta.secret, meta.timestamp, body);
+    }
     const options = {
       hostname: parsed.hostname,
       port: parsed.port || 443,
@@ -30,6 +77,11 @@ function httpsPost(url, body, signature, agent) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
+        // Deprecated: body-only signature, kept for one deprecation cycle
+        'X-AfriPay-Signature-256': `sha256=${signature}`,
+        ...extraHeaders,
+      },
+      timeout: WEBHOOK_TIMEOUT_MS,
         'X-AfriPay-Signature-256': signature,
       },
       // Use the DNS-pinned agent from SSRF validation to prevent DNS rebinding
@@ -47,6 +99,7 @@ function httpsPost(url, body, signature, agent) {
         ? resolve(res.statusCode)
         : reject(new Error(`HTTP ${res.statusCode}`));
     });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
     req.on('error', reject);
     req.write(body);
     req.end();
@@ -177,6 +230,7 @@ async function deliverWithRetry(webhookId, url, secrets, payload, attempt = 0) {
     await safeUpdateDeliveryLog(blockedId, 'failed', null, null, 'SSRF validation failed');
     return;
   }
+  if (!payload.id) payload = { ...payload, id: crypto.randomUUID() };
 
   const body = JSON.stringify(payload);
   const signature = buildSignatureHeader(Array.isArray(secrets) ? secrets : [secrets], body);
@@ -184,6 +238,14 @@ async function deliverWithRetry(webhookId, url, secrets, payload, attempt = 0) {
   const start = Date.now();
 
   try {
+    const statusCode = await httpsPost(url, body, signature, {
+      eventId: payload.id,
+      deliveryId: deliveryId || crypto.randomUUID(),
+      timestamp: Math.floor(Date.now() / 1000),
+      secret,
+    });
+    const responseTime = Date.now() - start;
+    await updateDeliveryLog(deliveryId, 'delivered', statusCode, responseTime, null);
     const statusCode = await httpsPost(url, body, signature, ssrfCheck.agent);
     await safeUpdateDeliveryLog(deliveryId, 'delivered', statusCode, Date.now() - start, null);
   } catch (err) {
@@ -193,6 +255,8 @@ async function deliverWithRetry(webhookId, url, secrets, payload, attempt = 0) {
     await safeUpdateDeliveryLog(deliveryId, 'failed', null, Date.now() - start, errMessage);
 
     if (attempt < MAX_ATTEMPTS - 1) {
+      await updateDeliveryLog(deliveryId, 'failed', statusCode, responseTime, err.message);
+      const delay = Math.pow(2, attempt) * 1000;
       // Transient failure — log a warning and schedule a retry
       logger.warn('Webhook delivery failed, retrying', {
         url,
@@ -298,6 +362,15 @@ async function deliver(event, userId, data) {
       await deliverWithRetry(wh.id || null, wh.url, activeSecrets(wh), payload);
     })
   );
+  const timestamp = Math.floor(Date.now() / 1000);
+  const payload = { id: crypto.randomUUID(), timestamp, event, data };
+  await Promise.all(rows.map((wh) => {
+    const plainSecret = decryptSecret(wh.secret);
+    return deliverWithRetry(wh.id, wh.url, plainSecret, payload);
+  }));
+}
+
+module.exports = { deliver, sign, retryDelivery, httpsPost, MAX_ATTEMPTS, WEBHOOK_TIMEOUT_MS };
 }
 
 module.exports = {

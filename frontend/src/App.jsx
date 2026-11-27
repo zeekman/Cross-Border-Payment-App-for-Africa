@@ -36,6 +36,7 @@ import UpdateBanner from "./components/UpdateBanner";
 
 // Code-split large pages
 const Analytics = React.lazy(() => import("./pages/Analytics"));
+const Ramp = React.lazy(() => import("./pages/Ramp"));
 const Swap = React.lazy(() => import("./pages/Swap"));
 const BatchPayment = React.lazy(() => import("./pages/BatchPayment"));
 const AdminDashboard = React.lazy(() => import("./pages/AdminDashboard"));
@@ -165,6 +166,7 @@ function AppRoutes() {
           <Route path="kyc" element={<KYCVerification />} />
           <Route path="webhooks" element={<Webhooks />} />
           <Route path="business" element={<BusinessSettings />} />
+          <Route path="ramp" element={<Suspense fallback={<LoadingFallback />}><Ramp /></Suspense>} />
           <Route path="swap" element={<Suspense fallback={<LoadingFallback />}><Swap /></Suspense>} />
           <Route path="referrals" element={<Referrals />} />
           <Route path="escrow" element={<Escrow />} />
