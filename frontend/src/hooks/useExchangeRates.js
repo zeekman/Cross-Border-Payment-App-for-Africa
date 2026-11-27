@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildCurrencies, convertFromXLM as convert } from '../utils/currency';
 import api from '../utils/api';
 import { useVisibleInterval } from './useVisibleInterval';
+import { useDataSaver, DATA_SAVER_RATES_INTERVAL_MS } from '../context/DataSaverContext';
 
 const TTL_MS = 60_000;
 
@@ -16,12 +17,29 @@ function parseRates(data) {
  * `rates` is empty and conversions return null rather than an invented value.
  */
 export function useExchangeRates() {
+  const { dataSaver } = useDataSaver();
+  const ttl = dataSaver ? DATA_SAVER_RATES_INTERVAL_MS : TTL_MS;
+  const ttlRef = useRef(ttl);
+  ttlRef.current = ttl;
+  const stored = readStoredRates();
+  const initialRates = mergeWithFallback(stored?.rates ?? {});
+
+  const [rates, setRates] = useState(initialRates);
+  const [usingApproximateRates, setUsingApproximateRates] = useState(true);
   const [rates, setRates] = useState({});
   const [supported, setSupported] = useState(null);
   const [error, setError] = useState(null);
   const ratesAt = useRef(0);
 
   const fetchRates = useCallback(async () => {
+    const now = Date.now();
+    if (fetchedAtRef.current && now - fetchedAtRef.current < ttlRef.current) {
+      setRates(lastGoodRef.current);
+      setUsingApproximateRates(false);
+      setError(null);
+      return;
+    }
+
     try {
       const parsed = parseRates((await api.get('/prices/xlm'))?.data);
       if (!parsed) throw new Error('Rates unavailable');
@@ -48,6 +66,9 @@ export function useExchangeRates() {
     })();
   }, [fetchRates]);
 
+  // Refresh on a timer, but not while the tab is hidden (and straight away on return).
+  // FE-204: every 10 minutes in data saver mode.
+  useVisibleInterval(fetchRates, ttl);
   useVisibleInterval(fetchRates, TTL_MS);
 
   const convertFromXLM = useCallback((amount, target) => convert(amount, target, rates), [rates]);

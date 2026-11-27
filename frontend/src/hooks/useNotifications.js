@@ -3,6 +3,7 @@ import { io } from 'socket.io-client';
 import api from '../utils/api';
 import { tokenStore, useAuth } from '../context/AuthContext';
 import { useVisibleInterval } from './useVisibleInterval';
+import { useDataSaver } from '../context/DataSaverContext';
 
 const POLL_INTERVAL_MS = 60000;
 const socketURL = (process.env.REACT_APP_API_URL || 'http://localhost:5000/api').replace(/\/api\/?$/, '');
@@ -14,6 +15,7 @@ const socketURL = (process.env.REACT_APP_API_URL || 'http://localhost:5000/api')
  */
 export function useNotifications() {
   const { user } = useAuth();
+  const { dataSaver } = useDataSaver();
   const [items, setItems] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [nextCursor, setNextCursor] = useState(null);
@@ -72,7 +74,7 @@ export function useNotifications() {
 
   // Polling is only a fallback for when the socket is down: skip it while the socket is
   // connected, and never poll in a hidden tab (returning to the tab refreshes immediately).
-  useVisibleInterval(refreshUnread, POLL_INTERVAL_MS, { enabled: Boolean(user) && !socketConnected });
+  useVisibleInterval(refreshUnread, POLL_INTERVAL_MS, { enabled: Boolean(user) && !socketConnected && !dataSaver });
 
   // Real-time updates; reconnect with a fresh token, disconnect on logout.
   useEffect(() => {

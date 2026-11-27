@@ -13,6 +13,8 @@ import { usePullToRefresh } from '../hooks/usePullToRefresh';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import { getQueueCountForUser } from '../utils/offlineDB';
 import { IS_TESTNET } from '../config/network';
+import { safeAnchorUrl } from '../utils/anchorUrl';
+import { useDataSaver } from '../context/DataSaverContext';
 
 
 function normalizeWalletsResponse(data) {
@@ -84,6 +86,7 @@ export function useDashboard() {
   const [transactionsError, setTransactionsError] = useState(false);
   const [queueCount, setQueueCount] = useState(0);
   const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
+  const { dataSaver } = useDataSaver();
   const { isOnline } = useOnlineStatus();
 
   // Email verification banner state (issue #479)
@@ -121,7 +124,7 @@ export function useDashboard() {
     isConnected,
     isReconnecting,
     error: streamError,
-  } = usePaymentStream(wallet?.public_key, handlePayment);
+  } = usePaymentStream(wallet?.public_key, handlePayment, { enabled: !dataSaver });
 
   const loadDashboard = useCallback(async (isRefresh = false) => {
     // Initial load shows full skeleton; manual refresh shows spinner on button only

@@ -1328,6 +1328,20 @@ async function sendStrictReceivePath(req, res, next) {
 const EXPORT_ROW_LIMIT = parseInt(process.env.EXPORT_ROW_LIMIT || "1000000", 10);
 const EXPORT_BATCH_SIZE = 500;
 
+// FE-206: fiat value of an XLM transaction at the rate captured when it was sent.
+const SNAPSHOT_CURRENCIES = ["USD", "NGN", "GHS", "KES"];
+function snapshotFiatColumns(tx, currency) {
+  const rate = Number(tx.fx_snapshot?.rates?.[currency]);
+  if (tx.asset !== "XLM" || !Number.isFinite(rate)) {
+    return { fiat_currency: currency, fiat_value_at_send_time: "", fx_rate_at_send_time: "" };
+  }
+  return {
+    fiat_currency: currency,
+    fiat_value_at_send_time: (parseFloat(tx.amount) * rate).toFixed(2),
+    fx_rate_at_send_time: rate,
+  };
+}
+
 async function exportCSV(req, res, next) {
   let client;
   try {
@@ -1358,8 +1372,12 @@ async function exportCSV(req, res, next) {
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
+    const fiatCurrency = SNAPSHOT_CURRENCIES.includes(String(req.query.currency || "").toUpperCase())
+      ? String(req.query.currency).toUpperCase()
+      : "USD";
     const stringifier = stringifyStream({
       header: true,
+      columns: ["date", "direction", "amount", "asset", "recipient_or_sender", "memo", "tx_hash", "status", "fiat_currency", "fiat_value_at_send_time", "fx_rate_at_send_time"],
       columns: ["date", "direction", "amount", "asset", "recipient_or_sender", "memo", "tx_hash", "status", "usd_value_at_send", "fx_rate_usd", "platform_fee", "network_fee_xlm"],
     });
     stringifier.pipe(res);
@@ -1378,6 +1396,7 @@ async function exportCSV(req, res, next) {
     await client.query("BEGIN");
     await client.query(
       `DECLARE ${cursorName} CURSOR FOR
+       SELECT created_at, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fx_snapshot
        SELECT created_at, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status, fx_snapshot, fee_snapshot
        FROM transactions
        WHERE (sender_wallet = $1 OR recipient_wallet = $1)${filters}
@@ -1399,6 +1418,7 @@ async function exportCSV(req, res, next) {
           memo: tx.memo || "",
           tx_hash: tx.tx_hash || "",
           status: tx.status,
+          ...snapshotFiatColumns(tx, fiatCurrency),
           usd_value_at_send: fiatValueAtSend(tx, "USD") ?? "rate unavailable",
           fx_rate_usd: tx.fx_snapshot?.rates?.USD ?? "",
           platform_fee: tx.fee_snapshot?.platform_fee_usdc ?? "",
@@ -1443,6 +1463,7 @@ async function getPaymentById(req, res, next) {
 
     const result = await db.query(
       `SELECT id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type,
+              tx_hash, status, created_at, ledger_close_time, fee_breakdown, fx_snapshot
               tx_hash, status, created_at, ledger_close_time, fee_breakdown, fx_snapshot, fee_snapshot
        FROM transactions
        WHERE id = $1 AND (sender_wallet = ANY($2) OR recipient_wallet = ANY($2))`,

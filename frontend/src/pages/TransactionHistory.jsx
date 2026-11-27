@@ -8,6 +8,9 @@ import api from '../utils/api';
 import { useWallet } from '../context/WalletContext';
 import { explorerTxUrl } from '../config/network';
 import { truncateAddress } from '../utils/currency';
+import { fiatValueForTx, fiatTooltip } from '../utils/fxSnapshot';
+import { useCurrency } from '../context/CurrencyContext';
+import { useExchangeRates } from '../hooks/useExchangeRates';
 import { TransactionCardSkeleton } from '../components/Skeleton';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { setCacheEntry, getCacheEntry } from '../utils/offlineDB';
@@ -61,6 +64,8 @@ export default function TransactionHistory() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { t } = useTranslation();
   const { isOnline } = useOnlineStatus();
+  const { displayCurrency } = useCurrency() || {};
+  const { rates } = useExchangeRates();
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -285,6 +290,8 @@ export default function TransactionHistory() {
       if (dateTo) params.to = dateTo;
       if (asset) params.asset = asset;
       if (filter !== 'all') params.direction = filter;
+      // FE-206: include the fiat value at send time in this currency.
+      if (displayCurrency && displayCurrency !== 'XLM') params.currency = displayCurrency;
       const res = await api.get('/payments/export', { params, responseType: 'blob' });
       const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
       const a = document.createElement('a');
@@ -607,9 +614,9 @@ export default function TransactionHistory() {
       ) : (
         <>
           <FixedSizeList
-            height={Math.min(filtered.length * 100, 600)}
+            height={Math.min(filtered.length * 116, 600)}
             itemCount={filtered.length}
-            itemSize={100}
+            itemSize={116}
             width="100%"
             overscanCount={5}
           >
@@ -618,7 +625,7 @@ export default function TransactionHistory() {
               return (
                 <div style={style} key={tx.id} className="pb-3">
                   <button
-                    onClick={() => setSelectedTx(tx)}
+                    onClick={() => navigate(`/history/${tx.id}`)}
                     className="w-full bg-gray-900 rounded-xl p-4 hover:bg-gray-800 transition-colors text-left"
                   >
                     <div className="flex items-start gap-3">
@@ -643,6 +650,15 @@ export default function TransactionHistory() {
                             {tx.amount} {tx.asset}
                           </span>
                         </div>
+                        {(() => {
+                          const fiat = fiatValueForTx(tx, displayCurrency, rates);
+                          if (!fiat) return null;
+                          return (
+                            <p data-testid="tx-fiat" className="text-[11px] text-gray-500 text-right" title={fiatTooltip(fiat, displayCurrency)}>
+                              ≈ {fiat.formatted} {fiat.atSendTime ? 'at time of transfer' : "at today's rate (rate at send time unavailable)"}
+                            </p>
+                          );
+                        })()}
                         <p className="text-xs text-gray-500 mt-0.5">
                           {tx.direction === 'sent'
                             ? `${t('history.to')} ${truncateAddress(tx.recipient_wallet)}`

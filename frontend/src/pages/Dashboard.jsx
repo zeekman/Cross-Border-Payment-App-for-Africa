@@ -111,7 +111,7 @@ export default function Dashboard() {
   const [walletError, setWalletError] = useState(false);
   const [transactionsError, setTransactionsError] = useState(false);
   const [queueCount, setQueueCount] = useState(0);
-  const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
+  const { rates, currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
   const { isOnline } = useOnlineStatus();
 
   // Email verification banner state (issue #479)
@@ -526,7 +526,7 @@ export default function Dashboard() {
         onSuccess={() => updateUser({ pin_setup_completed: true })}
       />
 
-      <RecentTransactions navigate={navigate} t={t} activeWalletId={activeWalletId} transactions={transactions} txError={txError} loading={loading} refreshing={refreshing} anchorLoading={anchorLoading} transactionsError={transactionsError} loadDashboard={loadDashboard} handleAnchorAction={handleAnchorAction} />
+      <RecentTransactions navigate={navigate} t={t} displayCurrency={selectedCurrency} rates={rates} activeWalletId={activeWalletId} transactions={transactions} txError={txError} loading={loading} refreshing={refreshing} anchorLoading={anchorLoading} transactionsError={transactionsError} loadDashboard={loadDashboard} handleAnchorAction={handleAnchorAction} />
     </div>
   );
 }

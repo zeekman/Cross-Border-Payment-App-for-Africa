@@ -32,6 +32,7 @@ import ManageAssets from '../components/profile/ManageAssets';
 import TwoFactorAuth from '../components/profile/TwoFactorAuth';
 import ImportHistory from '../components/profile/ImportHistory';
 import CloseAccount from '../components/profile/CloseAccount';
+import { useDataSaver } from '../context/DataSaverContext';
 
 const SecuritySigners = lazy(() => import('../components/profile/SecuritySigners'));
 
@@ -45,6 +46,7 @@ const LANGUAGES = [
 
 export default function Profile() {
   const { user, logout, updateUser } = useAuth();
+  const { dataSaver, setDataSaver } = useDataSaver();
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const [copied, setCopied] = useState(false);
@@ -374,6 +376,25 @@ export default function Profile() {
       <Suspense fallback={null}><SecuritySigners /></Suspense>
 
       <ImportHistory />
+
+      {/* Preferences: data saver (FE-204) */}
+      <div className="bg-gray-900 rounded-2xl p-5">
+        <h3 className="font-semibold text-white mb-3">Preferences</h3>
+        <label className="flex items-center justify-between gap-3 cursor-pointer">
+          <span>
+            <span className="block text-sm text-white">Data saver</span>
+            <span className="block text-xs text-gray-500">Pause live streams and background refreshes to save mobile data.</span>
+          </span>
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label="Data saver"
+            checked={dataSaver}
+            onChange={(e) => setDataSaver(e.target.checked)}
+            className="accent-primary-500 w-5 h-5"
+          />
+        </label>
+      </div>
 
       {/* Notification Preferences */}
       {'serviceWorker' in navigator && 'PushManager' in window && (() => {
