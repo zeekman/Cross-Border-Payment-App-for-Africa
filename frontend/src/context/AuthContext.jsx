@@ -95,6 +95,9 @@ export function AuthProvider({ children }) {
     return res.data;
   };
 
+  // Registration does not establish a session (email verification comes first),
+  // so the full response is returned — including phone_verification_token, which
+  // the phone-OTP step needs to authenticate POST /auth/verify-phone (FE-190).
   const register = async (data) => {
     const res = await api.post('/auth/register', data);
     return res.data;
@@ -125,8 +128,16 @@ export function AuthProvider({ children }) {
 
   const updateUser = (fields) => setUser((prev) => (prev ? { ...prev, ...fields } : fields));
 
+  // Re-fetch the current account so phone_verified (and other server-side
+  // flags) reflect the latest state after verification (FE-191).
+  const refreshUser = async () => {
+    const res = await api.get('/auth/me');
+    setUser(res.data);
+    return res.data;
+  };
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, updateUser }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, updateUser, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

@@ -23,7 +23,7 @@ async function loadRules() {
   }
 
   const { rows } = await db.query(
-    `SELECT id, name, rule_type, parameters, mode FROM fraud_rules WHERE is_active = true`
+    `SELECT id, name, rule_type, parameters, mode, action FROM fraud_rules WHERE is_active = true`
   );
   lastKnownRules = rows;
   await cache.set(RULES_CACHE_KEY, rows, RULES_CACHE_TTL);
@@ -170,6 +170,7 @@ async function checkFraud(walletAddress, amount, asset, paymentId = null) {
         blocked: true,
         rule: rule.name,
         rule_type: rule.rule_type,
+        action: rule.action || 'block',
         message: result.message,
         retry_after: result.retry_after,
         message: result.message,
@@ -197,8 +198,10 @@ async function checkVelocity(walletAddress) {
   return parseInt(rows[0].count, 10) >= maxTx;
 }
 
-async function checkDailyLimit(walletAddress, amount, asset) {
-  const limitUsd = parseFloat(process.env.FRAUD_DAILY_LIMIT_USD || '1000');
+async function checkDailyLimit(walletAddress, amount, asset, configuredLimitUsd = null) {
+  const limitUsd = configuredLimitUsd == null
+    ? parseFloat(process.env.FRAUD_DAILY_LIMIT_USD || '1000')
+    : Number(configuredLimitUsd);
   const windowHours = parseInt(process.env.DAILY_LIMIT_WINDOW_HOURS || '24', 10);
   const { rows } = await db.query(
     `SELECT COALESCE(SUM(amount), 0) AS total FROM transactions

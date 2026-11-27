@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const { MemoryStore } = require('express-rate-limit');
 const Redis = require('ioredis');
@@ -71,6 +72,13 @@ function getRateLimiterStatus() {
     payment: degradedState.has('payment') ? 'memory-fallback' : 'redis',
     read: degradedState.has('read') ? 'memory-fallback' : 'redis',
     admin: degradedState.has('admin') ? 'memory-fallback' : 'redis',
+    'email-send-ip': degradedState.has('email-send-ip') ? 'memory-fallback' : 'redis',
+    'email-send-addr': degradedState.has('email-send-addr') ? 'memory-fallback' : 'redis',
+    'token-verify': degradedState.has('token-verify') ? 'memory-fallback' : 'redis',
+    'second-factor': degradedState.has('second-factor') ? 'memory-fallback' : 'redis',
+    'phone-otp-verify': degradedState.has('phone-otp-verify') ? 'memory-fallback' : 'redis',
+    'sms-send': degradedState.has('sms-send') ? 'memory-fallback' : 'redis',
+    'auth-action': degradedState.has('auth-action') ? 'memory-fallback' : 'redis',
   };
 }
 
@@ -145,6 +153,15 @@ function makeKeyByUser(req) {
   return req.user?.userId || getTrustedIp(req);
 }
 
+// Keys by the target email address (hashed so raw addresses never land in
+// Redis keys). Falls back to the IP when the body carries no email.
+function makeKeyByEmail(req) {
+  const raw = req.body?.email || req.body?.new_email;
+  if (typeof raw !== 'string' || !raw.trim()) return `ip:${getTrustedIp(req)}`;
+  const normalized = raw.trim().toLowerCase();
+  return crypto.createHash('sha256').update(normalized).digest('hex');
+}
+
 function makeKeyByAdmin(req) {
   return req.user?.userId || getTrustedIp(req);
 }
@@ -173,8 +190,15 @@ function makeHeaders(req, res, rateLimitInfo) {
 const WINDOW_1MIN = 60 * 1000;
 const WINDOW_1MIN_SEC = 60;
 
+// Marks a middleware as a rate limiter so route-coverage tests can assert
+// every auth route mounts one (BE-194).
+function tagLimiter(fn) {
+  fn.isRateLimiter = true;
+  return fn;
+}
+
 // Auth endpoints: 5 req/min per IP
-const authLimiter = rateLimit({
+const authLimiter = tagLimiter(rateLimit({
   windowMs: WINDOW_1MIN,
   max: 5,
   keyGenerator: makeKeyByIp,
@@ -187,7 +211,7 @@ const authLimiter = rateLimit({
     res.status(429).json({ error: 'Too many auth attempts. Please try again later.' });
   },
   message: { error: 'Too many auth attempts. Please try again later.' },
-});
+}));
 
 // Payment submission: 10 req/min per authenticated user
 const paymentLimiter = rateLimit({
@@ -235,6 +259,124 @@ const exportKeyLimiter = rateLimit({
     makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
     res.status(429).json({ error: 'Too many export attempts. Please try again later.' });
   },
+});
+
+// Phone OTP verification: 5 attempts/15min per user. A 6-digit OTP is live for
+// 10 minutes, so without this it could be brute-forced (BE-197).
+const phoneOtpLimiter = rateLimit({
+  windowMs: WINDOW_15MIN,
+  max: 5,
+  keyGenerator: makeKeyByUser,
+  store: new RedisStore(WINDOW_15MIN, 'phone-otp'),
+  standardHeaders: false,
+  legacyHeaders: false,
+  handler(req, res, next, options) {
+    onLimitReached(req, res, options);
+    makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
+    res.status(429).json({ error: 'Too many verification attempts. Please try again later.' });
+  },
+});
+
+// Data-subject requests (export / account deletion): 3 req/hour per user
+// (BE-232). Each export builds a full archive of the user's data.
+const WINDOW_1HOUR = 60 * 60 * 1000;
+const dsarLimiter = rateLimit({
+  windowMs: WINDOW_1HOUR,
+  max: 3,
+  keyGenerator: makeKeyByUser,
+  store: new RedisStore(WINDOW_1HOUR, 'dsar'),
+  standardHeaders: false,
+  legacyHeaders: false,
+  handler(req, res, next, options) {
+    onLimitReached(req, res, options);
+    makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
+    res.status(429).json({ error: 'Too many data requests. Please try again later.' });
+  },
+// ── Named per-route auth limiters (BE-194) ─────────────────────────────────
+// Mounted next to each route in routes/auth.js so a new auth route can't be
+// added without an explicit limiter. Per-user limiters must be mounted after
+// authMiddleware so req.user is populated; unauthenticated callers fall back
+// to the trusted IP.
+const WINDOW_5MIN = 5 * 60 * 1000;
+const WINDOW_1HOUR = 60 * 60 * 1000;
+
+function buildLimiter({ windowMs, max, prefix, keyGenerator, error, limitedResponse }) {
+  return tagLimiter(rateLimit({
+    windowMs,
+    max,
+    keyGenerator,
+    store: new RedisStore(windowMs, prefix),
+    standardHeaders: false,
+    legacyHeaders: false,
+    handler(req, res, next, options) {
+      onLimitReached(req, res, options);
+      if (limitedResponse) {
+        // Endpoints that must not reveal account existence (forgot-password)
+        // answer with the same generic 200 they always return, but do no work.
+        return res.status(200).json(limitedResponse);
+      }
+      makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
+      res.status(429).json({ error });
+    },
+  }));
+}
+
+// Email-sending endpoints: 3/hour per target address AND 20/hour per IP.
+// Pass `limitedResponse` to return a generic 200 instead of a 429.
+function createEmailSendLimiter({ limitedResponse } = {}) {
+  const error = 'Too many email requests. Please try again later.';
+  return [
+    buildLimiter({ windowMs: WINDOW_1HOUR, max: 20, prefix: 'email-send-ip', keyGenerator: makeKeyByIp, error, limitedResponse }),
+    buildLimiter({ windowMs: WINDOW_1HOUR, max: 3, prefix: 'email-send-addr', keyGenerator: makeKeyByEmail, error, limitedResponse }),
+  ];
+}
+const emailSendLimiter = createEmailSendLimiter();
+
+// Token-guessing surfaces (reset-password, verify-email): 10/min per IP.
+const tokenVerifyLimiter = buildLimiter({
+  windowMs: WINDOW_1MIN,
+  max: 10,
+  prefix: 'token-verify',
+  keyGenerator: makeKeyByIp,
+  error: 'Too many verification attempts. Please try again later.',
+});
+
+// Second-factor checks (PIN, TOTP, phone OTP, WebAuthn): 10/5min per user.
+const secondFactorLimiter = buildLimiter({
+  windowMs: WINDOW_5MIN,
+  max: 10,
+  prefix: 'second-factor',
+  keyGenerator: makeKeyByUser,
+  error: 'Too many verification attempts. Please try again later.',
+});
+
+// Phone OTP verification: additionally 10/hour per user (BE-193).
+const phoneOtpVerifyLimiter = buildLimiter({
+  windowMs: WINDOW_1HOUR,
+  max: 10,
+  prefix: 'phone-otp-verify',
+  keyGenerator: makeKeyByUser,
+  error: 'Too many OTP attempts. Please try again later.',
+});
+
+// SMS-sending endpoints: 5/hour per user (the controller also enforces the
+// per-send cooldown and daily caps — BE-195).
+const smsSendLimiter = buildLimiter({
+  windowMs: WINDOW_1HOUR,
+  max: 5,
+  prefix: 'sms-send',
+  keyGenerator: makeKeyByUser,
+  error: 'Too many SMS requests. Please try again later.',
+});
+
+// Remaining account actions (refresh, logout, profile/2FA setup, etc.):
+// 30/min per user, falling back to IP.
+const authActionLimiter = buildLimiter({
+  windowMs: WINDOW_1MIN,
+  max: 30,
+  prefix: 'auth-action',
+  keyGenerator: makeKeyByUser,
+  error: 'Too many requests. Please try again later.',
 });
 
 // Per-user PIN/TOTP failure tracking for secret-key export (#1177).
@@ -355,6 +497,15 @@ module.exports = {
   paymentLimiter,
   readLimiter,
   exportKeyLimiter,
+  phoneOtpLimiter,
+  dsarLimiter,
+  emailSendLimiter,
+  createEmailSendLimiter,
+  tokenVerifyLimiter,
+  secondFactorLimiter,
+  phoneOtpVerifyLimiter,
+  smsSendLimiter,
+  authActionLimiter,
   RedisStore,
   getRateLimiterStatus,
   getTrustedIp,

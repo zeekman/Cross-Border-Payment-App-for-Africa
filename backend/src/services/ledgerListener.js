@@ -5,6 +5,7 @@ const cache = require('../utils/cache');
 const { wsConnections } = require('../utils/metrics');
 const metrics = require('../utils/metrics');
 const ledgerState = require('./ledgerListenerState');
+const { baseAccountAddress } = require('../utils/stellarAddress');
 
 const server = new StellarSdk.Horizon.Server(
   process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org'
@@ -334,7 +335,7 @@ function handleGlobalPayment(payment) {
   healthState.last_event_at = new Date().toISOString();
   cache.set('ledger:cursor:pay:global', payment.paging_token, 3600).catch(() => {});
   if (payment.type !== 'payment') return;
-  const to = payment.to;
+  const to = baseAccountAddress(payment.to_muxed || payment.to);
   const watchedBySocket = accountRefs.has(to);
   const pushUserId = pushTargets.get(to);
   if (!watchedBySocket && !pushUserId) return;
@@ -346,6 +347,7 @@ function handleGlobalPayment(payment) {
   if (watchedBySocket && io) {
     io.to(to).emit('payment:received', {
       from, to, amount, asset,
+      to_muxed_id: payment.to_muxed_id || null,
       hash: payment.transaction_hash,
       timestamp: payment.created_at,
     });
@@ -356,7 +358,7 @@ function handleGlobalPayment(payment) {
     sendPushToUser(pushUserId, {
       title: 'Payment Received',
       body: `You received ${amount} ${asset}`,
-      data: { from, amount, asset, txHash: payment.transaction_hash },
+      data: { from, amount, asset, to_muxed_id: payment.to_muxed_id || null, txHash: payment.transaction_hash },
     }).catch((err) => logger.warn('Push send failed', { userId: pushUserId, error: err.message }));
   }
   logger.info('Payment received', { to, amount, asset, from });

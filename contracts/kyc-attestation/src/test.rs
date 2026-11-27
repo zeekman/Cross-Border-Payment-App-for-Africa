@@ -715,6 +715,7 @@ fn test_new_admin_can_propose_next_rotation() {
     advance(&env, ADMIN_ROTATION_DELAY);
     client.accept_admin(&next_admin);
     assert_eq!(client.get_admin(), next_admin);
+}
 // ── SC-200 (#1454): single-key storage + migration ────────────────────────────
 
 /// Seeds the pre-migration layout directly into contract storage: a record under
@@ -803,7 +804,8 @@ fn test_migrate_copies_attestation_by_tier_and_clears_legacy_keys() {
     // Before migration the tiered key is absent.
     assert!(!tiered_key_present(&env, &contract_id, &user, &KycTier::Enhanced));
 
-    client.migrate(&admin);
+    let users = soroban_sdk::Vec::from_array(&env, [user.clone()]);
+    client.migrate(&admin, &users);
 
     // Record now readable through the single source of truth.
     let record = client.get_attestation(&user, &KycTier::Enhanced);
@@ -834,7 +836,8 @@ fn test_migrate_preserves_revoked_state() {
     };
     seed_legacy_layout(&env, &contract_id, &user, KycTier::Basic, &legacy);
 
-    client.migrate(&admin);
+    let users = soroban_sdk::Vec::from_array(&env, [user.clone()]);
+    client.migrate(&admin, &users);
 
     let record = client.get_attestation(&user, &KycTier::Basic);
     assert_eq!(record.revoked_at, revoked_at);
@@ -863,7 +866,8 @@ fn test_migrate_does_not_clobber_existing_tiered_record() {
     };
     seed_legacy_layout(&env, &contract_id, &user, &KycTier::Basic, &stale);
 
-    client.migrate(&admin);
+    let users = soroban_sdk::Vec::from_array(&env, [user.clone()]);
+    client.migrate(&admin, &users);
 
     let after = client.get_attestation(&user, &KycTier::Basic);
     assert_eq!(after.kyc_hash, current.kyc_hash);
@@ -971,4 +975,69 @@ fn test_batch_revoked_event_payload() {
     let event = KycBatchRevokedEvent::try_from_val(&env, &data).unwrap();
     assert_eq!(event.admin, admin);
     assert_eq!(event.count, 2);
+}
+
+// ── max validity policy ───────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "expires_at must be set when tier max validity is configured")]
+fn test_attest_zero_expiry_panics_when_tier_has_max_validity() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+    let max_validity = 365u64 * 24 * 60 * 60;
+
+    client.set_max_validity(&admin, &KycTier::Basic, &max_validity);
+    client.attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+}
+
+#[test]
+#[should_panic(expected = "expires_at exceeds tier max validity")]
+fn test_attest_beyond_max_validity_panics() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+    let max_validity = 365u64 * 24 * 60 * 60;
+
+    client.set_max_validity(&admin, &KycTier::Enhanced, &max_validity);
+    let expires_at = env.ledger().timestamp() + max_validity + 1;
+    client.attest(&admin, &user, &KycTier::Enhanced, &hash(&env), &expires_at);
+}
+
+#[test]
+fn test_get_and_set_max_validity_policy() {
+    let (env, client, admin) = setup();
+
+    assert_eq!(client.get_max_validity(&KycTier::Basic), 0);
+
+    let basic_max = 2u64 * 365 * 24 * 60 * 60;
+    let enhanced_max = 365u64 * 24 * 60 * 60;
+    client.set_max_validity(&admin, &KycTier::Basic, &basic_max);
+    client.set_max_validity(&admin, &KycTier::Enhanced, &enhanced_max);
+
+    assert_eq!(client.get_max_validity(&KycTier::Basic), basic_max);
+    assert_eq!(client.get_max_validity(&KycTier::Enhanced), enhanced_max);
+    assert_eq!(client.get_max_validity(&KycTier::Business), 0);
+}
+
+#[test]
+fn test_attest_at_max_validity_succeeds() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+    let max_validity = 365u64 * 24 * 60 * 60;
+
+    client.set_max_validity(&admin, &KycTier::Business, &max_validity);
+    let expires_at = env.ledger().timestamp() + max_validity;
+    client.attest(&admin, &user, &KycTier::Business, &hash(&env), &expires_at);
+
+    let record = client.get_attestation(&user, &KycTier::Business);
+    assert_eq!(record.expires_at, expires_at);
+}
+
+#[test]
+fn test_max_validity_zero_means_unlimited() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+
+    client.set_max_validity(&admin, &KycTier::Basic, &0);
+    client.attest(&admin, &user, &KycTier::Basic, &hash(&env), &0);
+    assert!(client.is_verified(&user, &KycTier::Basic));
 }

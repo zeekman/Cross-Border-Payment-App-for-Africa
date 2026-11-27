@@ -12,6 +12,7 @@
  */
 
 const StellarSdk = require("@stellar/stellar-sdk");
+const { toApiError } = require("../utils/sorobanErrors");
 
 const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
@@ -106,13 +107,13 @@ async function depositFee(feeAmount, tokenId, source = null) {
 
   const result = await rpc.sendTransaction(prepared);
   if (result.status === "ERROR") {
-    throw new Error(`deposit_fee failed: ${result.errorResult}`);
+    throw toApiError(result, 'feeDistributor');
   }
 
   const response = await waitForSorobanTx(rpc, result);
 
   if (response.status !== "SUCCESS") {
-    throw new Error(`Transaction failed: ${response.status}`);
+    throw toApiError(response, 'feeDistributor');
   }
 
   return result.hash;

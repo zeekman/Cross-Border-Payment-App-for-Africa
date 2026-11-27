@@ -33,28 +33,30 @@ services:
       retries: 5
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      target: dev
     restart: unless-stopped
     ports:
       - "5000:5000"
+    env_file:
+      - ./backend/.env
     volumes:
       - ./backend/src:/app/src  # Hot reload
-      - ./backend/database:/app/database
+      - ./database:/database:ro
+      - backend_uploads:/app/uploads  # KYC docs, support attachments, avatars
       - /app/node_modules
     environment:
       DATABASE_URL: postgres://cbpa:cbpa_dev_password@postgres:5432/cbpa
       REDIS_URL: redis://redis:6379
-      # Add other envs as needed
+      MIGRATIONS_DIR: /database/migrations
+      NODE_ENV: development
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: >
-      sh -c "
-        npm run migrate &&
-        npm run dev
-      "
+    command: sh -c "npm run migrate && npm run dev"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/health"]
       interval: 30s
@@ -85,4 +87,5 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  backend_uploads:
 

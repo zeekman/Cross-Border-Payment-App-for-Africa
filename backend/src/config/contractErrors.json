@@ -1,0 +1,58 @@
+{
+  "_doc": "BE-220: Soroban contract failure -> API error mapping. Keys under each contract are contract error numbers (Error(Contract, #N)); 'panics' maps lowercase panic-message substrings. 'common' applies to every contract.",
+  "common": {
+    "panics": {
+      "contract is paused": { "http": 503, "code": "CONTRACT_PAUSED", "message": "The contract is temporarily paused" },
+      "paused": { "http": 503, "code": "CONTRACT_PAUSED", "message": "The contract is temporarily paused" },
+      "unauthorized": { "http": 403, "code": "CONTRACT_UNAUTHORIZED", "message": "Not authorized for this contract operation" },
+      "not authorized": { "http": 403, "code": "CONTRACT_UNAUTHORIZED", "message": "Not authorized for this contract operation" },
+      "already initialized": { "http": 409, "code": "CONTRACT_ALREADY_INITIALIZED", "message": "Contract is already initialized" },
+      "not initialized": { "http": 503, "code": "CONTRACT_NOT_INITIALIZED", "message": "Contract is not initialized" },
+      "insufficient balance": { "http": 409, "code": "INSUFFICIENT_BALANCE", "message": "Insufficient balance for this operation" },
+      "amount must be positive": { "http": 400, "code": "INVALID_AMOUNT", "message": "Amount must be greater than zero" },
+      "invalid amount": { "http": 400, "code": "INVALID_AMOUNT", "message": "Invalid amount" }
+    }
+  },
+  "agentEscrow": {
+    "codes": {
+      "1": { "http": 409, "code": "ESCROW_ALREADY_EXISTS", "message": "Escrow already exists" },
+      "2": { "http": 404, "code": "ESCROW_NOT_FOUND", "message": "Escrow not found" },
+      "3": { "http": 409, "code": "ESCROW_EXPIRED", "message": "Escrow has expired" },
+      "4": { "http": 409, "code": "ESCROW_NOT_PENDING", "message": "Escrow is not pending" },
+      "5": { "http": 409, "code": "ESCROW_NOT_EXPIRED", "message": "Escrow has not expired yet" }
+    },
+    "panics": {
+      "escrow expired": { "http": 409, "code": "ESCROW_EXPIRED", "message": "Escrow has expired" },
+      "escrow not found": { "http": 404, "code": "ESCROW_NOT_FOUND", "message": "Escrow not found" },
+      "escrow already exists": { "http": 409, "code": "ESCROW_ALREADY_EXISTS", "message": "Escrow already exists" },
+      "not pending": { "http": 409, "code": "ESCROW_NOT_PENDING", "message": "Escrow is not pending" },
+      "not expired": { "http": 409, "code": "ESCROW_NOT_EXPIRED", "message": "Escrow has not expired yet" },
+      "kyc": { "http": 403, "code": "KYC_REQUIRED", "message": "KYC verification is required" }
+    }
+  },
+  "disputeResolution": {
+    "panics": {
+      "dispute not found": { "http": 404, "code": "DISPUTE_NOT_FOUND", "message": "Dispute not found" },
+      "already resolved": { "http": 409, "code": "DISPUTE_ALREADY_RESOLVED", "message": "Dispute is already resolved" },
+      "dispute already exists": { "http": 409, "code": "DISPUTE_ALREADY_EXISTS", "message": "Dispute already exists" }
+    }
+  },
+  "feeDistributor": {
+    "panics": {
+      "insufficient pool": { "http": 409, "code": "INSUFFICIENT_POOL_BALANCE", "message": "Insufficient fee pool balance" },
+      "no recipients": { "http": 409, "code": "NO_FEE_RECIPIENTS", "message": "No fee recipients configured" }
+    }
+  },
+  "kycAttestation": {
+    "panics": {
+      "not attested": { "http": 403, "code": "KYC_REQUIRED", "message": "KYC verification is required" },
+      "attestation expired": { "http": 403, "code": "KYC_EXPIRED", "message": "KYC attestation has expired" },
+      "revoked": { "http": 403, "code": "KYC_REVOKED", "message": "KYC attestation was revoked" }
+    }
+  },
+  "loyaltyToken": {
+    "panics": {
+      "insufficient points": { "http": 409, "code": "INSUFFICIENT_POINTS", "message": "Insufficient loyalty points" }
+    }
+  }
+}

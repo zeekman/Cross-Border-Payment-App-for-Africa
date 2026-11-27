@@ -27,3 +27,23 @@ history/blame is intact — see git log).
 
 CI enforces this: `backend/scripts/check-migration-prefixes.js` fails the
 build if any two migration files share a numeric prefix.
+
+## One-time rename note (BE-207)
+
+These files were renamed so every prefix is unique and numeric. Environments
+that already ran them under the old name must update `pgmigrations` once,
+**before** the next `npm run migrate`:
+
+```sql
+UPDATE pgmigrations SET name = '1710000085500_add_transaction_confirmation_expiry'
+  WHERE name = '1710000085000_add_transaction_confirmation_expiry';
+UPDATE pgmigrations SET name = '20260928140000_add_suspension_indexes'
+  WHERE name = '20260928_add_suspension_indexes';
+UPDATE pgmigrations SET name = '20261125000000_add_family_id_to_sessions'
+  WHERE name = 'add_family_id_to_sessions';
+```
+
+Both former `.sql` migrations are now JS with an `exports.down`, and no
+migration may contain its own `BEGIN`/`COMMIT` (node-pg-migrate already wraps
+each one in a transaction). Prefixes must be 13-digit (ms epoch) or 14-digit
+(`YYYYMMDDHHMMSS`); short prefixes like `20260928_` are rejected by CI.

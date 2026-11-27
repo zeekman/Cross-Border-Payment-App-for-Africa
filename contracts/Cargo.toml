@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "afripay-types",
     "agent-escrow",
     "dispute-resolution",
     "escrow",

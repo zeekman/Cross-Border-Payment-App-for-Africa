@@ -5,10 +5,20 @@ const { defineConfig, devices } = require('@playwright/test');
  */
 module.exports = defineConfig({
   testDir: './tests',
-  // Only the smoke suite is active. The remaining legacy specs reference
-  // selectors/routes that no longer exist (FE-175) and are to be rewritten
-  // with accessible locators and added here one at a time.
-  testMatch: ['smoke.spec.js'],
+  // Smoke suite plus one spec per step-up money flow (FE-219). Each money-flow
+  // spec registers, verifies, sets a PIN, funds via /dev/fund-wallet and then
+  // exercises the flow against the real backend, asserting the step-up and
+  // idempotency headers on every money POST.
+  testMatch: [
+    'smoke.spec.js',
+    'money-flow-send.spec.js',
+    'money-flow-path-send.spec.js',
+    'money-flow-swap.spec.js',
+    'money-flow-escrow.spec.js',
+    'money-flow-batch.spec.js',
+    'money-flow-savings.spec.js',
+    'money-flow-scheduled.spec.js',
+  ],
   /* Run tests in files in parallel */
   fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
@@ -27,8 +37,9 @@ module.exports = defineConfig({
     /* Base URL to use in actions like `await page.goto('/')`. */
     baseURL: process.env.E2E_BASE_URL || 'http://localhost:3000',
     
-    /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
-    trace: 'on-first-retry',
+    /* Collect trace on the first retry locally; always record on CI so a trace
+       is uploaded for every failing test. See https://playwright.dev/docs/trace-viewer */
+    trace: process.env.CI ? 'on' : 'on-first-retry',
     
     /* Take screenshot on failure */
     screenshot: 'only-on-failure',
@@ -76,11 +87,15 @@ module.exports = defineConfig({
       env: {
         NODE_ENV: 'test',
         DATABASE_URL: process.env.E2E_DATABASE_URL || 'postgresql://postgres:password@localhost:5432/cbpa_test',
-        STELLAR_NETWORK: 'testnet',
-        STELLAR_HORIZON_URL: 'https://horizon-testnet.stellar.org',
+        // 'mock' keeps CI hermetic; set E2E_STELLAR_NETWORK=testnet to run
+        // against the real testnet horizon (docker-compose services).
+        STELLAR_NETWORK: process.env.E2E_STELLAR_NETWORK || 'mock',
+        STELLAR_HORIZON_URL: process.env.E2E_STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org',
         JWT_SECRET: 'test-jwt-secret-key-for-e2e-tests',
-        FRONTEND_URL: 'http://localhost:3000',
+        FRONTEND_URL: process.env.E2E_BASE_URL || 'http://localhost:3000',
         EMAIL_ENABLED: 'false',
+        // Test mode lets the verify step bypass email confirmation.
+        E2E_TEST_MODE: 'true',
         REDIS_URL: process.env.E2E_REDIS_URL || 'redis://localhost:6379/1'
       }
     },
@@ -93,8 +108,8 @@ module.exports = defineConfig({
       env: {
         BROWSER: 'none',
         PORT: '3000',
-        REACT_APP_API_URL: 'http://localhost:5000/api',
-        REACT_APP_STELLAR_NETWORK: 'testnet'
+        REACT_APP_API_URL: process.env.E2E_API_URL || 'http://localhost:5000/api',
+        REACT_APP_STELLAR_NETWORK: process.env.E2E_STELLAR_NETWORK || 'mock'
       }
     }
   ],

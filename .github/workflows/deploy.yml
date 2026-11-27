@@ -1,6 +1,115 @@
 name: Deploy
 
 on:
+  workflow_run:
+    workflows: [ CI ]
+    types: [ completed ]
+    branches: [ main ]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    name: Run Database Migrations
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    environment: production
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: backend/package-lock.json
+
+    - name: Migrate
+      env:
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      run: |
+        cd backend
+        npm ci
+        npm run migrate
+
+  deploy-backend:
+    runs-on: ubuntu-latest
+    name: Deploy Backend
+    needs: migrate
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    # Railway example (replace with your platform)
+    - name: Deploy to Railway
+      uses: railwayapp/action@v1
+      with:
+        railwayToken: ${{ secrets.RAILWAY_TOKEN }}
+        serviceId: ${{ secrets.RAILWAY_BACKEND_SERVICE_ID }}
+        source: backend/
+    
+    # Render example alternative
+    # - name: Deploy to Render
+    #   uses: johnbeynon/render-deploy-action@v0.0.8
+    #   with:
+    #     service-id: ${{ secrets.RENDER_SERVICE_ID }}
+    #     api-key: ${{ secrets.RENDER_API_KEY }}
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    name: Deploy Frontend
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    - name: Build Frontend
+      run: |
+        cd frontend
+        npm ci
+        npm run build
+    
+    # Railway example
+    - name: Deploy to Railway  
+      uses: railwayapp/action@v1
+      with:
+        railwayToken: ${{ secrets.RAILWAY_TOKEN }}
+        serviceId: ${{ secrets.RAILWAY_FRONTEND_SERVICE_ID }}
+        source: frontend/
+    
+    # Vercel example alternative
+    # - name: Deploy to Vercel
+    #   uses: amondnet/vercel-action@v25
+    #   with:
+    #     vercel-token: ${{ secrets.VERCEL_TOKEN }}
+    #     vercel-org-id: ${{ secrets.ORG_ID }}
+    #     vercel-project-id: ${{ secrets.PROJECT_ID }}
+name: Deploy
+
+on:
   push:
     branches: [ main ]
 

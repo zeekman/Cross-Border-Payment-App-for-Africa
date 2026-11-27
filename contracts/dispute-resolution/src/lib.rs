@@ -19,7 +19,9 @@
 //!
 //! ## Flow (single-arbitrator path)
 //! 1. Either party calls [`open_dispute`] — escrowed funds are locked for arbitration.
-//! 2. Sender or recipient calls [`submit_evidence`] with an IPFS CID or text hash.
+//! 2. Sender or recipient calls [`submit_evidence`] with a 32-byte content hash
+//!    and an optional short URI (e.g. an IPFS CID). Evidence is append-only:
+//!    each submission is a new [`EvidenceEntry`], readable via [`get_evidence`].
 //! 3. Arbitrator reviews evidence off-chain, then calls [`resolve_dispute`] to
 //!    transition the dispute to `Appealing` status and start a 24-hour appeal window.
 //! 4. During the appeal window, either party may call [`appeal`] to escalate to the
@@ -38,13 +40,28 @@
 //!    quorum (in basis points) has been reached.
 //! 5. Once quorum is reached the funds are released immediately and the dispute is
 //!    marked `ResolvedForRecipient` or `ResolvedForSender`.
+//!
+//! ## Conflict of interest (SC-207)
+//! An arbitrator, panel member or super-arbitrator who is the sender,
+//! recipient or escrow agent of a dispute may not vote on or resolve it
+//! (`arbitrator is a party to this dispute`).
+//! - Conflicted panel members are recused (`ArbitratorRecused` is emitted when
+//!   the dispute is opened) and excluded from the quorum denominator.
+//! - If the single arbitrator is conflicted, the dispute is decided by the
+//!   panel via [`cast_vote`].
+//! - If the super-arbitrator is conflicted, the admin escalates by appointing a
+//!   per-dispute substitute via [`assign_substitute_super_arbitrator`].
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Bytes, Env, IntoVal, Symbol, Vec,
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, String, Symbol,
+    Vec,
+    contract, contractimpl, contracttype, token, Address, Bytes, Env, Symbol, Vec,
 };
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -56,6 +73,12 @@ const APPEAL_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 /// Maximum number of arbitrators in the panel.
 const MAX_ARBITRATORS: u32 = 7;
+
+/// Maximum number of evidence entries each party may submit per dispute.
+const MAX_EVIDENCE_PER_PARTY: u32 = 5;
+
+/// Maximum number of evidence entries returned by one [`get_evidence`] call.
+const MAX_EVIDENCE_PAGE: u32 = 20;
 
 /// Default quorum threshold in basis points (6001 = strictly more than 60 %).
 const DEFAULT_QUORUM_BPS: u32 = 6_001;
@@ -119,13 +142,20 @@ pub enum DataKey {
     /// `true` if the agent had confirmed fiat delivery before the escrow
     /// dispute was opened. Unresolved disputes then default to the agent.
     PayoutConfirmed(u64),
-    /// Evidence (IPFS CID / hash) submitted by the agent of an escrow dispute.
-    AgentEvidence(u64),
+    /// Append-only evidence entry `(dispute_id, index)`.
+    Evidence(u64, u32),
+    /// Number of evidence entries recorded for a dispute (next index).
+    EvidenceCount(u64),
+    /// Number of evidence entries a given party has submitted for a dispute.
+    PartyEvidenceCount(u64, Address),
     /// Present while the pending (or final) ruling awards the funds to the agent.
     RulingForAgent(u64),
     /// `(escrow contract, escrow_id)` backing an escrow dispute. Used to report
     /// the outcome back via `close_disputed_escrow`.
     EscrowRef(u64),
+    /// Per-dispute substitute for the super-arbitrator, appointed by the admin
+    /// when the super-arbitrator is a party to the dispute (SC-207).
+    SubstituteSuperArbitrator(u64),
 }
 
 // ── Domain types ──────────────────────────────────────────────────────────────
@@ -167,10 +197,6 @@ pub struct Dispute {
     pub opened_at: u64,
     /// Unix timestamp after which the dispute is considered expired.
     pub deadline: u64,
-    /// Optional IPFS CID / evidence hash submitted by sender (max 256 bytes).
-    pub sender_evidence: Bytes,
-    /// Optional IPFS CID / evidence hash submitted by recipient (max 256 bytes).
-    pub recipient_evidence: Bytes,
     /// Unix timestamp after which the appeal window closes.
     /// Set to `appeal_deadline = env.ledger().timestamp() + 86400` when
     /// the arbitrator calls `resolve_dispute`. Zero when no appeal window is active.
@@ -181,6 +207,19 @@ pub struct Dispute {
     /// `false` → funds earmarked for the sender.
     /// Unused (false) for other statuses.
     pub resolved_for_recipient: bool,
+}
+
+/// A single piece of evidence. Only a content hash and an optional short URI
+/// (e.g. an IPFS CID) are stored on-chain — never the document itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[contracttype]
+pub struct EvidenceEntry {
+    pub submitter: Address,
+    /// SHA-256 (or similar) hash of the off-chain evidence document.
+    pub content_hash: BytesN<32>,
+    /// Optional pointer to the off-chain document (e.g. `ipfs://<cid>`).
+    pub uri: Option<String>,
+    pub submitted_at: u64,
 }
 
 // ── Event payloads ────────────────────────────────────────────────────────────
@@ -221,6 +260,9 @@ pub struct EvtDisputeExpiredToAgent {
 pub struct EvtEvidenceSubmitted {
     pub dispute_id: u64,
     pub submitted_by: Address,
+    /// Index of the new entry in the dispute's evidence list.
+    pub index: u32,
+    pub content_hash: BytesN<32>,
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +309,25 @@ pub struct EvtQuorumReached {
     pub for_recipient: bool,
     pub winner: Address,
     pub amount: i128,
+}
+
+/// Emitted when a panel arbitrator is excluded from a dispute because they are
+/// one of its parties (sender, recipient or escrow agent). Recused members
+/// cannot vote and do not count towards the quorum denominator.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtArbitratorRecused {
+    pub dispute_id: u64,
+    pub arbitrator: Address,
+}
+
+/// Emitted when the admin appoints a substitute super-arbitrator for a
+/// dispute the super-arbitrator is a party to.
+#[derive(Debug, Clone)]
+#[contracttype]
+pub struct EvtSubstituteSuperArbitratorAssigned {
+    pub dispute_id: u64,
+    pub substitute: Address,
 }
 
 /// Emitted once by [`DisputeResolutionContract::initialize`].
@@ -335,6 +396,44 @@ fn dispute_agent(env: &Env, dispute_id: u64) -> Option<Address> {
     agent
 }
 
+/// `true` if `addr` is a party to `dispute`: its sender, recipient or (for
+/// escrow disputes) payout agent. Such an address has a conflict of interest
+/// and may not vote on or resolve the dispute (SC-207).
+fn is_party(env: &Env, dispute: &Dispute, addr: &Address) -> bool {
+    *addr == dispute.sender
+        || *addr == dispute.recipient
+        || dispute_agent(env, dispute.id).as_ref() == Some(addr)
+}
+
+/// Panic if `arbitrator` is a party to `dispute`.
+fn require_not_party(env: &Env, dispute: &Dispute, arbitrator: &Address) {
+    if is_party(env, dispute, arbitrator) {
+        panic!("arbitrator is a party to this dispute");
+    }
+}
+
+/// Emit `ArbitratorRecused` for every panel member who is a party to the
+/// newly opened `dispute`. Those members are excluded from voting and from
+/// the quorum denominator in [`DisputeResolutionContract::cast_vote`].
+fn emit_recusals(env: &Env, dispute: &Dispute) {
+    let panel: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Arbitrators)
+        .unwrap_or_else(|| Vec::new(env));
+    for member in panel.iter() {
+        if is_party(env, dispute, &member) {
+            env.events().publish(
+                (Symbol::new(env, "ArbitratorRecused"),),
+                EvtArbitratorRecused {
+                    dispute_id: dispute.id,
+                    arbitrator: member,
+                },
+            );
+        }
+    }
+}
+
 fn payout_confirmed(env: &Env, dispute_id: u64) -> bool {
     let confirmed: Option<bool> = env
         .storage()
@@ -355,11 +454,8 @@ fn notify_escrow(env: &Env, dispute_id: u64, winner: &Address) {
         bump_persistent(env, &DataKey::EscrowRef(dispute_id));
     }
     if let Some((escrow_contract, escrow_id)) = escrow_ref {
-        env.invoke_contract::<()>(
-            &escrow_contract,
-            &Symbol::new(env, "close_disputed_escrow"),
-            soroban_sdk::vec![env, escrow_id.into_val(env), winner.into_val(env)],
-        );
+        afripay_types::EscrowClient::new(env, &escrow_contract)
+            .close_disputed_escrow(&escrow_id, winner);
     }
 }
 
@@ -406,7 +502,7 @@ impl DisputeResolutionContract {
     /// * `admin`              — Address that may update the arbitrator.
     /// * `arbitrator`         — Neutral third party authorised to resolve disputes.
     /// * `usdc_address`       — Stellar asset contract address for USDC.
-    /// * `max_evidence_bytes` — Maximum allowed size in bytes for submitted evidence.
+    /// * `max_evidence_bytes` — Maximum allowed length in bytes of an evidence URI.
     /// * `super_arbitrator`   — Address authorised to adjudicate appeals.
     pub fn initialize(
         env: Env,
@@ -520,8 +616,6 @@ impl DisputeResolutionContract {
             status: DisputeStatus::Open,
             opened_at: now,
             deadline,
-            sender_evidence: Bytes::new(&env),
-            recipient_evidence: Bytes::new(&env),
             appeal_deadline: 0,
             resolved_for_recipient: false,
         };
@@ -544,6 +638,8 @@ impl DisputeResolutionContract {
             env.storage().persistent().set(&DataKey::UserDisputes(user.clone()), &user_disputes);
             bump_persistent(&env, &DataKey::UserDisputes(user));
         }
+
+        emit_recusals(&env, &dispute);
 
         env.events().publish(
             (Symbol::new(&env, "DisputeOpened"),),
@@ -670,8 +766,6 @@ impl DisputeResolutionContract {
             status: DisputeStatus::Open,
             opened_at: now,
             deadline,
-            sender_evidence: Bytes::new(&env),
-            recipient_evidence: Bytes::new(&env),
             appeal_deadline: 0,
             resolved_for_recipient: false,
         };
@@ -714,6 +808,9 @@ impl DisputeResolutionContract {
             bump_persistent(&env, &DataKey::UserDisputes(user));
         }
 
+        // The agent is stored above, so agent-arbitrators are recused too.
+        emit_recusals(&env, &dispute);
+
         env.events().publish(
             (Symbol::new(&env, "DisputeOpened"),),
             EvtDisputeOpened {
@@ -739,28 +836,43 @@ impl DisputeResolutionContract {
     /// Submit evidence for an open dispute.
     ///
     /// Only the sender or recipient of the dispute — or, for escrow disputes,
-    /// the payout agent — may submit evidence.
-    /// Evidence is an IPFS CID or hash (max 256 bytes). Calling again
-    /// overwrites the previous submission for that party.
+    /// the payout agent — may submit evidence. Evidence is append-only: each
+    /// call records a new [`EvidenceEntry`] instead of replacing earlier ones,
+    /// so arbitrators see the full history. Each party may submit at most
+    /// `MAX_EVIDENCE_PER_PARTY` entries.
+    ///
+    /// Only a content hash and an optional short URI are stored on-chain; the
+    /// document itself stays off-chain.
     ///
     /// # Arguments
-    /// * `submitter`  — Must be the dispute's sender or recipient.
-    /// * `dispute_id` — ID returned by `open_dispute`.
-    /// * `evidence`   — IPFS CID or content hash (max 256 bytes).
-    pub fn submit_evidence(env: Env, submitter: Address, dispute_id: u64, evidence: Bytes) {
+    /// * `submitter`    — Must be the dispute's sender, recipient or agent.
+    /// * `dispute_id`   — ID returned by `open_dispute`.
+    /// * `content_hash` — 32-byte hash of the off-chain evidence document.
+    /// * `uri`          — Optional pointer such as an IPFS CID (max `max_evidence_bytes`).
+    ///
+    /// Returns the index of the new entry.
+    pub fn submit_evidence(
+        env: Env,
+        submitter: Address,
+        dispute_id: u64,
+        content_hash: BytesN<32>,
+        uri: Option<String>,
+    ) -> u32 {
         bump_instance(&env);
-        let max_evidence_bytes: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxEvidenceBytes)
-            .expect("not initialized");
-        if evidence.len() > max_evidence_bytes {
-            panic!("evidence exceeds maximum allowed size");
+        if let Some(ref u) = uri {
+            let max_uri_bytes: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxEvidenceBytes)
+                .expect("not initialized");
+            if u.len() > max_uri_bytes {
+                panic!("evidence exceeds maximum allowed size");
+            }
         }
 
         submitter.require_auth();
 
-        let mut dispute: Dispute = load_dispute(&env, dispute_id);
+        let dispute: Dispute = load_dispute(&env, dispute_id);
 
         if dispute.status != DisputeStatus::Open {
             panic!("dispute is not open");
@@ -769,28 +881,47 @@ impl DisputeResolutionContract {
             panic!("dispute deadline has passed");
         }
 
-        if submitter == dispute.sender {
-            dispute.sender_evidence = evidence;
-        } else if submitter == dispute.recipient {
-            dispute.recipient_evidence = evidence;
-        } else if dispute_agent(&env, dispute_id) == Some(submitter.clone()) {
-            env.storage()
-                .persistent()
-                .set(&DataKey::AgentEvidence(dispute_id), &evidence);
-            bump_persistent(&env, &DataKey::AgentEvidence(dispute_id));
-        } else {
+        if submitter != dispute.sender
+            && submitter != dispute.recipient
+            && dispute_agent(&env, dispute_id) != Some(submitter.clone())
+        {
             panic!("submitter is not a party to this dispute");
         }
 
-        store_dispute(&env, &dispute);
+        let party_key = DataKey::PartyEvidenceCount(dispute_id, submitter.clone());
+        let party_count: u32 = env.storage().persistent().get(&party_key).unwrap_or(0);
+        if party_count >= MAX_EVIDENCE_PER_PARTY {
+            panic!("evidence limit reached for this party");
+        }
+
+        let count_key = DataKey::EvidenceCount(dispute_id);
+        let index: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        let entry = EvidenceEntry {
+            submitter: submitter.clone(),
+            content_hash: content_hash.clone(),
+            uri,
+            submitted_at: env.ledger().timestamp(),
+        };
+        let entry_key = DataKey::Evidence(dispute_id, index);
+        env.storage().persistent().set(&entry_key, &entry);
+        bump_persistent(&env, &entry_key);
+        env.storage().persistent().set(&count_key, &(index + 1));
+        bump_persistent(&env, &count_key);
+        env.storage().persistent().set(&party_key, &(party_count + 1));
+        bump_persistent(&env, &party_key);
 
         env.events().publish(
             (Symbol::new(&env, "EvidenceSubmitted"),),
             EvtEvidenceSubmitted {
                 dispute_id,
                 submitted_by: submitter,
+                index,
+                content_hash,
             },
         );
+
+        index
     }
 
     /// Resolve a dispute, opening a 24-hour appeal window.
@@ -847,6 +978,11 @@ impl DisputeResolutionContract {
         if dispute.status != DisputeStatus::Open {
             panic!("dispute is not open");
         }
+
+        // Conflict of interest (SC-207): the arbitrator may not rule on a
+        // dispute they are a party to. Such disputes must be decided by the
+        // panel via `cast_vote` (where the arbitrator is recused) instead.
+        require_not_party(env, &dispute, &arbitrator);
 
         let now = env.ledger().timestamp();
         dispute.status = DisputeStatus::Appealing;
@@ -1002,11 +1138,23 @@ impl DisputeResolutionContract {
         bump_instance(env);
         super_arbitrator.require_auth();
 
-        let stored_super: Address = env
+        // A substitute appointed via `assign_substitute_super_arbitrator`
+        // replaces the (conflicted) super-arbitrator for this dispute only.
+        let substitute: Option<Address> = env
             .storage()
-            .instance()
-            .get(&DataKey::SuperArbitrator)
-            .expect("super arbitrator not set");
+            .persistent()
+            .get(&DataKey::SubstituteSuperArbitrator(dispute_id));
+        let stored_super: Address = match substitute {
+            Some(substitute) => {
+                bump_persistent(env, &DataKey::SubstituteSuperArbitrator(dispute_id));
+                substitute
+            }
+            None => env
+                .storage()
+                .instance()
+                .get(&DataKey::SuperArbitrator)
+                .expect("super arbitrator not set"),
+        };
 
         if super_arbitrator != stored_super {
             panic!("unauthorized: caller is not the super arbitrator");
@@ -1017,6 +1165,10 @@ impl DisputeResolutionContract {
         if dispute.status != DisputeStatus::UnderAppeal {
             panic!("dispute is not under appeal");
         }
+
+        // Conflict of interest (SC-207). A conflicted super-arbitrator is
+        // escalated to the admin, who appoints a per-dispute substitute.
+        require_not_party(env, &dispute, &super_arbitrator);
 
         record_ruling(env, &mut dispute, ruling);
         Self::award(env, dispute, ruling);
@@ -1211,12 +1363,33 @@ impl DisputeResolutionContract {
         payout_confirmed(&env, dispute_id)
     }
 
-    /// Evidence submitted by the agent of an escrow dispute (empty if none).
-    pub fn get_agent_evidence(env: Env, dispute_id: u64) -> Bytes {
+    /// Number of evidence entries recorded for a dispute.
+    pub fn get_evidence_count(env: Env, dispute_id: u64) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::AgentEvidence(dispute_id))
-            .unwrap_or_else(|| Bytes::new(&env))
+            .get(&DataKey::EvidenceCount(dispute_id))
+            .unwrap_or(0)
+    }
+
+    /// Page through a dispute's evidence in submission order, starting at
+    /// index `start`. At most `MAX_EVIDENCE_PAGE` entries are returned.
+    pub fn get_evidence(env: Env, dispute_id: u64, start: u32, limit: u32) -> Vec<EvidenceEntry> {
+        let count = Self::get_evidence_count(env.clone(), dispute_id);
+        let limit = if limit > MAX_EVIDENCE_PAGE { MAX_EVIDENCE_PAGE } else { limit };
+        let end = start.saturating_add(limit).min(count);
+        let mut out: Vec<EvidenceEntry> = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, EvidenceEntry>(&DataKey::Evidence(dispute_id, i))
+            {
+                out.push_back(entry);
+            }
+            i += 1;
+        }
+        out
     }
 
     /// Step 1 of two-step arbitrator handoff. Admin proposes a new arbitrator.
@@ -1259,6 +1432,68 @@ impl DisputeResolutionContract {
             panic!("unauthorized: caller is not admin");
         }
         env.storage().persistent().set(&DataKey::SuperArbitrator, &super_arbitrator);
+    }
+
+    /// Admin escalation path for a conflicted super-arbitrator (SC-207).
+    ///
+    /// When the super-arbitrator is the sender, recipient or agent of a
+    /// dispute, [`resolve_appeal`] rejects them. The admin then appoints a
+    /// `substitute` who may call `resolve_appeal` / `resolve_appeal_for_agent`
+    /// for this dispute only. The global super-arbitrator is unchanged.
+    ///
+    /// Panics if the dispute is already settled, if the current
+    /// super-arbitrator is not conflicted, or if `substitute` is itself a
+    /// party to the dispute.
+    pub fn assign_substitute_super_arbitrator(
+        env: Env,
+        admin: Address,
+        dispute_id: u64,
+        substitute: Address,
+    ) {
+        bump_instance(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .or_else(|| env.storage().persistent().get(&DataKey::Admin))
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized: caller is not admin");
+        }
+
+        let dispute: Dispute = load_dispute(&env, dispute_id);
+        if dispute.status != DisputeStatus::Open
+            && dispute.status != DisputeStatus::Appealing
+            && dispute.status != DisputeStatus::UnderAppeal
+        {
+            panic!("dispute is already settled");
+        }
+
+        let stored_super: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::SuperArbitrator)
+            .expect("super arbitrator not set");
+        if !is_party(&env, &dispute, &stored_super) {
+            panic!("super arbitrator is not a party to this dispute");
+        }
+        if is_party(&env, &dispute, &substitute) {
+            panic!("arbitrator is a party to this dispute");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SubstituteSuperArbitrator(dispute_id), &substitute);
+        bump_persistent(&env, &DataKey::SubstituteSuperArbitrator(dispute_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "SubstituteSuperArbAssigned"),),
+            EvtSubstituteSuperArbitratorAssigned {
+                dispute_id,
+                substitute,
+            },
+        );
     }
 
     /// Register the escrow contract authorised to open disputes via
@@ -1328,6 +1563,11 @@ impl DisputeResolutionContract {
     /// vote the contract tallies the results and, if the configured quorum is
     /// reached, immediately releases funds to the winning side.
     ///
+    /// Panel members who are a party to the dispute (sender, recipient or
+    /// escrow agent) are recused: they cannot vote (panics with
+    /// `arbitrator is a party to this dispute`) and are excluded from the
+    /// quorum denominator.
+    ///
     /// # Arguments
     /// * `arbitrator`    — Must be a member of the `Arbitrators` panel.
     /// * `dispute_id`    — ID returned by `open_dispute`.
@@ -1373,19 +1613,29 @@ impl DisputeResolutionContract {
             panic!("dispute is not open");
         }
 
+        // Conflict of interest (SC-207): a panel member who is the sender,
+        // recipient or agent of this dispute is recused and may not vote.
+        require_not_party(&env, &dispute, &arbitrator);
+
         // Record the vote.
         env.storage()
             .persistent()
             .set(&DataKey::Vote(dispute_id, arbitrator.clone()), &for_recipient);
 
-        // Tally all votes cast so far for this dispute.
-        let panel_size = panel.len();
+        // Tally all votes cast so far for this dispute. Recused (conflicted)
+        // members are excluded from the quorum denominator, so `panel_size`
+        // counts only the arbitrators eligible to vote on this dispute.
+        let mut panel_size: u32 = 0;
         let mut votes_for_recipient: u32 = 0;
         let mut votes_for_sender: u32 = 0;
         let mut total_votes: u32 = 0;
 
-        for i in 0..panel_size {
+        for i in 0..panel.len() {
             let member = panel.get(i).unwrap();
+            if is_party(&env, &dispute, &member) {
+                continue;
+            }
+            panel_size += 1;
             let key = DataKey::Vote(dispute_id, member);
             if let Some(vote) = env.storage().persistent().get::<DataKey, bool>(&key) {
                 total_votes += 1;
@@ -1414,8 +1664,9 @@ impl DisputeResolutionContract {
             .get(&DataKey::QuorumBps)
             .unwrap_or(DEFAULT_QUORUM_BPS);
 
-        // A side reaches quorum when its vote share (in bps) strictly exceeds
-        // quorum_bps: votes_for_side * 10_000 / panel_size > quorum_bps.
+        // A side reaches quorum when its vote share (in bps) of the eligible
+        // (non-recused) panel strictly exceeds quorum_bps:
+        // votes_for_side * 10_000 / panel_size > quorum_bps.
         // We rearrange to avoid division: votes_for_side * 10_000 > quorum_bps * panel_size.
         let quorum_threshold = quorum_bps as u64 * panel_size as u64;
 
@@ -1618,6 +1869,36 @@ impl DisputeResolutionContract {
             result.push_back(i + 1); // Dispute IDs are 1-indexed
         }
         result
+    }
+}
+
+// SC-214: this contract implements its interface from `afripay-types`, so the
+// compiler checks the exported signature against the one consumers call.
+// Changing the entry point without updating the shared trait breaks this build;
+// updating the trait breaks every consumer still using the old signature.
+impl afripay_types::DisputeResolutionInterface for DisputeResolutionContract {
+    fn open_escrow_dispute(
+        env: Env,
+        escrow_contract: Address,
+        opener: Address,
+        escrow_id: u64,
+        sender: Address,
+        recipient: Address,
+        agent: Address,
+        amount: i128,
+        payout_confirmed: bool,
+    ) -> u64 {
+        DisputeResolutionContract::open_escrow_dispute(
+            env,
+            escrow_contract,
+            opener,
+            escrow_id,
+            sender,
+            recipient,
+            agent,
+            amount,
+            payout_confirmed,
+        )
     }
 }
 

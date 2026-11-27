@@ -125,10 +125,10 @@ describe('BatchPayment Validation', () => {
       );
     });
 
-    it('should reject muxed addresses as unsupported', () => {
+    it('should reject malformed muxed addresses', () => {
       expect(
         validateStellarAddress('M' + 'A'.repeat(68))
-      ).toBe('Muxed (M…) addresses are not supported yet');
+      ).toBe('Invalid muxed (M…) address — check for typos');
     });
 
     it('should handle addresses with whitespace', () => {
