@@ -77,7 +77,7 @@ fn test_initialize_stores_admin_and_usdc() {
 }
 
 #[test]
-#[should_panic(expected = "already initialized")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_double_initialize_panics() {
     let (_, client, admin, usdc_id) = setup();
     client.initialize(&admin, &usdc_id, &(48 * 60 * 60));
@@ -142,7 +142,7 @@ fn test_remove_agent() {
 }
 
 #[test]
-#[should_panic(expected = "Agent not registered")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_create_escrow_with_unregistered_agent_panics() {
     let (env, client, _, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -212,7 +212,7 @@ fn test_create_escrow_transfers_usdc_to_contract() {
 }
 
 #[test]
-#[should_panic(expected = "amount must be positive")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_create_escrow_zero_amount_panics() {
     let (env, client, _, _) = setup();
     let sender = Address::generate(&env);
@@ -222,7 +222,7 @@ fn test_create_escrow_zero_amount_panics() {
 }
 
 #[test]
-#[should_panic(expected = "amount must be positive")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_create_escrow_negative_amount_panics() {
     let (env, client, _, _) = setup();
     let sender = Address::generate(&env);
@@ -232,7 +232,7 @@ fn test_create_escrow_negative_amount_panics() {
 }
 
 #[test]
-#[should_panic(expected = "fee_bps cannot exceed 10000")]
+#[should_panic(expected = "Error(Contract, #7)")]
 fn test_create_escrow_fee_over_100pct_panics() {
     let (env, client, admin, usdc_id) = setup();
     let sender = Address::generate(&env);
@@ -308,7 +308,7 @@ fn test_confirm_payout_wrong_agent_panics() {
 }
 
 #[test]
-#[should_panic(expected = "escrow is not pending")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_confirm_payout_twice_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, agent, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 250);
@@ -317,7 +317,7 @@ fn test_confirm_payout_twice_panics() {
 }
 
 #[test]
-#[should_panic(expected = "escrow not found")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_confirm_payout_nonexistent_escrow_panics() {
     let (_, client, _, _) = setup();
     client.confirm_payout(&999);
@@ -344,7 +344,7 @@ fn test_cancel_escrow_after_window_refunds_sender() {
 }
 
 #[test]
-#[should_panic(expected = "cancellation window has not elapsed")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn test_cancel_escrow_before_window_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (sender, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 500_0000000, 100);
@@ -352,7 +352,7 @@ fn test_cancel_escrow_before_window_panics() {
 }
 
 #[test]
-#[should_panic(expected = "cancellation window has not elapsed")]
+#[should_panic(expected = "Error(Contract, #14)")]
 fn test_cancel_escrow_one_second_before_window_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (sender, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 500_0000000, 100);
@@ -374,7 +374,7 @@ fn test_cancel_escrow_allowed_exactly_at_expiry() {
 }
 
 #[test]
-#[should_panic(expected = "unauthorized: caller is not the escrow sender")]
+#[should_panic(expected = "Error(Contract, #12)")]
 fn test_cancel_escrow_wrong_sender_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 500_0000000, 100);
@@ -384,7 +384,7 @@ fn test_cancel_escrow_wrong_sender_panics() {
 }
 
 #[test]
-#[should_panic(expected = "escrow is not pending")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_cancel_escrow_after_completion_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (sender, _, agent, id) = make_escrow(&env, &client, &usdc_id, &admin, 500_0000000, 100);
@@ -394,7 +394,7 @@ fn test_cancel_escrow_after_completion_panics() {
 }
 
 #[test]
-#[should_panic(expected = "escrow not found")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_cancel_escrow_nonexistent_panics() {
     let (env, client, _, _) = setup();
     let sender = Address::generate(&env);
@@ -404,7 +404,7 @@ fn test_cancel_escrow_nonexistent_panics() {
 // ── get_escrow ────────────────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "escrow not found")]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_get_escrow_nonexistent_panics() {
     let (_, client, _, _) = setup();
     client.get_escrow(&0);
@@ -536,7 +536,7 @@ fn test_withdraw_fees_requires_admin_auth() {
 }
 
 #[test]
-#[should_panic(expected = "withdrawal amount exceeds accumulated fees")]
+#[should_panic(expected = "Error(Contract, #16)")]
 fn test_withdraw_fees_exceeds_balance_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
@@ -546,7 +546,7 @@ fn test_withdraw_fees_exceeds_balance_panics() {
 }
 
 #[test]
-#[should_panic(expected = "amount must be positive")]
+#[should_panic(expected = "Error(Contract, #6)")]
 fn test_withdraw_fees_zero_amount_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
@@ -555,7 +555,7 @@ fn test_withdraw_fees_zero_amount_panics() {
 }
 
 #[test]
-#[should_panic(expected = "invalid recipient")]
+#[should_panic(expected = "Error(Contract, #15)")]
 fn test_withdraw_fees_to_contract_itself_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
@@ -564,7 +564,7 @@ fn test_withdraw_fees_to_contract_itself_panics() {
 }
 
 #[test]
-#[should_panic(expected = "withdrawal amount exceeds accumulated fees")]
+#[should_panic(expected = "Error(Contract, #16)")]
 fn test_withdraw_fees_cannot_touch_insurance_fund() {
     // The insurance fund is held separately; only accumulated platform fees
     // are withdrawable, so asking for fees + insurance must be rejected.
@@ -640,7 +640,7 @@ fn test_update_admin_new_admin_can_withdraw_fees() {
 }
 
 #[test]
-#[should_panic(expected = "unauthorized: caller is not admin")]
+#[should_panic(expected = "Error(Contract, #2)")]
 fn test_update_admin_old_admin_loses_access() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, agent, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
@@ -650,7 +650,7 @@ fn test_update_admin_old_admin_loses_access() {
 }
 
 #[test]
-#[should_panic(expected = "new admin must differ from current admin")]
+#[should_panic(expected = "Error(Contract, #17)")]
 fn test_update_admin_same_address_panics() {
     let (_, client, admin, _) = setup();
     client.update_admin(&admin);
@@ -723,7 +723,7 @@ fn test_accept_admin_after_eta_succeeds_and_emits_event() {
 }
 
 #[test]
-#[should_panic(expected = "unauthorized: caller is not admin")]
+#[should_panic(expected = "Error(Contract, #2)")]
 fn test_old_admin_loses_pause_privileges_after_rotation() {
     let (env, client, _, _) = setup();
     let old_admin = Address::generate(&env);
@@ -794,7 +794,7 @@ fn test_admin_release_refunds_sender_on_pending_escrow() {
 }
 
 #[test]
-#[should_panic(expected = "escrow is not pending")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_admin_release_on_completed_escrow_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, agent, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 250);
@@ -803,7 +803,7 @@ fn test_admin_release_on_completed_escrow_panics() {
 }
 
 #[test]
-#[should_panic(expected = "escrow is not pending")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_admin_release_on_cancelled_escrow_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (sender, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 250);
@@ -973,7 +973,7 @@ fn released_then_cancelled(
 }
 
 #[test]
-#[should_panic(expected = "insurance_payout: escrow must be in Cancelled status")]
+#[should_panic(expected = "Error(Contract, #19)")]
 fn test_insurance_payout_rejected_for_pending_escrow() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
@@ -981,7 +981,7 @@ fn test_insurance_payout_rejected_for_pending_escrow() {
 }
 
 #[test]
-#[should_panic(expected = "insurance_payout: escrow must be in Cancelled status")]
+#[should_panic(expected = "Error(Contract, #19)")]
 fn test_insurance_payout_rejected_for_completed_escrow() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, agent, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 500);
@@ -990,7 +990,7 @@ fn test_insurance_payout_rejected_for_completed_escrow() {
 }
 
 #[test]
-#[should_panic(expected = "insurance_payout: no outstanding loss for this escrow")]
+#[should_panic(expected = "Error(Contract, #20)")]
 fn test_insurance_payout_rejected_when_sender_fully_refunded() {
     // SC-128: a plain cancel refunds everything, so there is nothing to insure.
     let (env, client, admin, usdc_id) = setup();
@@ -1019,7 +1019,7 @@ fn test_insurance_payout_covers_released_amount_on_cancelled_escrow() {
 }
 
 #[test]
-#[should_panic(expected = "insurance_payout: no outstanding loss for this escrow")]
+#[should_panic(expected = "Error(Contract, #20)")]
 fn test_insurance_payout_cannot_be_repeated() {
     // SC-128: a second call for the same escrow must not pay again.
     let (env, client, admin, usdc_id) = setup();
@@ -1072,7 +1072,7 @@ fn test_insurance_payout_recipient_is_escrow_sender_not_arbitrary() {
 }
 
 #[test]
-#[should_panic(expected = "insufficient insurance fund balance")]
+#[should_panic(expected = "Error(Contract, #21)")]
 fn test_insurance_payout_panics_when_fund_empty() {
     let (env, client, admin, usdc_id) = setup();
     // fee_bps = 0 → no insurance contributions at all.
@@ -1165,7 +1165,7 @@ fn test_set_insurance_contribution_bps_zero_sends_all_to_fees() {
 }
 
 #[test]
-#[should_panic(expected = "contribution rate cannot exceed 1000 bps (10%)")]
+#[should_panic(expected = "Error(Contract, #18)")]
 fn test_set_insurance_contribution_bps_above_max_panics() {
     let (_, client, _, _) = setup();
     client.set_insurance_contribution_bps(&1_001);
@@ -1234,7 +1234,7 @@ fn test_partial_confirm_payout_multiple_releases_complete_escrow() {
 }
 
 #[test]
-#[should_panic(expected = "Release exceeds remaining balance")]
+#[should_panic(expected = "Error(Contract, #13)")]
 fn test_partial_confirm_payout_over_release_panics() {
     let (env, client, admin, usdc_id) = setup();
     let amount = 500_0000000i128;
@@ -1245,7 +1245,7 @@ fn test_partial_confirm_payout_over_release_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Release exceeds remaining balance")]
+#[should_panic(expected = "Error(Contract, #13)")]
 fn test_partial_confirm_payout_over_remaining_after_first_release_panics() {
     let (env, client, admin, usdc_id) = setup();
     let amount = 1_000_0000000i128;
@@ -1257,7 +1257,7 @@ fn test_partial_confirm_payout_over_remaining_after_first_release_panics() {
 }
 
 #[test]
-#[should_panic(expected = "escrow has expired")]
+#[should_panic(expected = "Error(Contract, #5)")]
 fn test_partial_confirm_payout_after_expiry_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, agent, id) = make_escrow(&env, &client, &usdc_id, &admin, 500_0000000, 250);
@@ -1269,7 +1269,7 @@ fn test_partial_confirm_payout_after_expiry_panics() {
 }
 
 #[test]
-#[should_panic(expected = "escrow is not pending")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_partial_confirm_payout_on_completed_escrow_panics() {
     let (env, client, admin, usdc_id) = setup();
     let amount = 500_0000000i128;
@@ -1546,7 +1546,7 @@ fn test_removed_agent_cannot_partial_confirm_payout() {
 }
 
 #[test]
-#[should_panic(expected = "agent not registered")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_admin_release_to_removed_agent_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, agent, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 250);
@@ -1588,7 +1588,7 @@ fn test_reassign_escrow_to_new_agent() {
 }
 
 #[test]
-#[should_panic(expected = "agent not registered")]
+#[should_panic(expected = "Error(Contract, #8)")]
 fn test_reassign_escrow_to_unregistered_agent_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 250);
@@ -1597,7 +1597,7 @@ fn test_reassign_escrow_to_unregistered_agent_panics() {
 }
 
 #[test]
-#[should_panic(expected = "escrow not pending")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_reassign_completed_escrow_panics() {
     let (env, client, admin, usdc_id) = setup();
     let (_, _, _, id) = make_escrow(&env, &client, &usdc_id, &admin, 1_000_0000000, 250);

@@ -40,15 +40,9 @@ use soroban_sdk::{
 };
 
 // ── KYC Tier enum ────────────────────────────────────────────────────────────────
-// Replicated from kyc-attestation contract for type safety in cross-contract calls.
-#[derive(Debug, Clone, Copy)]
-#[contracttype]
-#[repr(u32)]
-pub enum KycTier {
-    Basic = 0,
-    Enhanced = 1,
-    Business = 2,
-}
+// Defined once in the shared `afripay-types` crate (SC-214); re-exported here so
+// existing `loyalty_token_contract::KycTier` imports keep working.
+pub use afripay_types::KycTier;
 
 #[derive(Debug)]
 #[contracttype]

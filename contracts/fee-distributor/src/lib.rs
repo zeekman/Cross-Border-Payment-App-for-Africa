@@ -830,6 +830,22 @@ impl FeeDistributorContract {
 
 /* … truncated 8814 chars — edit only what you need near the top … */
 
+// SC-214: this contract implements its interface from `afripay-types`, so the
+// compiler checks the exported signature against the one consumers call.
+// Changing the entry point without updating the shared trait breaks this build;
+// updating the trait breaks every consumer still using the old signature.
+impl afripay_types::FeeDistributorInterface for FeeDistributorContract {
+    fn deposit_fee(
+        env: Env,
+        depositor: Address,
+        token: Address,
+        amount: i128,
+        source: Option<Address>,
+    ) {
+        FeeDistributorContract::deposit_fee(env, depositor, token, amount, source)
+    }
+}
+
 mod governance;
 pub use governance::{CONTRACT_VERSION, UPGRADE_TIMELOCK_SECS};
         let old_split_bps: u32 = env
