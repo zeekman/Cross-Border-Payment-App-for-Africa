@@ -4,6 +4,8 @@ import { ArrowLeft, Plus, Trash2, List, Calendar } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
+import useContractStates from '../hooks/useContractStates';
+import ContractStatusBanners from '../components/ContractStatusBanners';
 import useStepUp from '../hooks/useStepUp';
 import { useConfirm } from '../context/ConfirmContext';
 import { CURRENCIES } from '../utils/currency';
@@ -11,7 +13,10 @@ import ScheduledPaymentsCalendar from '../components/ScheduledPaymentsCalendar';
 import { validateStellarAddress } from '../utils/validation';
 import { apiErrorMessage } from '../utils/apiError';
 
+const CONTRACTS = ['recurringPayments'];
+
 export default function ScheduledPayments() {
+  const { states: contractStates, paused: contractPaused } = useContractStates(CONTRACTS);
   const { requestStepUp, stepUpModal } = useStepUp();
   const confirm = useConfirm();
   const navigate = useNavigate();
@@ -37,7 +42,7 @@ export default function ScheduledPayments() {
       const res = await api.get('/scheduled-payments');
       setPayments(res.data.payments || []);
     } catch (err) {
-      toast.error(t('scheduled.error') || 'Failed to load scheduled payments');
+      toast.error(t('scheduled.error', 'Failed to load scheduled payments'));
     } finally {
       setLoading(false);
     }
@@ -45,16 +50,17 @@ export default function ScheduledPayments() {
 
   const handleCreate = async (e) => {
     e.preventDefault();
+    if (contractPaused) return;
 
     // Validate Stellar address format
-    const addressError = validateStellarAddress(form.recipient_wallet);
+    const addressError = validateStellarAddress(form.recipient_wallet, { allowMuxed: false });
     if (addressError) {
       toast.error(addressError);
       return;
     }
 
     if (!form.amount || parseFloat(form.amount) <= 0) {
-      toast.error(t('scheduled.invalid') || 'Please enter a valid amount');
+      toast.error(t('scheduled.invalid', 'Please enter a valid amount'));
       return;
     }
 
@@ -65,7 +71,7 @@ export default function ScheduledPayments() {
       const assetBalance = balances.find(b => b.asset === form.asset)?.balance || 0;
 
       if (parseFloat(form.amount) > parseFloat(assetBalance)) {
-        toast.error(`Insufficient ${form.asset} balance`);
+        toast.error(t('scheduled.insufficient_balance', { asset: form.asset, defaultValue: 'Insufficient {{asset}} balance' }));
         return;
       }
     } catch {
@@ -83,7 +89,7 @@ export default function ScheduledPayments() {
         frequency: form.frequency,
         memo: form.memo || undefined
       }, { headers: { 'X-Step-Up-Token': stepUpToken } });
-      toast.success(t('scheduled.created') || 'Scheduled payment created');
+      toast.success(t('scheduled.created', 'Scheduled payment created'));
       setForm({ recipient_wallet: '', amount: '', asset: 'XLM', frequency: 'monthly', memo: '' });
       setShowForm(false);
       fetchPayments();
@@ -96,7 +102,7 @@ export default function ScheduledPayments() {
     if (!(await confirm(t('scheduled.confirm_delete', 'Delete this scheduled payment? It will no longer run.'), { title: t('confirm.delete_scheduled_title', 'Delete scheduled payment'), confirmLabel: t('confirm.delete', 'Delete') }))) return;
     try {
       await api.delete(`/scheduled-payments/${id}`);
-      toast.success(t('scheduled.deleted') || 'Deleted');
+      toast.success(t('scheduled.deleted', 'Deleted'));
       fetchPayments();
     } catch (err) {
       toast.error(t('scheduled.error'));
@@ -126,21 +132,25 @@ export default function ScheduledPayments() {
         <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
+      <ContractStatusBanners states={contractStates} />
+
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold text-white">{t('scheduled.title') || 'Scheduled Payments'}</h2>
+        <h2 className="text-2xl font-bold text-white">{t('scheduled.title', 'Scheduled Payments')}</h2>
         <button
           onClick={() => setShowForm(!showForm)}
-          className="bg-primary-500 hover:bg-primary-600 text-white p-2 rounded-lg transition-colors"
+          disabled={contractPaused}
+          className="disabled:opacity-50 bg-primary-500 hover:bg-primary-600 text-white p-2 rounded-lg transition-colors"
         >
           <Plus size={18} />
         </button>
       </div>
 
       {showForm && (
-        <form onSubmit={handleCreate} className="bg-gray-900 rounded-xl p-4 mb-6 space-y-3">
+        <form onSubmit={handleCreate} data-testid="scheduled-form" className="bg-gray-900 rounded-xl p-4 mb-6 space-y-3">
           <input
             type="text"
-            placeholder="Recipient wallet"
+            data-testid="scheduled-recipient"
+            placeholder={t('scheduled.recipient_placeholder', 'Recipient wallet')}
             value={form.recipient_wallet}
             onChange={e => setForm({ ...form, recipient_wallet: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-500 text-sm"
@@ -148,7 +158,8 @@ export default function ScheduledPayments() {
           <div className="flex gap-2">
             <input
               type="number"
-              placeholder="Amount"
+              data-testid="scheduled-amount"
+              placeholder={t('scheduled.amount_placeholder', 'Amount')}
               min="0.0000001"
               step="any"
               value={form.amount}
@@ -156,6 +167,7 @@ export default function ScheduledPayments() {
               className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-500 text-sm"
             />
             <select
+              data-testid="scheduled-asset"
               value={form.asset}
               onChange={e => setForm({ ...form, asset: e.target.value })}
               className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
@@ -166,28 +178,32 @@ export default function ScheduledPayments() {
             </select>
           </div>
           <select
+            data-testid="scheduled-frequency"
             value={form.frequency}
             onChange={e => setForm({ ...form, frequency: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm"
           >
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
+            <option value="daily">{t('scheduled.frequency_daily', 'Daily')}</option>
+            <option value="weekly">{t('scheduled.frequency_weekly', 'Weekly')}</option>
+            <option value="monthly">{t('scheduled.frequency_monthly', 'Monthly')}</option>
           </select>
           <input
             type="text"
-            placeholder="Memo (optional)"
+            data-testid="scheduled-memo"
+            placeholder={t('scheduled.memo_placeholder', 'Memo (optional)')}
             maxLength={28}
             value={form.memo}
             onChange={e => setForm({ ...form, memo: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white placeholder-gray-500 text-sm"
           />
           <div className="flex gap-2">
-            <button type="submit" className="flex-1 bg-primary-500 hover:bg-primary-600 text-white py-2 rounded-lg text-sm font-medium">
+            <button type="submit" disabled={contractPaused} className="disabled:opacity-50 flex-1 bg-primary-500 hover:bg-primary-600 text-white py-2 rounded-lg text-sm font-medium">
               Create
+            <button type="submit" data-testid="scheduled-submit" className="flex-1 bg-primary-500 hover:bg-primary-600 text-white py-2 rounded-lg text-sm font-medium">
+              {t('scheduled.create', 'Create')}
             </button>
             <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white py-2 rounded-lg text-sm">
-              Cancel
+              {t('common.cancel', 'Cancel')}
             </button>
           </div>
         </form>
@@ -201,7 +217,7 @@ export default function ScheduledPayments() {
             view === 'list' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'
           }`}
         >
-          <List size={15} /> {t('scheduled.list_view') || 'List View'}
+          <List size={15} /> {t('scheduled.list_view', 'List View')}
         </button>
         <button
           onClick={() => setView('calendar')}
@@ -209,14 +225,14 @@ export default function ScheduledPayments() {
             view === 'calendar' ? 'bg-primary-500 text-white' : 'text-gray-400 hover:text-white'
           }`}
         >
-          <Calendar size={15} /> {t('scheduled.calendar_view') || 'Calendar View'}
+          <Calendar size={15} /> {t('scheduled.calendar_view', 'Calendar View')}
         </button>
       </div>
 
       {view === 'calendar' ? (
         <ScheduledPaymentsCalendar payments={payments} />
       ) : payments.length === 0 ? (
-        <p className="text-gray-400 text-center py-8">{t('scheduled.none') || 'No scheduled payments'}</p>
+        <p className="text-gray-400 text-center py-8">{t('scheduled.none', 'No scheduled payments')}</p>
       ) : (
         <div className="space-y-3">
           {payments.map(p => (
@@ -233,14 +249,14 @@ export default function ScheduledPayments() {
                       p.active ? 'bg-green-500/20 text-green-400' : 'bg-gray-700 text-gray-400'
                     }`}
                   >
-                    {p.active ? 'Active' : 'Inactive'}
+                    {p.active ? t('scheduled.active', 'Active') : t('scheduled.inactive', 'Inactive')}
                   </button>
                   <button onClick={() => handleDelete(p.id)} className="text-red-400 hover:text-red-300">
                     <Trash2 size={16} />
                   </button>
                 </div>
               </div>
-              <p className="text-gray-500 text-xs">{p.frequency} • Next: {new Date(p.next_run_at).toLocaleDateString()}</p>
+              <p className="text-gray-500 text-xs">{p.frequency} • {t('scheduled.next_run', 'Next')}: {new Date(p.next_run_at).toLocaleDateString()}</p>
             </div>
           ))}
         </div>

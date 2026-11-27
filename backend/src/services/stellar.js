@@ -5,6 +5,7 @@ const { withRetry, retryWithBackoff } = require('../utils/retry');
 const { withTimeout } = require('../utils/withTimeout');
 const { enqueue } = require('../utils/txQueue');
 const { checkMemoRequired } = require('./memoRequired');
+const { baseAccountAddress } = require('../utils/stellarAddress');
 const { getRpc: getSorobanRpc, waitForSorobanTx } = require('../config/soroban');
 const {
   AccountResponseSchema,
@@ -113,6 +114,13 @@ function markPrimaryHealthy() {
  */
 function getFallbackDurationMs() {
   return fallbackActivatedAt ? Date.now() - fallbackActivatedAt : 0;
+}
+
+/**
+ * Configured Horizon endpoints, in the order withFallback() tries them (BE-199).
+ */
+function getHorizonEndpoints() {
+  return { primary: primaryUrl, fallbacks: fallbackUrl ? [fallbackUrl] : [] };
 }
 
 /**
@@ -461,19 +469,49 @@ function buildStellarMemo(memo, memoType = 'text') {
 // Federation address resolution
 // ---------------------------------------------------------------------------
 
+const FEDERATION_CACHE_TTL_MS = 5 * 60 * 1000;
+const federationCache = new Map();
+
+function federationError(message, status, code) {
+  const err = new Error(message);
+  err.status = status;
+  err.code = code;
+  err.expose = true;
+  return err;
+}
+
+/**
+ * Resolve a federation address (name*domain) to a public key.
+ * Errors carry a stable status/code: 400 INVALID_FEDERATION_ADDRESS,
+ * 404 FEDERATION_NOT_FOUND, 502 FEDERATION_UNAVAILABLE. Results are cached 5 min.
+ */
 async function resolveFederationAddress(address) {
   if (!address.includes('*')) return address;
-  try {
-    const federationServer = new StellarSdk.FederationServer(
-      `https://${address.split('*')[1]}/.well-known/stellar.toml`
-    );
-    const result = await federationServer.resolveAddress(address);
-    return result.account_id;
-  } catch (e) {
-    const err = new Error(`Failed to resolve federation address: ${address}`);
-    err.status = 400;
-    throw err;
+  const parts = address.split('*');
+  if (parts.length !== 2 || !parts[0] || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(parts[1])) {
+    throw federationError('Invalid federation address format', 400, 'INVALID_FEDERATION_ADDRESS');
   }
+
+  const key = address.toLowerCase();
+  const cached = federationCache.get(key);
+  if (cached && cached.expires > Date.now()) return cached.accountId;
+
+  let result;
+  try {
+    const federationServer = await StellarSdk.FederationServer.createForDomain(parts[1], { timeout: 5000 });
+    result = await federationServer.resolveAddress(address);
+  } catch (e) {
+    const status = e && e.response && e.response.status;
+    if (status === 404 || (e && e.name === 'NotFoundError')) {
+      throw federationError('Federation address not found', 404, 'FEDERATION_NOT_FOUND');
+    }
+    throw federationError('Federation server is unavailable', 502, 'FEDERATION_UNAVAILABLE');
+  }
+  if (!result || !result.account_id) {
+    throw federationError('Federation address not found', 404, 'FEDERATION_NOT_FOUND');
+  }
+  federationCache.set(key, { accountId: result.account_id, expires: Date.now() + FEDERATION_CACHE_TTL_MS });
+  return result.account_id;
 }
 
 // ---------------------------------------------------------------------------
@@ -672,7 +710,8 @@ async function _sendPaymentOnce({
   validateNetworkPassphrase(networkPassphrase);
 
   // Enforce memo requirement for known exchange destinations
-  const memoRequired = await checkMemoRequired(recipientPublicKey);
+  const recipientAccount = baseAccountAddress(recipientPublicKey);
+  const memoRequired = await checkMemoRequired(recipientAccount);
   if (memoRequired && !memo) {
     const err = new Error('The destination account requires a transaction memo. Please add a memo and retry.');
     err.status = 400;
@@ -683,7 +722,7 @@ async function _sendPaymentOnce({
   const assetObj = resolveAsset(asset);
 
   if (asset !== 'XLM') {
-    await checkTrustline(recipientPublicKey, assetObj);
+    await checkTrustline(recipientAccount, assetObj);
   }
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
@@ -781,10 +820,11 @@ async function validateBatchRecipient({
   recipientPublicKey,
   asset = 'XLM'
 }) {
+  const recipientBaseAddress = baseAccountAddress(recipientPublicKey);
   let recipientAccount;
   try {
     recipientAccount = await withRetry(
-      () => withFallback(s => s.loadAccount(recipientPublicKey)),
+      () => withFallback(s => s.loadAccount(recipientBaseAddress)),
       { label: 'loadAccount(batchRecipient)' }
     );
   } catch (e) {
@@ -1105,9 +1145,10 @@ async function sendPathPayment({
 }, logger = require('../utils/logger')) {
   const srcAsset = resolveAsset(sourceAsset);
   const dstAsset = resolveAsset(destinationAsset);
+  const recipientAccount = baseAccountAddress(recipientPublicKey);
 
   if (destinationAsset !== 'XLM') {
-    await checkTrustline(recipientPublicKey, dstAsset);
+    await checkTrustline(recipientAccount, dstAsset);
   }
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
@@ -1174,9 +1215,10 @@ async function sendStrictReceivePathPayment({
 }) {
   const srcAsset = resolveAsset(sourceAsset);
   const dstAsset = resolveAsset(destinationAsset);
+  const recipientAccount = baseAccountAddress(recipientPublicKey);
 
   if (destinationAsset !== 'XLM') {
-    await checkTrustline(recipientPublicKey, dstAsset);
+    await checkTrustline(recipientAccount, dstAsset);
   }
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
@@ -1727,6 +1769,7 @@ module.exports = {
   feeForPriority,
   checkHorizonHealth,
   getHorizonEndpointStatus,
+  getHorizonEndpoints,
   checkFallbackDuration,
   startFallbackDurationMonitor,
   stopFallbackDurationMonitor,
@@ -1753,6 +1796,7 @@ module.exports = {
   getAccountFlags,
   setAccountFlags,
   findReceivePath,
+  baseAccountAddress,
   sendStrictReceivePathPayment,
   withFallback,
   isBadSeq,

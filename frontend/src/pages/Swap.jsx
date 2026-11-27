@@ -5,6 +5,7 @@ import api from '../utils/api';
 import { createIdempotencyKey, postWithIdempotency } from '../utils/idempotency';
 import useStepUp from '../hooks/useStepUp';
 import { useVisibleInterval } from '../hooks/useVisibleInterval';
+import { useDataSaver } from '../context/DataSaverContext';
 import toast from 'react-hot-toast';
 import { apiErrorMessage } from '../utils/apiError';
 
@@ -72,6 +73,8 @@ export default function Swap() {
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // FE-204: data saver mode makes quotes manual-refresh only.
+  const { dataSaver } = useDataSaver();
   const [result, setResult] = useState(null);
   const [slippage, setSlippage] = useState(getSavedSlippage);
   const [customSlippage, setCustomSlippage] = useState('');
@@ -176,7 +179,7 @@ export default function Swap() {
   useVisibleInterval(
     () => setRefreshCountdown((prev) => (prev <= 1 ? REFRESH_INTERVAL : prev - 1)),
     1000,
-    { enabled: !confirmOpen, runOnVisible: false, resetKey: refreshCycle },
+    { enabled: !confirmOpen && !dataSaver, runOnVisible: false, resetKey: refreshCycle },
   );
   useVisibleInterval(
     () => {
@@ -184,7 +187,7 @@ export default function Swap() {
       setRefreshCountdown(REFRESH_INTERVAL);
     },
     REFRESH_INTERVAL * 1000,
-    { enabled: !confirmOpen, resetKey: refreshCycle },
+    { enabled: !confirmOpen && !dataSaver, resetKey: refreshCycle },
   );
 
   const handleManualRefresh = () => {
@@ -213,9 +216,11 @@ export default function Swap() {
         // Backend honours slippage_pct; min_received kept for BE-139 forward-compat.
         slippage_pct: slippage,
         min_received: minReceived || undefined,
-      }, idemRef.current.get());
+      }, idemRef.current.get(), { headers: { 'X-Step-Up-Token': stepUpToken } });
+      const res = await postWithIdempotency('/dex/swap', body, idemRef.current.get(), {
+  headers: { 'X-Step-Up-Token': stepUpToken },
+});, idemRef.current.get());
       idemRef.current.reset();
-      }, { headers: { 'X-Step-Up-Token': stepUpToken } });
       setResult(res.data);
       setSellAmount('');
       setQuote(null);
@@ -307,7 +312,7 @@ export default function Swap() {
         </div>
       </div>
 
-      <form onSubmit={handleSwap} className="space-y-4">
+      <form onSubmit={handleSwap} className="space-y-4" data-testid="swap-form">
         {/* Sell */}
         <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-3">
           <label className="text-xs text-gray-500 dark:text-gray-400">You sell</label>
@@ -318,11 +323,13 @@ export default function Swap() {
               value={sellAmount}
               onChange={(e) => setSellAmount(e.target.value)}
               placeholder="0.0000000"
+              data-testid="swap-sell-amount"
               className="flex-1 bg-transparent text-2xl font-semibold text-gray-900 dark:text-white outline-none"
             />
             <select
               value={sellAsset}
               onChange={(e) => setSellAsset(e.target.value)}
+              data-testid="swap-sell-asset"
               className="bg-gray-100 dark:bg-gray-700 rounded-lg px-2 py-1 text-sm text-gray-900 dark:text-white outline-none"
             >
               <option value="XLM">XLM</option>
@@ -355,6 +362,7 @@ export default function Swap() {
             <select
               value={buyAsset}
               onChange={(e) => setBuyAsset(e.target.value)}
+              data-testid="swap-buy-asset"
               className="bg-gray-100 dark:bg-gray-700 rounded-lg px-2 py-1 text-sm text-gray-900 dark:text-white outline-none"
             >
               <option value="XLM">XLM</option>
@@ -379,8 +387,8 @@ export default function Swap() {
               </span>
             </div>
             <div className="flex justify-between text-gray-500 dark:text-gray-400">
-              <span>Auto-refresh in</span>
-              <span className="font-medium text-gray-900 dark:text-white">{refreshCountdown}s</span>
+              <span>{dataSaver ? 'Data saver: tap refresh for a new quote' : 'Auto-refresh in'}</span>
+              {!dataSaver && <span className="font-medium text-gray-900 dark:text-white">{refreshCountdown}s</span>}
             </div>
             <div className="h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
               <div className="h-full bg-primary-500 transition-all" style={{ width: `${progressPct}%` }} />
@@ -405,6 +413,7 @@ export default function Swap() {
         <button
           type="submit"
           disabled={!quote || submitting || !isValidAmount(sellAmount)}
+          data-testid="swap-submit"
           className="w-full py-3 rounded-xl bg-primary-500 text-white font-semibold hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           {submitting ? 'Swapping…' : confirmOpen ? 'Confirm swap' : 'Review swap'}
@@ -413,7 +422,10 @@ export default function Swap() {
 
       {/* Confirmation / result */}
       {result && (
-        <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-4 text-sm space-y-1.5">
+        <div
+          className="bg-green-500/10 border border-green-500/20 rounded-xl p-4 text-sm space-y-1.5"
+          data-testid="swap-success"
+        >
           <div className="flex items-center gap-2 text-green-600 dark:text-green-400 font-medium">
             <CheckCircle2 size={16} /> Swap executed
           </div>

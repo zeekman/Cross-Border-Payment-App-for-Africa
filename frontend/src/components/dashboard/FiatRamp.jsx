@@ -18,7 +18,7 @@ export default function FiatRamp({ t, anchorLoading, anchorAction, handleAnchorA
             )}
           </div>
           <span className="font-semibold text-green-600 dark:text-green-400">
-            {t('dashboard.add_money') || 'Add Money'}
+            {t('dashboard.add_money', 'Add Money')}
           </span>
         </button>
         <button
@@ -34,7 +34,7 @@ export default function FiatRamp({ t, anchorLoading, anchorAction, handleAnchorA
             )}
           </div>
           <span className="font-semibold text-blue-600 dark:text-blue-400">
-            {t('dashboard.withdraw') || 'Withdraw'}
+            {t('dashboard.withdraw', 'Withdraw')}
           </span>
         </button>
       </div>

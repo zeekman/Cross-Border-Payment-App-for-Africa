@@ -1,82 +1,39 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  FALLBACK_XLM_FIAT_RATES,
-  buildCurrencies,
-  convertFromXLM as convertFromXLMUtil,
-} from '../utils/currency';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { buildCurrencies, convertFromXLM as convert } from '../utils/currency';
 import api from '../utils/api';
 import { useVisibleInterval } from './useVisibleInterval';
+import { useDataSaver, DATA_SAVER_RATES_INTERVAL_MS } from '../context/DataSaverContext';
 
-const PRICES_PATH = '/prices/xlm';
 const TTL_MS = 60_000;
-const LS_KEY = 'afripay_xlm_fiat_rates_v1';
 
-function mapPricesPayload(data) {
-  const r = data?.rates;
-  if (!r || typeof r.USD !== 'number') return null;
-  return {
-    USD: r.USD,
-    NGN: typeof r.NGN === 'number' ? r.NGN : FALLBACK_XLM_FIAT_RATES.NGN,
-    GHS: typeof r.GHS === 'number' ? r.GHS : FALLBACK_XLM_FIAT_RATES.GHS,
-    KES: typeof r.KES === 'number' ? r.KES : FALLBACK_XLM_FIAT_RATES.KES,
-  };
-}
-
-function readStoredRates() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return null;
-    const { rates: r, updatedAt } = JSON.parse(raw);
-    if (!r || typeof r.USD !== 'number') return null;
-    return {
-      rates: {
-        USD: r.USD,
-        NGN: r.NGN ?? FALLBACK_XLM_FIAT_RATES.NGN,
-        GHS: r.GHS ?? FALLBACK_XLM_FIAT_RATES.GHS,
-        KES: r.KES ?? FALLBACK_XLM_FIAT_RATES.KES,
-      },
-      updatedAt: typeof updatedAt === 'number' ? updatedAt : 0,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function persistRates(rates) {
-  try {
-    localStorage.setItem(
-      LS_KEY,
-      JSON.stringify({ rates, updatedAt: Date.now() })
-    );
-  } catch {
-    /* ignore quota / private mode */
-  }
-}
-
-function mergeWithFallback(partial) {
-  return { ...FALLBACK_XLM_FIAT_RATES, ...partial };
+function parseRates(data) {
+  if (!data?.rates || data.stale) return null;
+  const entries = Object.entries(data.rates).filter(([, v]) => Number.isFinite(v) && v > 0);
+  return entries.length ? Object.fromEntries(entries) : null;
 }
 
 /**
- * Live XLM fiat rates from the backend `/prices/xlm` endpoint, 60s TTL +
- * localStorage fallback (`usingApproximateRates` is true while on fallback).
+ * Supported currencies and live XLM rates. When rates are missing or stale,
+ * `rates` is empty and conversions return null rather than an invented value.
  */
 export function useExchangeRates() {
+  const { dataSaver } = useDataSaver();
+  const ttl = dataSaver ? DATA_SAVER_RATES_INTERVAL_MS : TTL_MS;
+  const ttlRef = useRef(ttl);
+  ttlRef.current = ttl;
   const stored = readStoredRates();
   const initialRates = mergeWithFallback(stored?.rates ?? {});
 
   const [rates, setRates] = useState(initialRates);
   const [usingApproximateRates, setUsingApproximateRates] = useState(true);
+  const [rates, setRates] = useState({});
+  const [supported, setSupported] = useState(null);
   const [error, setError] = useState(null);
-
-  const lastGoodRef = useRef(initialRates);
-  const fetchedAtRef = useRef(
-    stored && Date.now() - stored.updatedAt < TTL_MS ? stored.updatedAt : 0
-  );
+  const ratesAt = useRef(0);
 
   const fetchRates = useCallback(async () => {
     const now = Date.now();
-    if (fetchedAtRef.current && now - fetchedAtRef.current < TTL_MS) {
+    if (fetchedAtRef.current && now - fetchedAtRef.current < ttlRef.current) {
       setRates(lastGoodRef.current);
       setUsingApproximateRates(false);
       setError(null);
@@ -84,44 +41,41 @@ export function useExchangeRates() {
     }
 
     try {
-      const res = await api.get(PRICES_PATH);
-      const mapped = mapPricesPayload(res.data);
-      if (!mapped) throw new Error('Invalid price payload');
-
-      lastGoodRef.current = mapped;
-      fetchedAtRef.current = Date.now();
-      persistRates(mapped);
-      setRates(mapped);
-      setUsingApproximateRates(false);
+      const parsed = parseRates((await api.get('/prices/xlm'))?.data);
+      if (!parsed) throw new Error('Rates unavailable');
+      ratesAt.current = Date.now();
+      setRates(parsed);
       setError(null);
     } catch (e) {
-      const fallback = lastGoodRef.current;
-      setRates(fallback);
-      setUsingApproximateRates(true);
+      // Keep rates through one missed refresh, then treat them as stale.
+      if (Date.now() - ratesAt.current > 2 * TTL_MS) setRates({});
       setError(e?.message || 'Failed to refresh rates');
     }
   }, []);
 
   useEffect(() => {
     fetchRates();
+    (async () => {
+      try {
+        const data = (await api.get('/prices/currencies'))?.data;
+        const list = Array.isArray(data) ? data : data?.currencies;
+        if (Array.isArray(list)) setSupported(list);
+      } catch {
+        // Fall back to whichever currencies have a live rate.
+      }
+    })();
   }, [fetchRates]);
 
   // Refresh on a timer, but not while the tab is hidden (and straight away on return).
+  // FE-204: every 10 minutes in data saver mode.
+  useVisibleInterval(fetchRates, ttl);
   useVisibleInterval(fetchRates, TTL_MS);
 
-  const convertFromXLM = useCallback(
-    (xlmAmount, targetCurrency) =>
-      convertFromXLMUtil(xlmAmount, targetCurrency, rates),
-    [rates]
+  const convertFromXLM = useCallback((amount, target) => convert(amount, target, rates), [rates]);
+  const currencies = useMemo(
+    () => buildCurrencies(supported || Object.keys(rates), rates),
+    [supported, rates]
   );
 
-  const currencies = buildCurrencies(rates);
-
-  return {
-    rates,
-    currencies,
-    convertFromXLM,
-    usingApproximateRates,
-    error,
-  };
+  return { rates, currencies, convertFromXLM, usingApproximateRates: Object.keys(rates).length === 0, error };
 }

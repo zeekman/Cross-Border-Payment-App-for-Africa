@@ -75,3 +75,16 @@ export const explorerTxUrl = (hash) =>
 /** Stellar Expert URL for an account address on the configured network. */
 export const explorerAccountUrl = (address) =>
   `https://stellar.expert/explorer/${NETWORK_LABEL}/account/${address}`;
+
+/** Deployed contracts whose pause/upgrade status is surfaced to users. */
+export const CONTRACT_IDS = {
+  escrow: process.env.REACT_APP_ESCROW_CONTRACT_ID,
+  agentEscrow: process.env.REACT_APP_AGENT_ESCROW_CONTRACT_ID,
+  savingsVault: process.env.REACT_APP_SAVINGS_VAULT_CONTRACT_ID,
+  recurringPayments: process.env.REACT_APP_RECURRING_PAYMENTS_CONTRACT_ID,
+};
+
+/** Where pending contract upgrades are described. */
+export const RELEASE_NOTES_URL =
+  process.env.REACT_APP_RELEASE_NOTES_URL ||
+  'https://github.com/zeekman/Cross-Border-Payment-App-for-Africa/releases';

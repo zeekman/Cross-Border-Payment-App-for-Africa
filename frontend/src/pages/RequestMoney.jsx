@@ -32,7 +32,7 @@ function MyRequests() {
       setItems(data.requests);
       setTotal(data.total);
     } catch {
-      toast.error(t('request.error') || 'Failed to load requests');
+      toast.error(t('request.error', 'Failed to load requests'));
     } finally {
       setLoading(false);
     }
@@ -56,10 +56,11 @@ function MyRequests() {
   const cancelRequest = async (id) => {
     try {
       await api.delete(`/payment-requests/${id}`);
-      toast.success('Request cancelled');
+      toast.success(t('request.cancelled') || 'Request cancelled');
       load();
     } catch (err) {
       toast.error(apiErrorMessage(err));
+      toast.error(err.response?.data?.error || t('request.cancel_error') || 'Failed to cancel request');
     }
   };
 
@@ -136,7 +137,7 @@ export default function RequestMoney() {
   const handleCreate = async (e) => {
     e.preventDefault();
     if (!form.amount || parseFloat(form.amount) <= 0) {
-      toast.error(t('request.invalid_amount') || 'Invalid amount');
+      toast.error(t('request.invalid_amount', 'Invalid amount'));
       return;
     }
 
@@ -149,9 +150,10 @@ export default function RequestMoney() {
       });
       setPaymentLink(res.data.paymentLink);
       setRequestDetails({ id: res.data.id, amount: res.data.amount, asset: res.data.asset });
-      toast.success(t('request.created') || 'Payment request created');
+      toast.success(t('request.created', 'Payment request created'));
     } catch (err) {
       toast.error(apiErrorMessage(err));
+      toast.error(err.response?.data?.error || t('request.error', 'Failed to create request'));
     } finally {
       setLoading(false);
     }
@@ -164,7 +166,7 @@ export default function RequestMoney() {
       toast.success(t('common.copied'));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error('Failed to copy link');
+      toast.error(t('request.copy_error') || 'Failed to copy link');
     }
   };
 
@@ -172,10 +174,10 @@ export default function RequestMoney() {
     try {
       await navigator.clipboard.writeText(paymentLink);
       setCopiedDeep(true);
-      toast.success('Deep link copied');
+      toast.success(t('request.deep_link_copied') || 'Deep link copied');
       setTimeout(() => setCopiedDeep(false), 2000);
     } catch {
-      toast.error('Failed to copy deep link');
+      toast.error(t('request.deep_link_copy_error') || 'Failed to copy deep link');
     }
   };
 
@@ -201,10 +203,10 @@ export default function RequestMoney() {
         <ArrowLeft size={18} /> {t('common.back')}
       </button>
 
-      <h2 className="text-2xl font-bold text-white mb-6">{t('request.title') || 'Request Payment'}</h2>
+      <h2 className="text-2xl font-bold text-white mb-6">{t('request.title', 'Request Payment')}</h2>
 
       <div className="flex gap-2 mb-6" role="tablist">
-        {[['new', t('request.title') || 'New request'], ['mine', 'My requests']].map(([key, label]) => (
+        {[['new', t('request.title', 'New request')], ['mine', 'My requests']].map(([key, label]) => (
           <button
             key={key}
             role="tab"
@@ -266,14 +268,14 @@ export default function RequestMoney() {
             {loading ? (
               <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" role="status" aria-label="Loading" />
             ) : (
-              <><Send size={18} /> {t('request.create') || 'Create Request'}</>
+              <><Send size={18} /> {t('request.create', 'Create Request')}</>
             )}
           </button>
         </form>
       ) : (
         <div className="space-y-4">
           <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4">
-            <p className="text-green-400 font-semibold text-sm">{t('request.success') || 'Payment request created!'}</p>
+            <p className="text-green-400 font-semibold text-sm">{t('request.success', 'Payment request created!')}</p>
           </div>
 
           <div className="bg-gray-900 rounded-xl p-4 border border-primary-500/30">
@@ -317,7 +319,7 @@ export default function RequestMoney() {
             onClick={() => { setPaymentLink(''); setRequestDetails(null); setForm({ amount: '', asset: 'XLM', memo: '' }); }}
             className="w-full text-gray-400 hover:text-white text-sm py-2 transition-colors"
           >
-            {t('request.create_another') || 'Create Another'}
+            {t('request.create_another', 'Create Another')}
           </button>
         </div>
       ))}

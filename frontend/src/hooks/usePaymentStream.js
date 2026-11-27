@@ -35,7 +35,7 @@ export const CONNECTION_STATE = {
  *   disconnect: Function
  * }}
  */
-export function usePaymentStream(publicKey, onPayment) {
+export function usePaymentStream(publicKey, onPayment, { enabled = true } = {}) {
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [error, setError] = useState(null);
@@ -144,7 +144,12 @@ export function usePaymentStream(publicKey, onPayment) {
 
   useEffect(() => {
     mountedRef.current = true;
-    if (!publicKey) return undefined;
+    // FE-204: data saver mode keeps the SSE stream closed (refresh on demand instead).
+    if (!publicKey || !enabled) {
+      setIsConnected(false);
+      setIsReconnecting(false);
+      return undefined;
+    }
     lastCursorRef.current = 'now';
     reconnectAttemptsRef.current = 0;
     connect();
@@ -153,11 +158,11 @@ export function usePaymentStream(publicKey, onPayment) {
       clearReconnectTimer();
       closeStream();
     };
-  }, [publicKey, connect, clearReconnectTimer, closeStream]);
+  }, [publicKey, enabled, connect, clearReconnectTimer, closeStream]);
 
   // Resume stream when the browser comes back online
   useEffect(() => {
-    const handleOnline = () => { if (publicKey && !isConnected) reconnect(); };
+    const handleOnline = () => { if (publicKey && enabled && !isConnected) reconnect(); };
     const handleOffline = () => { if (mountedRef.current) setIsConnected(false); };
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -165,7 +170,7 @@ export function usePaymentStream(publicKey, onPayment) {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [publicKey, isConnected, reconnect]);
+  }, [publicKey, enabled, isConnected, reconnect]);
 
   return { isConnected, isReconnecting, error, reconnect, disconnect,
     connectionState: isConnected

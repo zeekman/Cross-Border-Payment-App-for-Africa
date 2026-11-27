@@ -1,8 +1,9 @@
 import { Send, Download, RefreshCw, Plus } from 'lucide-react';
 import { TransactionRowSkeleton } from '../../components/Skeleton';
 import { truncateAddress } from '../../utils/currency';
+import { fiatValueForTx, fiatTooltip } from '../../utils/fxSnapshot';
 
-export default function RecentTransactions({ navigate, t, activeWalletId, transactions, txError, loading, refreshing, anchorLoading, transactionsError, loadDashboard, handleAnchorAction }) {
+export default function RecentTransactions({ navigate, t, displayCurrency, rates, activeWalletId, transactions, txError, loading, refreshing, anchorLoading, transactionsError, loadDashboard, handleAnchorAction }) {
   return (
     <>
       {/* Recent transactions */}
@@ -73,9 +74,11 @@ export default function RecentTransactions({ navigate, t, activeWalletId, transa
         ) : (
           <div className="space-y-2">
             {transactions.map((tx) => (
-              <div
+              <button
+                type="button"
                 key={tx.id}
-                className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-3 flex items-center gap-3 shadow-sm"
+                onClick={() => navigate(`/history/${tx.id}`)}
+                className="w-full text-left bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-3 flex items-center gap-3 shadow-sm hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
               >
                 <div
                   className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
@@ -120,8 +123,17 @@ export default function RecentTransactions({ navigate, t, activeWalletId, transa
                 >
                   {tx.direction === 'sent' ? '-' : '+'}
                   {tx.amount} {tx.asset}
+                  {(() => {
+                    const fiat = fiatValueForTx(tx, displayCurrency, rates);
+                    if (!fiat) return null;
+                    return (
+                      <span className="block text-[11px] font-normal text-gray-500 text-right" title={fiatTooltip(fiat, displayCurrency)}>
+                        ≈ {fiat.formatted} {fiat.atSendTime ? 'at time of transfer' : "at today's rate"}
+                      </span>
+                    );
+                  })()}
                 </span>
-              </div>
+              </button>
             ))}
           </div>
         )}

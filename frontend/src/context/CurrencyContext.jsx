@@ -1,9 +1,10 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
+import { defaultCurrency } from '../utils/currency';
+import { useAuth } from './AuthContext';
 
 const STORAGE_KEY = 'afripay_display_currency';
-const VALID_CODES = ['XLM', 'USD', 'NGN', 'GHS', 'KES'];
-const DEFAULT = 'USD';
+const isCode = (v) => /^[A-Z0-9]{3,12}$/.test(v || '');
 
 /**
  * Reads the persisted display-currency preference.
@@ -17,9 +18,9 @@ const DEFAULT = 'USD';
 function readStored() {
   try {
     const v = localStorage.getItem(STORAGE_KEY);
-    return { value: VALID_CODES.includes(v) ? v : DEFAULT, error: false };
+    return { value: isCode(v) ? v : null, error: false };
   } catch {
-    return { value: DEFAULT, error: true };
+    return { value: null, error: true };
   }
 }
 
@@ -27,19 +28,22 @@ const CurrencyContext = createContext(null);
 
 export function CurrencyProvider({ children }) {
   const [stored] = useState(readStored);
-  const [displayCurrency, setDisplayCurrency] = useState(stored.value);
+  const user = useAuth()?.user;
+  const [chosen, setDisplayCurrency] = useState(stored.value);
+  const fallback = defaultCurrency(user?.kyc_country || user?.country_code);
+  const displayCurrency = chosen || fallback;
 
   // Fallback UX: the initial state already reads the persisted value on first
   // render (so there is no flash of the default currency), but if storage
   // couldn't be read we surface a warning instead of failing silently.
   useEffect(() => {
     if (stored.error) {
-      toast.error("Couldn't load your saved display currency. Showing USD.");
+      toast.error("Couldn't load your saved display currency. Using the default.");
     }
   }, [stored.error]);
 
   const setAndPersist = (code) => {
-    const safe = VALID_CODES.includes(code) ? code : DEFAULT;
+    const safe = isCode(code) ? code : fallback;
     try {
       localStorage.setItem(STORAGE_KEY, safe);
     } catch {

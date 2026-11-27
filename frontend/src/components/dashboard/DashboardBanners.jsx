@@ -1,12 +1,18 @@
 import { IS_TESTNET } from '../../config/network';
+import useContractStates from '../../hooks/useContractStates';
+import ContractStatusBanners from '../ContractStatusBanners';
 import { Download, FlaskConical, Clock, Mail, Bell, X } from 'lucide-react';
 import InstallAppBanner from './InstallAppBanner';
 
+const CONTRACTS = ['escrow', 'agentEscrow', 'savingsVault', 'recurringPayments'];
+
 export default function DashboardBanners({ user, pushLoading, pushSubscribe, showPushBanner, dismissPushBanner, funding, queueCount, isOnline, showEmailBanner, setShowEmailBanner, isConnected, isReconnecting, streamError, loadDashboard, fundWallet, accountExists, showFundWalletButton }) {
+  const { states: contractStates } = useContractStates(CONTRACTS);
   return (
     <>
       {/* Install prompt (FE-213) */}
       <InstallAppBanner user={user} />
+      <ContractStatusBanners states={contractStates} showPaused={false} />
 
       {/* Testnet banner */}
       {IS_TESTNET && (

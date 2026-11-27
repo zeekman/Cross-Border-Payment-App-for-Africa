@@ -15,6 +15,7 @@ import { getQueueCountForUser } from '../utils/offlineDB';
 import { IS_TESTNET } from '../config/network';
 import { safeAnchorUrl } from '../utils/anchorUrl';
 import { apiErrorMessage } from '../utils/apiError';
+import { useDataSaver } from '../context/DataSaverContext';
 
 
 function normalizeWalletsResponse(data) {
@@ -77,8 +78,8 @@ export function useDashboard() {
   const [copied, setCopied] = useState(false);
   const { displayCurrency: selectedCurrency, setDisplayCurrency: setSelectedCurrency } = useCurrency();
   const [funding, setFunding] = useState(false);
-  const [anchorLoading, setAnchorLoading] = useState(false);
-  const [anchorAction, setAnchorAction] = useState(null);
+  const [anchorLoading] = useState(false);
+  const [anchorAction] = useState(null);
   const [balanceIncreased, setBalanceIncreased] = useState(false);
   const [fromCache, setFromCache] = useState(false);
   const [showZeroBalances, setShowZeroBalances] = useState(false);
@@ -86,6 +87,7 @@ export function useDashboard() {
   const [transactionsError, setTransactionsError] = useState(false);
   const [queueCount, setQueueCount] = useState(0);
   const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
+  const { dataSaver } = useDataSaver();
   const { isOnline } = useOnlineStatus();
 
   // Email verification banner state (issue #479)
@@ -123,7 +125,7 @@ export function useDashboard() {
     isConnected,
     isReconnecting,
     error: streamError,
-  } = usePaymentStream(wallet?.public_key, handlePayment);
+  } = usePaymentStream(wallet?.public_key, handlePayment, { enabled: !dataSaver });
 
   const loadDashboard = useCallback(async (isRefresh = false) => {
     // Initial load shows full skeleton; manual refresh shows spinner on button only
@@ -288,6 +290,7 @@ export function useDashboard() {
       setAnchorAction(null);
     }
   };
+  const handleAnchorAction = (action) => navigate(`/ramp?type=${action}`);
 
   const handleCreateWallet = async (e) => {
     e.preventDefault();
@@ -326,7 +329,9 @@ export function useDashboard() {
   const displayBalance =
     selectedCurrency === 'XLM'
       ? selectedAssetBalance
-      : convertFromXLM(xlmBalance, selectedCurrency);
+      : currencies.some((c) => c.code === selectedCurrency) || selectedCurrency.length === 3
+        ? convertFromXLM(xlmBalance, selectedCurrency)
+        : selectedAssetBalance;
   const walletUnavailable = !loading && walletError && !wallet;
 
   const {
@@ -387,9 +392,7 @@ export function useDashboard() {
     funding,
     setFunding,
     anchorLoading,
-    setAnchorLoading,
     anchorAction,
-    setAnchorAction,
     balanceIncreased,
     setBalanceIncreased,
     fromCache,

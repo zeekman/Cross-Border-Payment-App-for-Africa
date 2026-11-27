@@ -5,6 +5,7 @@ import { AuthProvider, useAuth, logoutState } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
 import { CurrencyProvider } from "./context/CurrencyContext";
 import { WalletProvider } from "./context/WalletContext";
+import { DataSaverProvider } from "./context/DataSaverContext";
 import OfflineBanner from "./components/OfflineBanner";
 
 import Welcome from "./pages/Welcome";
@@ -21,6 +22,7 @@ import SaveMoney from "./pages/SaveMoney";
 import RequestMoney from "./pages/RequestMoney";
 import ScheduledPayments from "./pages/ScheduledPayments";
 import TransactionHistory from "./pages/TransactionHistory";
+import TransactionDetail from "./pages/TransactionDetail";
 import Profile from "./pages/Profile";
 import KYCVerification from "./pages/KYCVerification";
 import BusinessSettings from "./pages/BusinessSettings";
@@ -28,6 +30,7 @@ import Webhooks from "./pages/Webhooks";
 import Referrals from "./pages/Referrals";
 import Sessions from "./pages/Sessions";
 import Escrow from "./pages/Escrow";
+import SupportTicket from "./pages/SupportTicket";
 import NotFound from "./pages/NotFound";
 import Layout from "./components/Layout";
 import AppLock from "./components/AppLock";
@@ -36,6 +39,7 @@ import UpdateBanner from "./components/UpdateBanner";
 
 // Code-split large pages
 const Analytics = React.lazy(() => import("./pages/Analytics"));
+const Ramp = React.lazy(() => import("./pages/Ramp"));
 const Swap = React.lazy(() => import("./pages/Swap"));
 const BatchPayment = React.lazy(() => import("./pages/BatchPayment"));
 const AdminDashboard = React.lazy(() => import("./pages/AdminDashboard"));
@@ -161,12 +165,15 @@ function AppRoutes() {
           <Route path="request" element={<RequestMoney />} />
           <Route path="scheduled" element={<ScheduledPayments />} />
           <Route path="history" element={<TransactionHistory />} />
+          <Route path="history/:id" element={<TransactionDetail />} />
           <Route path="analytics" element={<Suspense fallback={<LoadingFallback />}><Analytics /></Suspense>} />
           <Route path="profile" element={<Profile />} />
+          <Route path="support/:id" element={<SupportTicket />} />
           <Route path="sessions" element={<Sessions />} />
           <Route path="kyc" element={<KYCVerification />} />
           <Route path="webhooks" element={<Webhooks />} />
           <Route path="business" element={<BusinessSettings />} />
+          <Route path="ramp" element={<Suspense fallback={<LoadingFallback />}><Ramp /></Suspense>} />
           <Route path="swap" element={<Suspense fallback={<LoadingFallback />}><Swap /></Suspense>} />
           <Route path="referrals" element={<Referrals />} />
           <Route path="escrow" element={<Escrow />} />
@@ -194,6 +201,7 @@ export default function App() {
         <ThemeProvider>
           <CurrencyProvider>
           <WalletProvider>
+          <DataSaverProvider>
           <BrowserRouter>
             <Toaster
               position="top-center"
@@ -211,6 +219,7 @@ export default function App() {
             <OfflineBanner />
             <UpdateBanner />
           </BrowserRouter>
+          </DataSaverProvider>
           </WalletProvider>
           </CurrencyProvider>
         </ThemeProvider>

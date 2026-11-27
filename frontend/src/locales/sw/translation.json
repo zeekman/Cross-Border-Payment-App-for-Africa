@@ -1,4 +1,52 @@
 {
+  "paymentRequest": {
+    "requestedBy": "Imeombwa na",
+    "unknown": "Mwombaji asiyejulikana",
+    "verified": "Amethibitishwa",
+    "memberSince": "Mwanachama tangu {{date}}",
+    "expiresIn": "Inaisha baada ya {{time}}",
+    "notContact": "Hujawahi kumlipa mtu huyu. Lipa maombi ya watu unaowajua tu.",
+    "cancelled": "Ombi hili la malipo limeghairiwa.",
+    "unavailable": "Ombi la malipo halipatikani"
+  },
+  "pinPolicy": {
+    "repeated": "PIN zenye tarakimu zinazojirudia ni rahisi kukisia",
+    "sequential": "Epuka mfuatano kama 1234",
+    "common": "PIN hii inatumika sana",
+    "personal": "Epuka mwaka au tarehe yako ya kuzaliwa",
+    "sixDigits": "PIN za tarakimu 6 ni ngumu zaidi kukisia"
+  },
+  "contractStatus": {
+    "names": {
+      "escrow": "escrow",
+      "agentEscrow": "escrow ya wakala",
+      "savingsVault": "hazina ya akiba",
+      "recurringPayments": "malipo ya kujirudia"
+    },
+    "paused": {
+      "escrow": "Kuunda escrow kumesitishwa kwa muda kwa matengenezo. Escrow zilizopo bado zinaweza kughairiwa au kuachiliwa.",
+      "agentEscrow": "Kuunda escrow ya wakala kumesitishwa kwa muda kwa matengenezo. Escrow zilizopo bado zinaweza kughairiwa au kuachiliwa.",
+      "savingsVault": "Kuweka akiba kumesitishwa kwa muda kwa matengenezo. Akiba iliyopo bado inaweza kutolewa ikifunguliwa.",
+      "recurringPayments": "Kuunda malipo yaliyopangwa kumesitishwa kwa muda kwa matengenezo. Yaliyopo bado yanaweza kughairiwa."
+    },
+    "upgrade": "Sasisho la mkataba wa {{contract}} limepangwa {{eta}}.",
+    "upgradeNoEta": "Sasisho la mkataba wa {{contract}} linasubiri.",
+    "releaseNotes": "Maelezo ya toleo",
+    "exit": "Toa au ghairi",
+    "dismiss": "Ondoa"
+  },
+  "webhookVerify": {
+    "title": "Thibitisha sahihi",
+    "eventId": "Kitambulisho cha kudumu cha tukio; hutumika tena kwenye majaribio.",
+    "deliveryId": "Kitambulisho cha kipekee cha kila jaribio.",
+    "timestamp": "Muda wa Unix, kwa sekunde, wa kutia sahihi.",
+    "signature": "HMAC-SHA256 ya \"timestamp.body\", kwa muundo t=<timestamp>,v1=<signature>. Kunaweza kuwa na v1 zaidi ya moja siri inapobadilishwa.",
+    "tolerance": "Kataa ujumbe ambao muda wake unatofautiana na saa yako kwa zaidi ya dakika 5.",
+    "dedupe": "Hifadhi kila X-AfriPay-Event-Id na upuuze matukio uliyokwisha kuchakata.",
+    "copy": "Nakili msimbo",
+    "requestHeaders": "Vichwa vya ombi",
+    "headersUnavailable": "Vichwa havikurekodiwa kwa jaribio hili."
+  },
   "common": {
     "offline_cached": "Uko nje ya mtandao — inaonyesha data iliyohifadhiwa",
     "back": "Rudi",
@@ -41,7 +89,11 @@
     "have_account": "Una akaunti tayari?",
     "sign_in": "Ingia",
     "success": "Akaunti imefunguliwa! Pochi yako iko tayari.",
-    "error": "Usajili umeshindwa"
+    "error": "Usajili umeshindwa",
+    "toast_success": "Akaunti imefunguliwa! Pochi yako iko tayari.",
+    "toast_error": "Usajili umeshindwa",
+    "toast_phone_verified": "Nambari ya simu imethibitishwa kwa mafanikio!",
+    "toast_phone_verify_failed": "Imeshindwa kuthibitisha nambari ya simu"
   },
   "login": {
     "title": "Karibu tena",
@@ -70,7 +122,9 @@
     "reset_success_toast": "Nenosiri limebadilishwa. Unaweza kuingia sasa.",
     "back_to_login": "Rudi kuingia",
     "missing_token": "Kiungo si halali. Omba kipya kutoka ukurasa wa kuingia.",
-    "error_generic": "Kuna hitilafu. Jaribu tena."
+    "error_generic": "Kuna hitilafu. Jaribu tena.",
+    "toast_success": "Nenosiri limebadilishwa. Unaweza kuingia sasa.",
+    "toast_error": "Imeshindwa kuweka upya nenosiri. Jaribu tena."
   },
   "dashboard": {
     "greeting": "Habari,",
@@ -144,7 +198,12 @@
     "success": "Malipo yametumwa!",
     "error": "Muamala umeshindwa",
     "qr_unsupported_uri": "Kodi hii ya QR ni ombi la muamala, si ombi la malipo. Kodi za QR za malipo pekee ndizo zinazotumika.",
-    "qr_prefilled": "Maelezo ya malipo yamejazwa kutoka kodi ya QR — tafadhali kagua kabla ya kutuma."
+    "qr_prefilled": "Maelezo ya malipo yamejazwa kutoka kodi ya QR — tafadhali kagua kabla ya kutuma.",
+    "toast_success": "Malipo yametumwa kwa mafanikio!",
+    "toast_error": "Malipo yameshindwa. Tafadhali jaribu tena.",
+    "toast_invalid_amount": "Weka kiasi halali chenye hadi nafasi 7 za desimali",
+    "toast_invalid_address": "Weka anwani halali ya Stellar",
+    "toast_insufficient_balance": "Salio halitoshi kwa muamala huu"
   },
   "auth": {
     "setup_pin_title": "Weka PIN ya Muamala",
@@ -173,7 +232,12 @@
     "subtitle": "Shiriki anwani yako ya pochi au msimbo wa QR kupokea malipo",
     "address_label": "Anwani Yako ya Pochi ya Stellar",
     "warning": "Tuma XLM au mali za Stellar pekee kwenye anwani hii",
-    "address_copied": "Anwani imenakiliwa!"
+    "address_copied": "Anwani imenakiliwa!",
+    "toast_copied": "Anwani imenakiliwa kwenye ubao wa kunakili!",
+    "toast_copy_failed": "Imeshindwa kunakili anwani",
+    "toast_share_success": "Kiungo cha malipo kimeshirikiwa!",
+    "toast_share_failed": "Imeshindwa kushiriki kiungo cha malipo",
+    "toast_qr_generated": "Msimbo wa QR umezalishwa kwa mafanikio"
   },
   "history": {
     "title": "Historia",
@@ -190,7 +254,9 @@
     "asset_all": "Mali zote",
     "load_error": "Imeshindwa kupakia miamala",
     "load_more": "Pakia zaidi",
-    "loading_more": "Inapakia..."
+    "loading_more": "Inapakia...",
+    "toast_export_success": "Miamala imehamishwa kwa mafanikio",
+    "toast_export_error": "Imeshindwa kuhamisha miamala"
   },
   "profile": {
     "title": "Wasifu",
@@ -202,7 +268,12 @@
     "contact_added": "Mawasiliano yameongezwa",
     "contact_error": "Imeshindwa kuongeza mawasiliano",
     "address_copied": "Anwani imenakiliwa!",
-    "language": "Lugha"
+    "language": "Lugha",
+    "toast_contact_added": "Mawasiliano yameongezwa kwa mafanikio",
+    "toast_contact_error": "Imeshindwa kuongeza mawasiliano",
+    "toast_contact_removed": "Mawasiliano yameondolewa",
+    "toast_contact_remove_error": "Imeshindwa kuondoa mawasiliano",
+    "toast_profile_updated": "Wasifu umesasishwa kwa mafanikio"
   },
   "contacts_import": {
     "open": "Ingiza CSV",
@@ -623,6 +694,60 @@
       "type_confirm": "Andika {{word}} kuthibitisha",
       "confirm_button": "Futa akaunti yangu kabisa",
       "done": "Akaunti yako imefutwa."
+  "request": {
+    "invalid_amount": "Tafadhali weka kiasi sahihi",
+    "success": "Ombi la malipo limeundwa!",
+    "create_another": "Unda jingine"
+  },
+  "scheduled": {
+    "error": "Hitilafu imetokea kwenye malipo yaliyopangwa",
+    "invalid": "Tafadhali weka kiasi sahihi",
+    "list_view": "Mwonekano wa orodha",
+    "calendar_view": "Mwonekano wa kalenda"
+  },
+  "support": {
+    "title": "Tiketi za Msaada",
+    "new": "Tiketi Mpya",
+    "select_type": "Chagua aina ya tatizo",
+    "transaction": "Muamala",
+    "no_transaction": "Hakuna muamala (si lazima)",
+    "selected_transaction": "Muamala uliochaguliwa",
+    "describe": "Eleza tatizo lako...",
+    "attachments_hint": "Viambatisho (hadi faili 3 za PNG, JPEG au PDF, MB 5 kila moja)",
+    "remove_file": "Ondoa {{name}}",
+    "too_many_files": "Unaweza kuambatisha faili 3 tu",
+    "invalid_file_type": "Faili za PNG, JPEG na PDF pekee zinaruhusiwa",
+    "file_too_large": "Kila faili lisizidi MB 5",
+    "created": "Tiketi imeundwa",
+    "create_error": "Imeshindwa kuunda tiketi",
+    "submit": "Tuma",
+    "submitting": "Inatuma…",
+    "none": "Hakuna tiketi bado.",
+    "unread": "Majibu {{count}} hayajasomwa",
+    "report_problem": "Ripoti tatizo",
+    "load_error": "Imeshindwa kupakia tiketi hii.",
+    "retry": "Jaribu tena",
+    "view_transaction": "Tazama muamala",
+    "attachment_error": "Imeshindwa kufungua kiambatisho",
+    "no_messages": "Hakuna majibu bado",
+    "team": "Msaada",
+    "you": "Wewe",
+    "reply_placeholder": "Andika jibu…",
+    "send_reply": "Tuma jibu",
+    "reply_error": "Imeshindwa kutuma jibu",
+    "types": {
+      "wrong_address": "Anwani si sahihi",
+      "wrong_amount": "Kiasi si sahihi",
+      "failed_deducted": "Imeshindwa lakini imekatwa",
+      "other": "Nyingine"
+    },
+    "statuses": {
+      "open": "Wazi",
+      "in_progress": "Inashughulikiwa",
+      "waiting_on_user": "Inakusubiri",
+      "resolved": "Imetatuliwa",
+      "closed": "Imefungwa"
     }
   }
 }
+    "csvErrors_one": "Hitilafu {{count}}
