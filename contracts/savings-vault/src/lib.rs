@@ -3,6 +3,10 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Sym
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
+#[cfg(test)]
+mod test_events;
 
 mod errors;
 pub use errors::Error;

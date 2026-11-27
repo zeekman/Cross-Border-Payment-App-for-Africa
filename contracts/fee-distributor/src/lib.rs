@@ -41,6 +41,8 @@ use soroban_sdk::{
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

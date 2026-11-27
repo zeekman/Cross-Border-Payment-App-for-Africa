@@ -43,6 +43,8 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Sym
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_events;
 
 // ── TTL policy ────────────────────────────────────────────────────────────────
 //
