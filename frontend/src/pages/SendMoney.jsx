@@ -30,6 +30,7 @@ import PushNotificationPrompt from '../components/PushNotificationPrompt';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import { usePaymentStream, CONNECTION_STATE } from '../hooks/usePaymentStream';
 import { useVisibleInterval } from '../hooks/useVisibleInterval';
+import { createIdempotencyKey, postWithIdempotency } from '../utils/idempotency';
 
 // Lazy-loaded so react-qr-reader and @ledgerhq/* stay out of the main bundle.
 const QRScanner = lazy(() => import('../components/QRScanner'));
@@ -171,6 +172,7 @@ export default function SendMoney() {
   const [showLedgerModal, setShowLedgerModal] = useState(false);
   const [unsignedXDR, setUnsignedXDR] = useState(null);
   const [ledgerNetworkPassphrase, setLedgerNetworkPassphrase] = useState(null);
+  const ledgerIdempotencyRef = useRef(null);
 
   const isCrossAsset = usePathPayment && form.destination_asset && form.destination_asset !== form.asset;
 
@@ -704,18 +706,24 @@ export default function SendMoney() {
   const handleLedgerSigned = async (signedXDR) => {
     setShowLedgerModal(false);
     setLoading(true);
+    if (!ledgerIdempotencyRef.current || ledgerIdempotencyRef.current.xdr !== signedXDR) {
+      ledgerIdempotencyRef.current = { xdr: signedXDR, key: createIdempotencyKey() };
+    }
     try {
-      await api.post('/ledger/submit', {
+      await postWithIdempotency('/ledger/submit', {
         xdr: signedXDR,
         recipient_address: form.recipient_address,
         amount: parseFloat(form.amount),
         asset: form.asset,
         wallet_id: selectedWallet?.id || undefined,
-      }, { headers: { 'Idempotency-Key': crypto.randomUUID() } });
+      }, ledgerIdempotencyRef.current.key.get());
+      ledgerIdempotencyRef.current.key.reset();
+      ledgerIdempotencyRef.current = null;
       toast.success('Payment sent via Ledger!');
       resetForm();
       navigate('/dashboard');
     } catch (err) {
+      ledgerIdempotencyRef.current?.key.resetUnlessLost(err);
       toast.error(err.response?.data?.error || 'Failed to submit Ledger transaction');
     } finally {
       setLoading(false);

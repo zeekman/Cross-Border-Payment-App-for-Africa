@@ -168,9 +168,13 @@ export default function Escrow() {
     if (!stepUpToken) return;
     setLoading(true);
     try {
-      const { data } = await postWithIdempotency('/escrow/create', createForm, createKeyRef.current.get());
+      const { data } = await postWithIdempotency(
+        '/escrow/create',
+        createForm,
+        createKeyRef.current.get(),
+        { headers: { 'X-Step-Up-Token': stepUpToken } },
+      );
       createKeyRef.current.reset();
-      const { data } = await api.post('/escrow/create', createForm, { headers: { 'X-Step-Up-Token': stepUpToken } });
       toast.success('Escrow created successfully');
       setCreateForm({ agent_wallet: '', recipient_wallet: '', amount: '', asset: 'USDC' });
       setActiveTab('list');

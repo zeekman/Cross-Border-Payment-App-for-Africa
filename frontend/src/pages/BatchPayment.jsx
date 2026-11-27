@@ -181,6 +181,7 @@ export default function BatchPayment() {
   const batchId = results?.batch_id ?? null;
   const stoppedRef = useRef(false);
   const idemRef = useRef(createIdempotencyKey());
+  const retryIdemRefs = useRef(new Map());
 
   // Poll for per-row statuses after batch submission
   const pollOnce = useCallback(async () => {
@@ -235,20 +236,28 @@ export default function BatchPayment() {
       const stepUpToken = await requestStepUp();
       if (!stepUpToken) return;
       setRowStatuses((prev) => ({ ...prev, [rowIndex]: { ...prev[rowIndex], status: 'pending' } }));
-      const { data } = await api.post(
+      let retryIdem = retryIdemRefs.current.get(rowIndex);
+      if (!retryIdem) {
+        retryIdem = createIdempotencyKey();
+        retryIdemRefs.current.set(rowIndex, retryIdem);
+      }
+      const { data } = await postWithIdempotency(
         '/payments/batch',
         {
           asset,
           recipients: [{ recipient_address: row.recipient_address, amount: parseFloat(row.amount) }],
         },
-        { headers: { 'X-Step-Up-Token': stepUpToken, 'Idempotency-Key': crypto.randomUUID() } }
+        retryIdem.get(),
+        { headers: { 'X-Step-Up-Token': stepUpToken } },
       );
+      retryIdem.reset();
       const r = data.results?.[0] || {};
       setRowStatuses((prev) => ({
         ...prev,
         [rowIndex]: { status: r.status || 'failed', error: r.error, txHash: r.tx_hash || data.transaction?.tx_hash },
       }));
     } catch (err) {
+      retryIdemRefs.current.get(rowIndex)?.resetUnlessLost(err);
       const r = err.response?.data?.results?.[0];
       setRowStatuses((prev) => ({
         ...prev,
@@ -376,6 +385,7 @@ export default function BatchPayment() {
       const stepUpToken = await requestStepUp();
       if (!stepUpToken) return;
       setSubmitting(true);
+      retryIdemRefs.current.clear();
 
       const payload = {
         asset,
