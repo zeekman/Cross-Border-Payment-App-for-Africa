@@ -1,4 +1,4 @@
-import { StrKey } from '@stellar/stellar-sdk';
+import { MuxedAccount, StrKey } from '@stellar/stellar-sdk';
 
 /**
  * Validate a Stellar recipient address. Returns an error message string,
@@ -9,11 +9,10 @@ import { StrKey } from '@stellar/stellar-sdk';
  *   instead of surfacing as a backend 400 after amount/review/PIN steps.
  * - Federation addresses (`name*domain`) are accepted on format only;
  *   they resolve to a public key server-side.
- * - Muxed `M…` addresses are rejected: the backend payment flow has no
- *   muxed support, so accepting them here would only move the failure
- *   to a backend 400.
+ * - Muxed `M…` addresses (SEP-23) are checksum-validated. Flows without
+ *   muxed support pass `{ allowMuxed: false }`.
  */
-export function validateStellarAddress(address) {
+export function validateStellarAddress(address, { allowMuxed = true } = {}) {
   if (!address || typeof address !== 'string') {
     return 'Address is required';
   }
@@ -39,7 +38,8 @@ export function validateStellarAddress(address) {
   }
 
   if (trimmed.startsWith('M')) {
-    return 'Muxed (M…) addresses are not supported yet';
+    if (!allowMuxed) return 'Muxed (M…) addresses are not supported yet';
+    return StrKey.isValidMed25519PublicKey(trimmed) ? null : 'Invalid muxed (M…) address — check for typos';
   }
 
   if (!StrKey.isValidEd25519PublicKey(trimmed)) {
@@ -48,6 +48,12 @@ export function validateStellarAddress(address) {
   return null;
 }
 
+/** Base `G…` account and id of a muxed address, or null if it isn't one. */
+export function parseMuxedAddress(address) {
+  const value = (address || '').trim();
+  if (!StrKey.isValidMed25519PublicKey(value)) return null;
+  const muxed = MuxedAccount.fromAddress(value, '0');
+  return { baseAccount: muxed.baseAccount().accountId(), id: muxed.id() };
 /**
  * Address-poisoning guard. Attackers send dust from addresses that share
  * the first and last characters of an address the victim uses often, so a

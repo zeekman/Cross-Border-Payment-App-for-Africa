@@ -46,7 +46,7 @@ export default function ScheduledPayments() {
     e.preventDefault();
 
     // Validate Stellar address format
-    const addressError = validateStellarAddress(form.recipient_wallet);
+    const addressError = validateStellarAddress(form.recipient_wallet, { allowMuxed: false });
     if (addressError) {
       toast.error(addressError);
       return;
